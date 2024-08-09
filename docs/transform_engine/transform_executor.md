@@ -4,6 +4,9 @@ The transform executor is the portion of the model responsible for actually exec
 need to deal elegantly with ideas such as decoding the transform directive into pieces,
 and actually executing the transform sequence.
 
+It should be noted that the objective of the entire process is to get the right transform
+directive to pair with the transform execute to solve the problem.
+
 ## Transform Executor Contract:
 
 ### Input Contract for the Transform Executor
@@ -111,3 +114,7 @@ We incorporate mask logic where appropriate.
 *TODO: Flesh out mask logic better.
 
 We will call this the Latent Decoder Transformer
+
+### Outcome
+
+At the end of the whole shebang, we get the outputs and the auxilary responses as returns.
