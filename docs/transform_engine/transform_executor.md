@@ -1,120 +1,80 @@
 # What is the transform executor?
 
-The transform executor is the portion of the model responsible for actually executing a transform. It will
-need to deal elegantly with ideas such as decoding the transform directive into pieces,
-and actually executing the transform sequence.
+The transform executor is responsible, perhaps unsurprisingly, for executing a transform
+against an input latent state. 
 
-It should be noted that the objective of the entire process is to get the right transform
-directive to pair with the transform execute to solve the problem.
+It should be noted that the objective of the entire process is to get the right set of transform context
+to pair with the transform executor in order to be able to generally handle the various problems that 
+exist. 
 
-## Transform Executor Contract:
+# Transform Executor Contract:
 
-### Input Contract for the Transform Executor
+## Input Contract:
 
-The transform engine will be fed by the following parameters. 
+The TransformExecutor will be fed the latent_targets, the transform_seed, and 
+the cognative context. Lets talk about each of these groups.
 
-**start_condition**
+latent_targets:
+  * These are latent space representations of what we want to start at and then sequentially generate
+  * latent_representation: (batch x collection x sequence x ...)
+  * latent_mask: (batch x collection x sequence)
 
-This is the starting condition of the latent space. Given the format of the problem,
-the main restriction on the latent space is a need to support sequences. It will likely
-consist of
+cognitive_context:
+  * This contains seed and context information for the transform
+  * seed: A place to start generating at. Shape (batch x 2*embedding)
+  * context: The context we have observed. Shape (batch x N x embedding)
+  * context_mask: The mask. Shape (batch x N x embedding)
 
-* latent_space: Shape (batch x collection x 1 x  ...)
-* latent_mask: Shape (batch x collection x 1)
+## Output Contract for the TransformExecutor
 
-Where the 1 is the first input into the sequence. 
+The TransformExecutor agrees to provide you with the transform result,
+the process costs, and the context activity scores.
 
-**targets**
+The transform results are
+exactly what they say on the tin: what we got back when running the transform. It
+has the same shape as the input. In our application, we will discard the last element.
 
-This is the target latent space we are looking to reproduce. It again consists of a 
-masked collection of sequences. 
+transform_results:
+* The output from applying the transform directive
+* latent_representation: Shape (batch x collection x sequence x ...)
+* latent_mask: The mask. Shape (batch x collection x sequence)
 
-* latent_space: Shape (batch x collection x sequence x ...)
-* mask: (batch x collection x sequence). 1 when we should include.
+The process costs represent, basically, how difficult the transform computation proved to be. 
+Adaptive Computation Time is used to allow multiple steps to occur against a single input. This
+has the side effect of leaving us with a nice cumulative probability score we can use to rate
+how difficult the job was. Details on how that is constructed will come later.
 
-**transform_directive**
+We also collect information on how much of the context we have to access in order to get the
+job done. This is tracked using a specialized version of cross attention which uses sigmoid
+rather than softmax units. 
 
-The transform directive is the last parameter we need. It has pieces
+process_costs:
+* cost_steps: 
+  * How many ACT steps were needed. 
+  * Differentiable
+  * Shape (batch x collection).
+* cost_context_access:
+  * How many piece of context were needed to get the job done.
+  * Less is better.
+  * Shape (batch x collection x sequence)
+  * Derived from the entropy of the attention weights distribution.
 
-* instructions: Shape (batch x instructions x embedding)
-* return_probabilities: Shape (batch x instructions)
+This information will be available to the cognition model, and will also influence final loss
+scores.
 
-### Output contract for the Transform Executor
+## Logic Contract for the Transform Executor
 
-The transform executor pledges to return
+The Transform Executor must execute certain pieces, in a certain order, in order
+to produce sane results.
 
-* latent_result: The results from executing the transform directive
-* mask: The mask, with 1 meaning active. 
+### Generative Process. 
 
-### Logic contract for the Transform Executor
+The generative process begins by concatenating the seed onto the embedding dimension of the 
+latent representation. This is then fed into a specialized decoder along with the context, and an ACT
+process runs until all sequence dimensions are halted. Once complete, the embeddings are projected
+back down to the proper size and this will form the latent_output.
 
-The Transform Executor pledges that it will:
-
-* create an auxiliary set of results, then map them into the output slots.
-* utilize teacher forcing during training with sequence targets or self-excitation during 
-  evalutation with sequence outputs.
-* provide an output consisting of the decoded latent space and the mask to go along with it.
-
-## Implementing a Transform Executor
-
-### Decoding a transform_directive
-
-Decoding a particular transform directive operates sort of like decoding a sequence of sentences
-using an NLP transformer, and letting it see the previous sentences by cross-attention, but also summarizing
-each sentence into a single vector. We use a specialized multidimensional transformer for this task.
-
-The first thing that needs clarifying is what exactly is fed into this specialized transformer. Consider
-a "starting_state". This state will consist of the previously generated output - an additional complication
-is that during training this state will be teacher-forced, while in evaluation it is self-excited. 
-
-From here, we concatenate the instruction for the step onto the state, then feed this into the multidimensional 
-transformer,  along with a context tensor consisting of the auxiliary responses from previous generation cycles.
-We get out the next auxiliary response, which will have dimensions reduced back down to standard. To this
-we concatenate the NEXT instruction, and feed it back in again. We end up being able to generate a sequence
-of embeddings - the new auxiliary responses - for this cycle. 
-
-A given cycle ends once we have exhausted all response probability for the output slot. Once this is done,
-we perform a weighted sum of the relevant probability and add it to the output slot. We also concatenate
-the auxiliary responses for the cycle onto the context auxiliary responses. 
-
-This repeats until all instructions are decoded. At this time, a mask is created based on the last
-completely decoded output slot, with 1 indicating generated and 0 not. The outputs, and the mask,
-are then returned.
-
-### The specific implementation
-
-Everything up to this point has been generic to tensors of shape 
-(batch x collection x sequence x ... x embedding). Now we need to get into the specifics
-of what kind of tensors we are working with. The latent space we work with
-will be represented as:
-
-* latent_space: (batch x collection x sequence x  num_embeddings x embedding_dim)
-* latent_mask: (batch x collection x sequence)
-
-This means for every batch, and collection in each batch, we will need to figure out
-how to integrate decoding the transform terms into a task of generating sequences of 
-latent spaces.
-
-### Multidimensional Transformers
-
-A specialized transformer will be used for the task. The transformer will be 
-capable of either performing attention looking along the sequence dimension,
-in a masked generative self_attention manner, or along the num_dimension dimension, in
-which case it operates in a encoding mode with no masks. 
-
-This is followed up by a feedforward layer like normal. It will allows processing of
-an entire latent space as a task consisting of generating successive latent space outputs
-from the input. These steps act as the "self_attention" behavior of a decoder.
-
-In addition to all this, however, there is also a context cross-attention parameter.
-The purpose of this will be described shortly.
-
-We incorporate mask logic where appropriate. 
-
-*TODO: Flesh out mask logic better.
-
-We will call this the Latent Decoder Transformer
-
-### Outcome
-
-At the end of the whole shebang, we get the outputs and the auxilary responses as returns.
+Along the way, we collect two things. These are the halting probabilities in each ACT step, and the
+the context access requirements in terms of the attention weights. We use the inverted cumulative probabilities
+to add together the context access requirements from each layer. This gets us the cost_steps,
+and cost_context. 

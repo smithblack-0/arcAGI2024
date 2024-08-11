@@ -1,15 +1,17 @@
 
+# What is a transform directive?
+
+At the heart of everything occuring in the model is the transform directive. This 
+is a differentiable, reusable instruction on what to do in order to solve the problem. It
+is created in one layer, and applied in another layer.
 
 
 ## What is it actually?
 
 What a transform directive actually is is two tensors. These are the *instructions* tensor,
-and the *result_key* tensor.
+and the *result_weights* tensor.
 
 **instruction tensor**
-
-
-* (batch x instructions x embedding)
 
 This tensor is like a sequence of instructions that are being issued. Think along the lines
 of a CPU instruction pipeline. Complicating things, teacher forcing and other concerns means
