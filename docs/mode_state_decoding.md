@@ -117,8 +117,9 @@ with primary generation, these are updated respectively as follows:
 mode_control_embeddings = concat([mode_control_embeddings, mode_control_embedding])
 mode_start_position = concat([mode_start_position, generation_index])
 sequence_length = sequence_length + CHANGE
-
 ## Mode Shape Contract
+
+### Mode Shape Creator Contract
 
 The Mode Shape contract is required to be fufilled by all supported modes. It consists
 of defining some information needed to generate positional encodings.
@@ -162,7 +163,7 @@ distribution.
 It is expected that shape information will be available in the training data and can be made to
 interact with the distribution to train the model.
 
-## Mode Shape Embedding Contract
+### Mode Shape Embedding Contract
 
 **Purpose**
 
@@ -178,6 +179,11 @@ during training
 
 *pos_embedding:
   * Shape: (... x Embedding)
+
+## Mode Encode/Decode Contract
+
+For the mode Encode/Decode contract, we need to provide a means to create embeddings
+when operating in a particular mode, and a means to produce 
 
 ## Positional Encodings
 
@@ -237,12 +243,19 @@ One additional detail that has not been brought up yet is how to stop generation
 predict the probability of stopping using the mode_control_embedding anytime a new one is generated,
 and include in the training data practice on when to generate this token
 
-## Training 
+# Training 
 
 Lets now talk about training the whole mess. This design can, basically, be trained by 
 a fairly standard suite of next embedding prediction with teacher forcing.
 
-### Format
+Lets assume we are working with some sort of input encoding, dealt with seperately but perhaps
+encoded similarly, and an output target which consists of T pieces of multimodal information that can
+be flattened into embeddings. We wish to create training targets that can used to train the model
+using this information. How do we do it?
+
+## Data
+
+
 
 We suppose that we wish to encode as targets a sequence of modal information. It might consist
 of text then images then text, or text then text, or whatever.
