@@ -135,8 +135,10 @@ multiple distributions during training.
 
 - **Targets**: The targets are $N$-dimensional, specifying the intended output
   for each region. Modes must define how they use the combined logit space,
-  and any unused targets are set to a negative value to indicate
-  inactivity.
+  and any unused targets are set to a negative value to indicate lack of use.
+  Additionally, targets will be integers representing position in the logit
+  space based on the schema, and should be defined since the start of the 
+  logit not the start of the schema zone.
 
 - **Contract for Modes**: Each mode must specify how it uses the shared logit
   space, detailing how $K$ entries are allocated and how to handle unused
@@ -192,6 +194,62 @@ loss function uses this information to evaluate the appropriate loss.
 This structured approach ensures each data piece is consistently transformed
 into tensors, facilitating efficient model training and adaptability across
 various modes.
+## Shared Logit Space
+
+The shared logit space is a unified tensor structure produced by a single
+feedforward network. It allows the model to efficiently handle multiple modes
+by organizing logits into a common framework, facilitating seamless integration
+of various distributions.
+
+### Schema
+
+A schema defines how the shared logit space is partitioned for each mode and
+distribution. It allocates specific portions of the logits to different tasks,
+ensuring that each mode uses the logits appropriately according to its needs.
+
+- **Definition**: Each mode has a schema specifying the allocation of logits
+  across its various dimensions and functions.
+- **Function**: Schemas dictate which parts of the logit space correspond to
+  specific outputs, enabling the model to differentiate between modes and
+  ensure the correct logits are used for each task.
+- **Example**: The schema $[3, 4]$ indicates that the first 3 elements of the
+  logit tensor are dedicated to the first target (i.e., a distribution with 3
+  probabilities), and the next 4 are for the second target.
+
+### Targets
+
+Targets represent the desired outcomes for each mode and are used during
+training to guide the model's predictions.
+
+- **Definition**: Targets are $N$-dimensional vectors indicating the expected
+  outputs for a given input. They are defined with respect to the start of the
+  schema. For instance, with schema $[3, 4]$, you could specify a target within
+  the second distribution as $[*, 4]$, but not $[*, 7]$.
+- **Mapping**: Targets are mapped onto the shared logit space by adjusting
+  them to reflect absolute positions from the start of the logit. This involves
+  adding the cumulative schema length to the targets.
+
+### Mapping Targets onto the Shared Logit Space
+
+Here’s an example of converting targets to logit targets and back:
+
+1. **Schema**: Consider schema $[4, 7]$ with targets $[3, 5]$.
+   
+2. **Cumulative Schema Length**: Calculate the cumulative schema length tensor:
+   - $[0, 4]$
+
+3. **Mapping to Logit Space**: Add the cumulative schema length to the targets:
+   - Targets in logit space: $[3 + 0, 5 + 4] = [3, 9]$
+
+4. **Reverse Mapping**: Subtract the cumulative schema length to revert to the
+   original target format:
+   - Reverted targets: $[3, 9] - [0, 4] = [3, 5]$
+
+This mapping process ensures that targets are aligned correctly with their
+respective logits, allowing efficient loss calculation and sampling across
+modes.
+
+
 ## The Generative Process
 
 The Block Multimodal Encoding system uses a cyclical process to generate data,
@@ -217,6 +275,17 @@ evaluation.
    positional encodings based on the block's location and shape, injecting
    context as needed. There must be an established mode, shape, and sequence
    before the context for payload processing can be defined.
+
+### Model switching
+
+One possible feature that could be explored, though is not initially planned
+to be, is model switching. It is entirely possible to specify different
+models for the different generative context, and simply let them see the same
+shared embeddings.
+
+This might be explored later. The design for it is quite clear, however. You
+simply need a Mode Control model, and N different mode generation models. You perform
+header generation under mode control, then switch to the payload generation models.
 
 ### Logits and Probability Distributions
 
@@ -265,11 +334,76 @@ make informed decisions and injecting context to ensure consistency across
 various modes and structures. The cycle repeats, continually selecting new
 modes and processing subsequent blocks.
 
+##
+
 ## Losses and Distributions
 
-We use a 
+In this model, distributions are defined in a unique way, leveraging a shared
+logit space across different modes. This section describes the mechanisms
+employed to handle loss calculation and sampling efficiently.
 
-TODO: 
+### Schema Tensor
 
-* Talk about calculating cross entropy with a multidistribution logit.
-* Talk about sampling with a multidistribution logit.
+The Schema Tensor defines the loss schema for each embedding and allocates
+portions of the shared logit space to various distributions.
+
+- **Purpose**: Indicates how the logits are partitioned for each distribution.
+- **Structure**: Each distribution has its own schema tensor.
+- **Shape**: $(\text{batch} \times \text{distributions} \times D)$, where $D$
+  represents the dimensionality of the schema.
+
+### Associated Schema Tensor
+
+The Associated Schema Tensor links a schema with every embedding generated by
+the model.
+
+- **Purpose**: Provides a mapping from embeddings to their corresponding loss
+  schemas.
+- **Generation**: Created by using the Loss Select Tensor to sample vectors
+  along the distribution dimensions.
+
+### Distribution Mask
+
+The Distribution Mask separates the different distributions into distinct
+tensor indices, enabling the application of cross-entropy and similar loss
+functions.
+
+- **Purpose**: Segments the shared logit space into target dimensions.
+- **Structure**: A sequence of repeated boolean values that demarcate logit
+  indices for each target dimension.
+
+For example, with a schema of $[3, 2]$ and $D=2$, the resulting tensor might
+look like this:
+
+$$
+\begin{align*}
+\text{[True, True, True, False, False],} \\
+\text{[False, False, False, True, True]}
+\end{align*}
+$$
+
+### Cross Entropy
+
+Cross entropy loss can be applied using the segmented logits, with some
+considerations:
+
+- **Label Smoothing**: Direct usage of label smoothing will not be effective. We will have
+  to figure out alternative math to add that back, that can be based on the logits available.
+- **Target Specification**: Define targets for each channel separately, 
+  ensuring alignment with the segmented logits. Then, add the cumulative
+  schema length to each target. For instance, with targets $[1, 1]$ and schema
+  $[3, 2]$, we end up with $[1+0, 1+3] = [1, 4]$.
+- Empty Targets: In the case of a target with no length in it's schema, it will be ignored.
+  That is, internally, a switch case ensures the loss contribution is zero.
+
+### Sampling
+
+Sampling from the model's outputs operates similarly to standard methods,
+leveraging the partitioned logit space:
+
+- **Method**: Sample from each individual target channel separately.
+- **Consistency**: This approach maintains consistency across modes by
+  respecting the segmentation of logits into distinct channels.
+- **Adjustment**: Once the targets are specified, we need to subtract the
+  cumulative schema lengths to revert to the original format.
+
