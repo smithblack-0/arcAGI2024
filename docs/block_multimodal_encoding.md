@@ -1,16 +1,45 @@
-# Block Multimodal Encoding
-
-TODO: Include section definitions
+# Block Multimodal Generation
 
 ## What is it?
 
-Block Multimodal Encoding is an encoding mechanism designed to represent
+Block Multimodal Generation is an generation mechanism designed to represent
 data across different modes within an encoding or decoding transformer-like
 context. This approach allows a single model to handle sequence-based
 multimodal data, accommodating various data types such as text, voice, or
 images.
 
+Multiple models will exist to handle the various modes of operation,
+each with their own specialized loss behavior, but also each capable
+of operating in a generative mode.
+
+However, each of these specialized models ALSO has the property of being
+able to read and write to the common context. The common context 
+is basically a chain of embeddings which catalogues everything
+that has been generated so far.
+
 It has been designed in response to the ARC-AGI challenge.
+
+## Common Context
+
+The common context is made up of generated "blocks" of content with specified
+shapes, and will generally be filled up with in some way information produced
+autoregressively, provided by the various models. These blocks are basically
+long sequences of embeddings, as might be seen in a transformer output. The
+content will be flat and should be viewed as accessible by cross attention.
+
+## Models
+
+Multiple models may coexist together, along with a central control model. 
+
+## Blocks and the Generative cycle
+
+
+
+The content will be flat and
+accessible by cross attention.
+## Models
+
+
 
 ## How does it work?
 
