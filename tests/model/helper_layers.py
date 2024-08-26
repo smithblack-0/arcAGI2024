@@ -1,9 +1,8 @@
 import unittest
 import torch
-from torch import nn
 import numpy as np
 
-from src.model.layers import sinusoidal_positional_encoding, eval_legendre, pope_positional_encoding, \
+from src.model.helper_layers import sinusoidal_positional_encoding, eval_legendre, pope_positional_encoding, \
     PositionalEncodings
 
 
@@ -122,3 +121,5 @@ class TestPositionalEncoding(unittest.TestCase):
 
         # Make encoding
         output = layer(mask)
+
+

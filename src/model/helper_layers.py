@@ -169,3 +169,4 @@ class PositionalEncodings(nn.Module):
         pos_encoding = torch.cat([pos_encoding, size_encoding], dim=-1)
         pos_encoding = pos_encoding * mask.unsqueeze(-1)
         return pos_encoding
+

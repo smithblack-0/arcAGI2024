@@ -1,6 +1,6 @@
 import unittest
 import torch
-from src.model.core_transformer import SchemaRegistry, LogitSeparator
+from src.model.schema import SchemaRegistry
 
 
 class TestSchemaTracker(unittest.TestCase):
@@ -107,38 +107,3 @@ class TestSchemaTracker(unittest.TestCase):
         expected_schemas = torch.tensor([[3, 2, 4], [5, 2, 0], [1, 1, 1]], dtype=torch.int64)
         self.assertTrue(torch.equal(schemas, expected_schemas))
 
-class TestLogitSeparator(unittest.TestCase):
-
-    def setUp(self):
-        self.logit_separator = LogitSeparator()
-
-    def test_compute_zone_edges_basic(self):
-        schemas = torch.tensor([[2, 3, 1], [1, 1, 2]])
-        expected_start = torch.tensor([[0, 2, 5], [0, 1, 2]])
-        expected_end = torch.tensor([[2, 5, 6], [1, 2, 4]])
-        start, end = self.logit_separator.compute_zone_edges(schemas)
-        self.assertTrue(torch.equal(start, expected_start), f"Expected start {expected_start}, but got {start}")
-        self.assertTrue(torch.equal(end, expected_end), f"Expected end {expected_end}, but got {end}")
-
-    def test_create_separation_mask(self):
-        schemas = torch.tensor([[2, 3, 1], [1, 1, 1]])
-        logits = torch.randn(2, 6)  # Random logits tensor just to match the shape
-        expected_mask = torch.tensor([
-            [[True, True, False, False, False, False], [False, False, True, True, True, False], [False, False, False, False, False, True]],
-            [[True, False, False, False, False, False], [False, True, False, False, False, False], [False, False, True, False, False, False]]
-        ])
-        separation_mask = self.logit_separator.create_separation_mask(schemas, logits)
-        self.assertTrue(torch.equal(separation_mask, expected_mask), f"Expected {expected_mask}, but got {separation_mask}")
-
-    def test_forward(self):
-        schemas = torch.tensor([[2, 3, 1], [1, 1, 2]])
-        logits = torch.tensor([
-            [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
-            [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
-        ])
-        expected_output = torch.tensor([
-            [[0.1, 0.2, 0.0, 0.0, 0.0, 0.0], [0.3, 0.4, 0.5, 0.0, 0.0, 0.0], [0.6, 0.0, 0.0, 0.0, 0.0, 0.0]],
-            [[0.1, 0.0, 0.0, 0.0, 0.0, 0.0], [0.2, 0.0, 0.0, 0.0, 0.0, 0.0], [0.3, 0.4, 0.0, 0.0, 0.0, 0.0]]
-        ])
-        output = self.logit_separator.forward(schemas, logits)
-        self.assertTrue(torch.equal(output, expected_output), f"Expected {expected_output}, but got {output}")

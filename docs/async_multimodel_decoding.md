@@ -251,7 +251,6 @@ data using the same control model
 
 Basically, already done. Reuse existing code from other project.
 
-
 ## Layers: Adapters
 
 Adapters are utilized in order to ensure compatibility between the generation
@@ -295,6 +294,234 @@ It is probably easiest to just feed the sequence integer, and shape integers,
 into a linear projection of context_dim shape. The bias would be sufficient 
 to encode the mode. However, more complicated options such as sinosoidal 
 positional encodings could also be explored.
+
+Care needs to be taken that the context embedding includes parameters that 
+can encode the MODE of operation. For a linear projection this will be handled
+nicely by the bias terms, but for a sinasoidal embedding a learnable parameter
+would be a better choice.
+
+### IOAdapter
+
+**Purpose**
+
+The IO adapter is responsible for knowing how to process a particular model's
+inputs into embeddings, and how to process output embeddings into distributions
+or samples. This defines the format of it. 
+
+There are plans to, for the ARC-AGI project, make only an integer, logit based
+adapter. We might also make an RGB capable version
+
+**Design**
+
+This layer itself is an abstract layer, that is not intended to be instanced
+directly. In fact, doing so should throw an error! 
+
+Instead, should subclass the layer, implement the abstract methods specified,
+and ensure it is registered to a mode of operation.
+
+#### method: setup
+
+**Purpose**
+
+Creates a new IO adapter instance bound to handle the given io config
+that is passed in. It is the builder for the layer. It is a class 
+method.
+
+**Accepts**
+
+config: [Dict[str, Any]]: 
+  * The config dictionary. Contains any provided config parameters.
+  * Will be specified in a config file elsewhere.
+
+**Returns**
+
+instance: An instance of the subclassed IOAdapter, setup for the
+specified mode.
+
+#### method: embed_input
+
+**Purpose**
+
+Convert an incoming collection of data with shape (batch, ..., channels) into a 
+set of embeddings of shape (batch, ..., embedding)
+
+**Accepts**
+
+* input: 
+  * A grid of batched data of shape (batch, ..., channels) or, in some circumstances,
+    (batch, ...). 
+
+**Returns**
+
+* embeddings:
+  * A grid of batched data of shape (batch, ..., embeddings)
+
+**Design**
+
+Depends on the kind of adapter we are working with. A adapter intepreting
+integers, such as tokens or arc-agi data, would be best handled by an
+embedding layer. 
+
+Meanwhile, something with more continous channels, like RGB image data, 
+might be better handled using a linear projection. 
+
+#### method: create_distribution
+
+**Purpose**
+
+Takes an incoming set of embeddings, and creates a tensor or tuple of tensors which
+represents the distribution being predicted. The "tuple of tensor" quantifier
+allows for the prediction of, for example, mixture of gaussian models.
+
+**Accepts**
+
+* embeddings:
+  * A tensor of data of shape (batch, ..., embedding)
+
+**Returns**
+
+One of a tensor of shape (batch, ...., something) or a tuple 
+of tensors with that shape. The important thing is it can be interpetated
+by the sampling mechanism and understood in terms of loss.
+
+**Design**
+
+Very much depends on how the model is attempting to function. For normal,
+vocabulary-based embedding projecting a logit is probably the way to go. 
+Unless I decide to pretrain on image data, this will be the ARC-AGI project.
+
+For some other problem spaces, however, such as RGB image data, the preferred 
+mechanism might instead involve a more complicated distribution. For instance,
+I think a set of three beta distributions in a mixture-of-beta model would be
+ideal for training RGB decoding.
+
+
+### IOAdapter: VocabularyIO
+
+**Purpose**
+
+A subclass of the IO adapter designed specifically 
+to work with vocabulary-based problems, such as text
+or some image problems.
+
+The implications of this are that the problem will have
+an embeddings vocabulary, and produce a predictive distribution
+using logits.
+
+It is also expected that there is no channels dimensions
+
+**Dependencies**
+
+* embeddings [nn.Embeddings]: The vocabulary embeddings layer
+* logits [nn.Linear]: The logit projection layer.
+
+**Design**
+
+Implement setup to use a "embedding_dim" term and a "vocabulary_size" term.
+Then have setup create and feed in the appropriate layers
+
+embed_input should just call the stored embedding layer, and create_distribution the
+stored logit layer.
+
+
+
+
+### SampingAdapter
+
+**Purpose**
+
+The sampling adapter is designed to contain the logic that is involved
+with sampling from any generated distribution in a central location, that
+keeps it separate and modular from the rest of the logic. 
+
+For the ARC-AGI design to work, sampling must be able to be performed 
+in a differentiable manner - something that ends up meaning that we need to
+use some of the differentiable sampling tricks that have been developed, and
+allow specification as a parameter
+
+**Accepts**
+
+* distribution_spec: 
+  * The tensor, or tuple of tensors, generated when we created our distribution
+  * Shapes for all start with (batch, ...)
+* temperature:
+  * The temperature exploratory control.
+  * Can be a float, or can be a tensor of shape (batch, ...)
+  * Should be between 0-1
+* gradient:
+  * Whether or not to sample while maintaing the ability to perform backpropogation
+  * When true, the differentiable sampling branch is chosen.
+  * When false, the normal sampling branch is chosen.
+
+**Returns**
+
+* predictions:
+  * Predictions based on the distribution
+  * If gradient is true, it is backprop compatible.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  
+
+### ModelAdapter
+
+** Purpose**
+
+The purpose of the model adapter is, perhaps unsuprisingly, to be a mechanism
+that allows the integration of a generative model within the broader framework
+with reference to a specific mode.
+
+The class is responsible for implementing several very important functions,
+and is prebuild with a specific design of model in mind. However, any model
+that fufills the same contract should, in theory, also be trainable
+using this mechanism.
+
+**Dependencies**
+
+IO:
+* embeddings [nn.Module]: 
+  * capable of performing the embedding process on a set of intgrid embeddings
+  * Make sure to perform any image patching here as well!
+  * After embedding, training targets had better match block shape!
+* distributions:
+  * Turns embeddings that are decoder output into predictive distributions
+  * 
+
+
+* decoder [nn.Module]: 
+  * 
+
 
 ### ModelAdapter
 

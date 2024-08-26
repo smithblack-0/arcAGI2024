@@ -169,3 +169,4 @@ make a careful, generalized function to perform this task.
 
 Performs cross entropy loss. Ignores unneeded dimensions. Incorporates label
 smoothing cleanly.
+
