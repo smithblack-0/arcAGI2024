@@ -4,7 +4,7 @@ from torch import nn
 from unittest.mock import MagicMock, patch
 from typing import Dict, Type, Any
 from src.model.adapters.io_adapters import IOAdapter, IORegistry, RMSImageIOAdapter, VocabularyIOAdapter, registry, \
-    LogitSeparator, ControllerIOAdapter
+    ControllerIOAdapter, LogitSeparator
 
 
 # Mock classes to use in the tests
@@ -85,23 +85,24 @@ class TestIORegistry(unittest.TestCase):
         self.assertEqual(adapter_instance.embedding_dim, 64)
         self.assertEqual(adapter_instance.vocabulary_size, 5000)
 
+        # Verify the adapter is in the registry's name list
+        self.assertIn("decorator_test_adapter", self.registry.names)
+
     def test_setup_with_missing_config(self):
         config_spec = {"embedding_dim": int, "vocabulary_size": int}
         self.registry.register("mock_adapter", config_spec, MockAdapter)
 
         # Missing 'vocabulary_size' in config should raise ValueError
-        with self.assertRaises(ValueError) as context:
+        with self.assertRaises(TypeError) as context:
             self.registry.setup("mock_adapter", {"embedding_dim": 128})
-        self.assertEqual(str(context.exception), "Missing required config element 'vocabulary_size'")
 
     def test_setup_with_wrong_type(self):
         config_spec = {"embedding_dim": int, "vocabulary_size": int}
         self.registry.register("mock_adapter", config_spec, MockAdapter)
 
         # Incorrect type for 'embedding_dim' should raise ValueError
-        with self.assertRaises(ValueError) as context:
+        with self.assertRaises(TypeError) as context:
             self.registry.setup("mock_adapter", {"embedding_dim": "128", "vocabulary_size": 10000})
-        self.assertEqual(str(context.exception), "Config element of name 'embedding_dim' was wrong type")
 
     def test_get_structure(self):
         config_spec = {"embedding_dim": int, "vocabulary_size": int}
@@ -112,11 +113,10 @@ class TestIORegistry(unittest.TestCase):
         self.assertEqual(structure, config_spec)
 
     def test_get_structure_invalid_name(self):
-        # Attempt to retrieve a non-existent adapter's structure should raise ValueError
-        with self.assertRaises(ValueError) as context:
+        # Attempt to retrieve a non-existent adapter's structure should raise KeyError
+        with self.assertRaises(KeyError) as context:
             self.registry.get_structure("non_existent_adapter")
-        self.assertEqual(str(context.exception),
-                         "No IO adapter of name 'non_existent_adapter' exists, cannot retrieve config structure")
+        self.assertIn("Io adapter of name 'non_existent_adapter' has not been registered", str(context.exception))
 
     def test_get_documentation(self):
         config_spec = {"embedding_dim": int, "vocabulary_size": int}
@@ -127,52 +127,102 @@ class TestIORegistry(unittest.TestCase):
         self.assertIn("This is a mock adapter for testing.", class_docstring)
 
     def test_get_documentation_invalid_name(self):
-        # Attempt to retrieve documentation for a non-existent adapter should raise ValueError
-        with self.assertRaises(ValueError) as context:
+        # Attempt to retrieve documentation for a non-existent adapter should raise KeyError
+        with self.assertRaises(KeyError) as context:
             self.registry.get_documentation("non_existent_adapter")
-        self.assertEqual(str(context.exception),
-                         "No IO adapter of name 'non_existent_adapter' exists, cannot retrieve adapter documentation")
+        self.assertIn("Io adapter of name 'non_existent_adapter' has not been registered", str(context.exception))
+
 
 # Unit and Integration Tests
-
 class TestVocabularyIOAdapter(unittest.TestCase):
 
     def setUp(self):
-        # Mocking the registry for testing
-        self.registry = IORegistry()
+        # Set up for each test
+        self.embedding_dim = 128
+        self.vocabulary_size = 10000
+        self.adapter_instance = VocabularyIOAdapter.setup(self.embedding_dim, self.vocabulary_size)
 
-    def test_setup(self):
-        # Test the setup function
+    def test_embed_input_with_weights_3d_tensor(self):
+        # Test the embed_input function with a 3D tensor and weights
+        batch_size = 2
+        seq_len = 4
+        vocab_size = self.vocabulary_size
+
+        # Create a 3D tensor for vocab indices
+        vocab_indices = torch.randint(0, vocab_size, (batch_size, seq_len, 3))
+
+        # Create a 3D tensor for probabilities corresponding to vocab_indices
+        probabilities = torch.rand(batch_size, seq_len, 3)
+
+        # Pass the tuple of vocab indices and probabilities to embed_input
+        embeddings = self.adapter_instance.embed_input((vocab_indices, probabilities))
+
+        # Check if the output embeddings have the correct shape
+        self.assertEqual(embeddings.shape, (batch_size, seq_len, self.embedding_dim))
+
+    def test_cross_batch_contamination(self):
         embedding_dim = 128
         vocabulary_size = 10000
 
+        # Set up the adapter
         adapter_instance = VocabularyIOAdapter.setup(embedding_dim, vocabulary_size)
 
-        # Ensure the adapter instance is properly initialized
-        self.assertIsInstance(adapter_instance, VocabularyIOAdapter)
-        self.assertIsInstance(adapter_instance.embeddings, nn.Embedding)
-        self.assertIsInstance(adapter_instance.logits, nn.Linear)
-        self.assertEqual(adapter_instance.embeddings.embedding_dim, embedding_dim)
-        self.assertEqual(adapter_instance.embeddings.num_embeddings, vocabulary_size)
-        self.assertEqual(adapter_instance.logits.in_features, embedding_dim)
-        self.assertEqual(adapter_instance.logits.out_features, vocabulary_size)
+        # Create two separate sample cases with a batch dimension of 1
+        sample_1 = torch.randint(0, vocabulary_size, (1, 10, 10))
+        sample_2 = torch.randint(0, vocabulary_size, (1, 10, 10))
 
-    def test_embed_input(self):
-        # Test the embed_input function
+        # Run the adapter individually on both samples
+        embedding_1 = adapter_instance.embed_input(sample_1)
+        embedding_2 = adapter_instance.embed_input(sample_2)
+
+        # Concatenate the two samples together along the batch dimension
+        batch_samples = torch.cat([sample_1, sample_2], dim=0)
+
+        # Run the adapter on the batch samples
+        batch_embeddings = adapter_instance.embed_input(batch_samples)
+
+        # Split the batch embeddings back into the individual samples
+        batch_embedding_1, batch_embedding_2 = batch_embeddings[0:1], batch_embeddings[1:2]
+
+        # Check that the embeddings produced in the batch match the individually produced embeddings
+        self.assertTrue(torch.equal(embedding_1, batch_embedding_1), "Cross-batch contamination detected in sample 1.")
+        self.assertTrue(torch.equal(embedding_2, batch_embedding_2), "Cross-batch contamination detected in sample 2.")
+
+    def test_cross_batch_contamination_with_weights(self):
         embedding_dim = 128
         vocabulary_size = 10000
 
+        # Set up the adapter
         adapter_instance = VocabularyIOAdapter.setup(embedding_dim, vocabulary_size)
 
-        # Create a mock input tensor
-        input_tensor = torch.randint(0, vocabulary_size, (2, 10))
+        # Create two separate sample cases with a batch dimension of 1 (with weights)
+        sample_1 = torch.randint(0, vocabulary_size, (1, 10, 10))
+        sample_2 = torch.randint(0, vocabulary_size, (1, 10, 10))
 
-        # Call embed_input
-        embeddings = adapter_instance.embed_input(input_tensor)
+        # Generate corresponding weights
+        weights_1 = torch.rand((1, 10, 10))
+        weights_2 = torch.rand((1, 10, 10))
 
-        # Check if embeddings are correct
-        self.assertEqual(embeddings.shape, (2, 10, embedding_dim))
+        # Run the adapter individually on both samples with weights
+        embedding_1_with_weights = adapter_instance.embed_input((sample_1, weights_1))
+        embedding_2_with_weights = adapter_instance.embed_input((sample_2, weights_2))
 
+        # Concatenate the samples and weights together along the batch dimension (with weights)
+        batch_samples_with_weights = torch.cat([sample_1, sample_2], dim=0)
+        batch_weights = torch.cat([weights_1, weights_2], dim=0)
+
+        # Run the adapter on the batch samples with weights
+        batch_embeddings_with_weights = adapter_instance.embed_input((batch_samples_with_weights, batch_weights))
+
+        # Split the batch embeddings back into the individual samples (with weights)
+        batch_embedding_1_with_weights, batch_embedding_2_with_weights = batch_embeddings_with_weights[
+                                                                         0:1], batch_embeddings_with_weights[1:2]
+
+        # Check that the embeddings produced in the batch match the individually produced embeddings (with weights)
+        self.assertTrue(torch.equal(embedding_1_with_weights, batch_embedding_1_with_weights),
+                        "Cross-batch contamination detected in sample 1 (with weights).")
+        self.assertTrue(torch.equal(embedding_2_with_weights, batch_embedding_2_with_weights),
+                        "Cross-batch contamination detected in sample 2 (with weights).")
     def test_create_distribution(self):
         # Test the create_distribution function
         embedding_dim = 128
@@ -414,3 +464,4 @@ class TestControllerIOAdapter(unittest.TestCase):
                 logit_size=invalid_logit_size,
                 schemas=self.schemas
             )
+

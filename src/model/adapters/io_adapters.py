@@ -17,8 +17,8 @@ import torch
 import warnings
 import inspect
 import textwrap
+from . import helper_utils
 from torch import nn
-from torch.nn import functional as F
 from abc import ABC, abstractmethod
 from typing import Dict, Type, Any, Callable, List, Tuple, Union, Optional
 
@@ -36,6 +36,17 @@ class IORegistry:
     @property
     def names(self)->List[str]:
         return list(self.setup_registry.keys())
+
+    def validate_io_adapter_registered(self, name: str):
+        """
+        Validates whether a particular IO adapter has
+        been registered. Raises an error if not available.
+        :param name: The name of the adapter to look for
+        :raises: KeyError, if the adapter has not been registered.
+        """
+        if name not in self.model_registry:
+            raise KeyError(f"Io adapter of name '{name}' has not been registered and cannot be manipulated.")
+
     def __init__(self):
         self.model_registry: Dict[str, IOAdapter] = {}
         self.setup_registry: Dict[str, Type[Any]] = {}
@@ -94,15 +105,10 @@ class IORegistry:
         :param config: The config for the name
         :return: An io adapter instance that has been setup
         """
-        if name not in self.setup_registry:
-            raise ValueError(f"No IO adapter of name '{name}' exists, cannot setup adapter")
-        expected_config = self.setup_registry[name]
-        for keyword in expected_config:
-            if keyword not in config:
-                raise ValueError(f"Missing required config element '{keyword}'")
-            if not isinstance(config[keyword], expected_config[keyword]):
-                raise ValueError(f"Config element of name '{keyword}' was wrong type")
 
+        self.validate_io_adapter_registered(name)
+        expected_config = self.setup_registry[name]
+        helper_utils.validate_config(config, expected_config)
         return self.model_registry[name].setup(**config)
 
     def get_structure(self, name)->Dict[str, Type]:
@@ -114,8 +120,7 @@ class IORegistry:
         :param name: The name of the given adapter
         :return: The config spec dictionary.
         """
-        if name not in self.setup_registry:
-            raise ValueError(f"No IO adapter of name '{name}' exists, cannot retrieve config structure")
+        self.validate_io_adapter_registered(name)
         return self.setup_registry[name]
     def get_documentation(self, name: str)->Tuple[str, str]:
         """
@@ -127,9 +132,7 @@ class IORegistry:
         :return: The class docstring
         :return: The setup docstring
         """
-        if name not in self.setup_registry:
-            raise ValueError(f"No IO adapter of name '{name}' exists, cannot retrieve adapter documentation")
-
+        self.validate_io_adapter_registered(name)
         subclass = self.model_registry[name]
         class_docstring = inspect.getdoc(subclass)
         setup_docstring = inspect.getdoc(subclass.setup)
@@ -240,8 +243,11 @@ class VocabularyIOAdapter(IOAdapter):
 
             # Add extra dimension for embedding bag to sum over,
             # then create per-element weights of 1
-            input_data = input_data.unsqueeze(-1)
-            return self.embedding_bag(input_data)
+            original_shape = input_data.shape
+            input_data = input_data.flatten().unsqueeze(-1)
+            output_data = self.embedding_bag(input_data)
+            output_data = output_data.unflatten(dim=0, sizes=original_shape)
+            return output_data
 
         if isinstance(input_data, tuple) and len(input_data) == 2:
             vocab_indices, probabilities = input_data
@@ -253,7 +259,17 @@ class VocabularyIOAdapter(IOAdapter):
                 """
                 msg = textwrap.dedent(msg)
                 raise ValueError(msg)
-            return self.embedding_bag(vocab_indices, per_sample_weights=probabilities)
+
+            # embedding bags only want to work with 2d tensors of
+            # batches then bags.
+            # Okay, we will GIVE them 2d tensors, then unflatten them!
+
+            original_shape = vocab_indices.shape[:-1]
+            vocab_indices = vocab_indices.flatten(0, -2)
+            probabilities = probabilities.flatten(0, -2)
+            outcome = self.embedding_bag(vocab_indices, per_sample_weights=probabilities)
+            return outcome.unflatten(dim=0, sizes=original_shape)
+
         raise ValueError(f"Unsupported input data: {input_data}")
 
     def create_distribution(self, embeddings: torch.Tensor, schema = None) -> torch.Tensor:
@@ -264,17 +280,6 @@ class VocabularyIOAdapter(IOAdapter):
         :return: A tensor of logits of shape (batch, ..., vocabulary_size).
         """
         return self.logits(embeddings)
-
-class FastVocabularyIOAdapter(IOAdapter):
-    """
-    The standard vocabulary IO adapter is designed to embed either
-    a tensor of integers, or a probability distribution. It has no
-    real ability to only process SOME embeddings.
-
-    This can be an issue. A vocabulary can end up thousands of terms
-    long, and most of those terms will never be used.
-
-    """
 
 @registry.register_decorator(name="rms_image_adapter",
                              config_spec={"input_channels" : int,
@@ -359,101 +364,12 @@ class RMSImageIOAdapter(IOAdapter):
 
         return output
 
-
-class LogitSeparator(nn.Module):
-    """
-    Separates logits in Shared Logit Space into their
-    per-dimension format.
-    """
-
-    def __init__(self):
-        super().__init__()
-    @staticmethod
-    def compute_zone_edges(schemas: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Computes the position at which a logit starts being associated
-        with a schema, and ends being associated with a schema.
-
-        :param schemas: The schemas tensor, of shape (..., D), where the integers
-                        along d indicate schema diemnsion assignment.
-        :return: start: The index at which the logits begin to be associated
-        with the given schema. (..., D)
-        """
-
-        # Figure out how much of the logit space has already
-        # been used up by the time we get to a given schema
-        # element.
-
-        start_of_zone = schemas.cumsum(dim=-1)
-        start_of_zone = start_of_zone.roll(1, dims=-1)
-        start_of_zone[..., 0] = 0
-
-        # Figure out when the logit zone ends
-
-        end_of_zone = start_of_zone + schemas
-
-        return start_of_zone, end_of_zone
-
-    @classmethod
-    def create_separation_mask(cls, schemas: torch.Tensor, logits: torch.Tensor)->torch.Tensor:
-        """
-        Creates a seperation mask capable of separating the logit
-        into per-dimension associations.
-
-        :param schemas: The per-logit schema assignment. (..., D) where D is dimensions
-        :param logit_length: The length of the logits.
-        :return: A tensor of shape (..., D, L)
-        """
-
-        # Get the zone edges
-
-        start_of_zone, end_of_zone = cls.compute_zone_edges(schemas)
-
-        # Assign true or false based on whether a particular index
-        # lies within an active schema zone.
-
-        logit_indices = torch.arange(logits.shape[-1])
-        while logit_indices.dim() < logits.dim():
-            logit_indices = logit_indices.unsqueeze(0)
-
-        # Unsqueeze for interaction
-        logit_indices = logit_indices.unsqueeze(-2)
-        start_of_zone = start_of_zone.unsqueeze(-1)
-        end_of_zone = end_of_zone.unsqueeze(-1)
-
-        # Create mask
-
-        mask = torch.logical_and(logit_indices >= start_of_zone, logit_indices < end_of_zone)
-        return mask
-
-    def forward(self, schemas: torch.Tensor, logits: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass, which actually takes the schemas and logits
-        :param schemas: A schema for each logit. Shape (..., D). D is dimensions
-        :param logits: A logit tensor. Shape (..., L). L is logit lenght.
-        :return: A tensor of shape (..., D, L). The logit has been broken up to
-                 associate portions with the relevant dimensions.
-        :return: A bool tensor of shape (..., D, L). The tensor indicates whether an element
-                 was not padding, with True meaning not padding.
-        """
-
-        # Compute separation mask.
-
-        separation_mask = self.create_separation_mask(schemas, logits)
-
-        # Multiply mask by logits to separate them
-
-        logits = logits.unsqueeze(-2) * separation_mask
-
-        # Sort logits so that nonzero values come first. This negates any
-        # need for mapping into or out of logit space outside this
-        # unit.
-
-        indices = torch.argsort(separation_mask, dim=-1, descending=True, stable=True)
-        logits = logits.gather(dim=-1, index=indices)
-
-        return logits, separation_mask
-
+setup_spec = {"embedding_dim" : int,
+              "logit_size" : int,
+              "schemas" : Dict[str, torch.Tensor]}
+@registry.register_decorator("controller_adapter",
+                             setup_spec
+                             )
 class ControllerIOAdapter(IOAdapter):
     """
     A subclass of IO adapter designed for interfacing
@@ -569,7 +485,7 @@ class ControllerIOAdapter(IOAdapter):
               refer to specific modes.
             * Shape (batch, items)
         :return: A distribution based on the logit placed in the specified
-                 schema distribution.
+                 schema distribution. The mask will be true only for
         """
 
         logits = self.logit_projector(embeddings)
@@ -577,3 +493,98 @@ class ControllerIOAdapter(IOAdapter):
         logits, mask = self.logit_separator(schemas, logits)
         return logits, mask
 
+
+class LogitSeparator(nn.Module):
+    """
+    Separates logits in Shared Logit Space into their
+    per-dimension format.
+    """
+
+    def __init__(self):
+        super().__init__()
+    @staticmethod
+    def compute_zone_edges(schemas: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Computes the position at which a logit starts being associated
+        with a schema, and ends being associated with a schema.
+
+        :param schemas: The schemas tensor, of shape (..., D), where the integers
+                        along d indicate schema diemnsion assignment.
+        :return: start: The index at which the logits begin to be associated
+        with the given schema. (..., D)
+        """
+
+        # Figure out how much of the logit space has already
+        # been used up by the time we get to a given schema
+        # element.
+
+        start_of_zone = schemas.cumsum(dim=-1)
+        start_of_zone = start_of_zone.roll(1, dims=-1)
+        start_of_zone[..., 0] = 0
+
+        # Figure out when the logit zone ends
+
+        end_of_zone = start_of_zone + schemas
+
+        return start_of_zone, end_of_zone
+
+    @classmethod
+    def create_separation_mask(cls, schemas: torch.Tensor, logits: torch.Tensor)->torch.Tensor:
+        """
+        Creates a seperation mask capable of separating the logit
+        into per-dimension associations.
+
+        :param schemas: The per-logit schema assignment. (..., D) where D is dimensions
+        :param logit_length: The length of the logits.
+        :return: A tensor of shape (..., D, L)
+        """
+
+        # Get the zone edges
+
+        start_of_zone, end_of_zone = cls.compute_zone_edges(schemas)
+
+        # Assign true or false based on whether a particular index
+        # lies within an active schema zone.
+
+        logit_indices = torch.arange(logits.shape[-1], device=logits.device)
+        while logit_indices.dim() < logits.dim():
+            logit_indices = logit_indices.unsqueeze(0)
+
+        # Unsqueeze for interaction
+        logit_indices = logit_indices.unsqueeze(-2)
+        start_of_zone = start_of_zone.unsqueeze(-1)
+        end_of_zone = end_of_zone.unsqueeze(-1)
+
+        # Create mask
+
+        mask = torch.logical_and(logit_indices >= start_of_zone, logit_indices < end_of_zone)
+        return mask
+
+    def forward(self, schemas: torch.Tensor, logits: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass, which actually takes the schemas and logits
+        :param schemas: A schema for each logit. Shape (..., D). D is dimensions
+        :param logits: A logit tensor. Shape (..., L). L is logit lenght.
+        :return: A tensor of shape (..., D, L). The logit has been broken up to
+                 associate portions with the relevant dimensions.
+        :return: A bool tensor of shape (..., D, L). The tensor indicates whether an element
+                 was not padding, with True meaning not padding.
+        """
+
+        # Compute separation mask.
+
+        separation_mask = self.create_separation_mask(schemas, logits)
+
+        # Multiply mask by logits to separate them
+
+        logits = logits.unsqueeze(-2) * separation_mask
+
+        # Sort logits so that nonzero values come first. This negates any
+        # need for mapping into or out of logit space outside this
+        # unit.
+
+        indices = torch.argsort(separation_mask, dim=-1, descending=True, stable=True)
+        logits = logits.gather(dim=-1, index=indices)
+        mask = separation_mask.gather(dim=-1, index=indices)
+
+        return logits, mask
