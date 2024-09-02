@@ -6,17 +6,30 @@ core classes
 
 
 import torch
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, Tuple, Optional
 from ..config import Config
 from ..data import ActionRequest
 
-ActionConstructionCallback = Callable[[str, Dict[str, torch.Tensor]], ActionRequest]
-BatchEntry = Tuple[torch.Tensor, torch.Tensor] # First tensor, then mask.
-RequestBuffer = Dict[str, Tuple[ActionConstructionCallback, ActionRequest]]
-BatchCaseBuffer = Dict[str, Dict[str, torch.Tensor]]
-MetadataPayload = Tuple[str, ActionConstructionCallback]
+
+# Data intake and batching
+DataCase = Dict[str, torch.Tensor]
+DataCaseBuffer = Dict[str, DataCase]
+
+# Response after core processing and batch separation. Also, type
+# with error stream mixed in.
+CaseResponse = Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]
+ExceptionAugmentedResponse = CaseResponse | Exception
+
+# Some important callbacks, and an important missed buffer
+
+FutureProcessingCallback = Callable[[ExceptionAugmentedResponse], None]
 LoggingCallback = Callable[[str|Exception, int], None]
-TerminationCallback = Callable[[], bool]
+TerminationCallback = Callable[[Optional[bool]], bool]
+FutureProcessingBuffer = Dict[str, FutureProcessingCallback]
+
+# config
+
+
 
 SHAPES_NAME = Config.SHAPES_NAME
 TARGETS_NAME = Config.TARGETS_NAME

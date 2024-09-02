@@ -20,8 +20,9 @@ class Config(Enum):
     TARGETS_NAME = "targets"
     CONTEXT_NAME = "context"
 
-    ### Error handling
+    ### Debug
 
+    DEBUG = False
 
 
     ### Logging stuff

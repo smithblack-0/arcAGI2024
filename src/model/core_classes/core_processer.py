@@ -1,12 +1,13 @@
 import textwrap
 from abc import ABC, abstractmethod
 import torch
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List
 from torch import nn
 from .types import (
     LoggingCallback,
-    BatchCaseBuffer,
-    BatchEntry
+    TerminationCallback,
+    DataCaseBuffer,
+    ExceptionAugmentedResponse,
 )
 from dataclasses import dataclass
 from ..config import Config
@@ -21,13 +22,19 @@ class BatchAssembly(ABC):
     """
     The BatchAssembly class is an abstract class whose interface is being defined.
 
-    Its responsibility is solely to take a collection of unbatched tensors and assemble
-    them into batched tensors in a sane manner. This will usually mean needing to complete
-    some level of padding.
+    The batch assembly mechanism is generally expected to be implemented in a manner that
+    has to do with the spacial combination of data - for instance, different varieties might
+    be used to combine images while preserving dimensions vs flatten images for usage in
+    a transformer. It is responsible for padding and providing masks.
 
-    It expects to be provided with a list of the selected cases to build the
-    batch out of, and the batch cases buffer. It gets the cases out of the buffer,
-    runs the user-provided merge routines
+    In order for a valid batch assembly case to be created, the make_batch function must
+    be implemented. This function accepts tensors from all channels of all batches that
+    are being collected together, and must return two things. The first is the combined
+    batch. The second is, per batch dimension, a 2d shape tensor specifying the extend of
+    the nonbatched content in that dimension.
+
+    The content that is sent on to the model will depend somewhat on the parameters provided
+    on initialization.
     """
 
     @abstractmethod
@@ -36,6 +43,7 @@ class BatchAssembly(ABC):
                    cases: List[torch.Tensor]
                    )->Tuple[torch.Tensor, torch.Tensor]:
         """
+        The user-defined function requiring implementation.
         The function requiring implementation.
 
         This function does the majority of the work. It should examine
@@ -45,9 +53,12 @@ class BatchAssembly(ABC):
         :param name: The name of the feature we are batching together.
         :param cases: The tensors found across all the different cases.
         :return:
-            - batch: The batch that has been constructed. It better have batch length of cases
-            - nonpadding_mask: A mask indicating what elements are NOT padding. It should be a bool
-              tensor with the same shape as the batch
+            - batch: The batch that has been constructed. It had better have the same length as cases,
+                     or it will throw an error.
+            - nonpadding_shapes:
+                a 2d int tensor containing information on the extend of the nonpadding content in the batch.
+                For instance, a tensor containing [[2, 3],[4,6]] might represent a batch that contains a first image
+                of shape [2, 3], and a second image of shape [4, 6].
         """
         pass
 
@@ -66,11 +77,14 @@ class BatchAssembly(ABC):
         self.channel_names = channel_names
     def __call__(self,
                  selected_cases: List[str],
-                 cases_buffer: BatchCaseBuffer,
-                 logging_callback: LoggingCallback
+                 cases_buffer: DataCaseBuffer,
+                 logging_callback: LoggingCallback,
+                 termination_callback: TerminationCallback,
                  )->Tuple[List[str],
                           Dict[str, Exception],
-                          Dict[str, BatchEntry]]:
+                          Dict[str, torch.Tensor],
+                          Dict[str, torch.Tensor]
+                          ]:
         """
         Performs the action of actually assembling a batch. This
         includes flushing them from the buffer and putting them all
@@ -80,9 +94,11 @@ class BatchAssembly(ABC):
         :param cases_buffer: The cases buffer
         :param logging_callback: The logging callback
         :return:
-            - Metadata: A list of AssemblyMetadataEntry objects. These will later be
+            - Nonexception_uuid: A list of AssemblyMetadataEntry objects. These will later be
                         consumed when disassembling the batch.
-            - Batch: A dictionary of str to a tensor, mask tuple
+            - Exception_info: uuids which had an exception associated, and the exception
+            - Batch: A dictionary of channel to assembled batches
+            - Nonpadded_Shapes: A dictionary of channel to nonpadded shape specification.
         :effect: Deletes the selected cases from the case buffer
         """
 
@@ -100,11 +116,11 @@ class BatchAssembly(ABC):
                 """
                 msg = textwrap.dedent(msg)
                 exception = KeyError(msg)
-                logging_callback(exception, 0)
+                logging_callback(exception, 1)
                 batch_failed_metadata[key] = exception
                 continue
 
-            logging_callback(f"Popping '{key}' out of case buffer'", 4)
+            logging_callback(f"Popping '{key}' out of case buffer'", 3)
             case = cases_buffer.pop(key)
             if set(case.keys()) != set(self.channel_names):
                 msg = f"""
@@ -116,11 +132,11 @@ class BatchAssembly(ABC):
                 """
                 msg = textwrap.dedent(msg)
                 exception = KeyError(msg)
-                logging_callback(exception, 0)
+                logging_callback(exception, 1)
                 batch_failed_metadata[key] = exception
                 continue
 
-            batch_cases.append(cases_buffer.pop(key))
+            batch_cases.append(case)
             batch_metadata.append(key)
 
         ##
@@ -134,58 +150,169 @@ class BatchAssembly(ABC):
         ###
         # Process each of the lists. We end up with the batch
         ###
-        batch = {}
+        batches = {}
+        shapes = {}
         for name, tensors in data.items():
-            logging_callback(f"Making batch out of features {name}", 4)
-            batch[name] = self.make_batch(name, tensors)
+            logging_callback(f"Making batch out of features {name}", 3)
+            batch, shape = self.make_batch(name, tensors)
+            if batch.shape[0] != len(tensors) or shape.shape[0] != len(tensors):
+                msg = f"""
+                A terminal error has been encountered
+                
+                An issue was detected with the implemention of the make batch callback.
+                Either the returned batch tensor did not have the correct batch length,
+                or the returned shape tensor did not have the correct batch length.
+                
+                This kind of issue is likely not associated with a particular case, and 
+                thus cannot be recovered from.
+                
+                The expected batch shape was: {len(tensors)}
+                The constructed batch dim was: {batch.shape[0]}
+                The constructed shape batch dim was: {shape.shape[0]}
+                """
+                msg = textwrap.dedent(msg)
+                exception = RuntimeError(msg)
+                logging_callback(exception, 0)
+                termination_callback(True)
+                raise exception
 
-        return batch_metadata, batch_failed_metadata, batch
+            batches[name] = batch
+            shapes[name] = shape
+
+        return batch_metadata, batch_failed_metadata, batches, shapes
 
 
 
 class BatchDisassembly:
     """
-    The BatchDissassebly class is designed with the primary
-    responsibility of splitting up batched data back into
-    unbatched data then dispatching that data to the destination
-    callbacks.
+    The batch disassembly class has three primary responsibilities, but
+    they all boil down to working to produce a single datastructure.
 
-    It takes a dictionary containing batched tensors that are the
-    result of running a model, then takes those dictionaries apart
-    into individual subcases. These can then be dispatched back
-    through their callbacks.
+    One of the responsibilities is to split up the results produced
+    by the machine learning model and reassociate each of the batch
+    dimensions with a uuid counterpart. We keep whatever dict channels were
+    provided by the model.
+
+    Another responsibility is to break up the shape
+    padding details and again associate them back with uuids. This information
+    may be used to remove excess padding in downstream layers.
+
+    Finally, there is exception handling. If an exception has been handled, and we think
+    it will not hose the whole generation process, we can insert an exception
+    at that location for the uuid output. It will then be propogated back
+    into an associated future.
+
+    The result of the class being run is something in which all batch information has
+    been removed.
     """
     def __call__(self,
-                 original_uuids: List[str],
+                 run_uuids: List[str],
                  exception_data: Dict[str, Exception],
+                 shapes_data: Dict[str, torch.Tensor],
                  model_data: Dict[str, torch.Tensor],
-                 logging_callback: LoggingCallback
-                 )->Dict[str, Dict[str, torch.Tensor] | Exception]:
+                 logging_callback: LoggingCallback,
+                 termination_callback: TerminationCallback,
+                 )->Dict[str, ExceptionAugmentedResponse]:
+        """
+        Runs the batch dissassembly process. One detail
 
-        # Take apart the incoming data by the batch dimensions
-        #
-        # Create batch independent cases
-        cases = {id : {} for id in original_uuids}
+        :param run_uuids: The uuids associated with the batches that were run through the model
+        :param exception_data: The uuids associated with batches that had exceptions detected.
+        :param shapes_data: The mapping of dict channel to the unpadded shape.
+        :param model_data:
+            The mapping of dict channel to the results of running the model.
+            Note: Likely different from shapes channels.
+        :param logging_callback:
+            The logging callback. Used to make certain decisions.
+        :return:
+            - uuid channel responses:
+                An exception augmented dictionary mapping uuids to relevant information
+                for that particular batch. This generally means either:
+                    1) A tuple of dictionaries, each mapping over channels. One of them
+                       contains the input padding shapes, one of them the output response.
+                    2) An exception. In which case the batch could not be properly processed
+        """
+
+        # Take apart the padding shape data and reassociate each batch dimension
+        # with a data case based on the run_uuids
+
+        shapes_dict = {id : {} for id in run_uuids}
+        for channel, tensor in shapes_data.items():
+            if tensor.shape[0] != len(run_uuids):
+                msg = f"""
+                Terminal error encountered
+                
+                Something has gone wrong with batch_dim-batch_uuid matching. 
+                The number of selected uuids to run was {len(run_uuids)}. 
+                However, the batch dimension has a shape of {tensor.shape[0]}
+                
+                Since we no longer know what uuid goes to what batch, this is unrecoverable.
+                Shutting down processing.
+                """
+                msg = textwrap.dedent(msg)
+                exception = RuntimeError(msg)
+                logging_callback(exception, 0)
+                termination_callback(True)
+                raise exception
+            for id, subtensors in zip(run_uuids, tensor.unbind(0)):
+                shapes_dict[id][channel] = subtensors
+
+
+        ## Take apart the response produced by invoking the model,
+        # and associated each element back with it's uuid case.
+
+        response_cases = {id : {} for id in run_uuids}
         for key, tensor in model_data.items():
-            if tensor.shape[0] == len(original_uuids):
+            if tensor.shape[0] == len(run_uuids):
                 msg = f"""
                 Unrecoverable error encountered. It was expected that the tensors returned by
-                the model would have the same batch shape going in. For feature of name 
+                the model would have the same batch shape as what went in. For feature of name 
                 '{key}' this was not the case. 
+                
+                expected_shape: {len(run_uuids)}
+                seen_shape: {tensor.shape[0]}
                 """
                 exception = RuntimeError(msg)
                 logging_callback(exception, 0)
+                termination_callback(True)
                 raise exception
-            for uuid, subtensor in zip(original_uuids, tensor.unbind(0)):
-                cases[uuid][key] = subtensor
+            for uuid, subtensor in zip(run_uuids, tensor.unbind(0)):
+                response_cases[uuid][key] = subtensor
+        ## Merge the dictionaries.
+        #
+        # Then, insert the exceptions for the cases we could
+        # not successfully process.
 
-        ##
-        # Insert per-case exceptions data into the stream
-        ##
-
+        output = {id: (shapes_dict[id], response_cases[id]) for id in run_uuids}
         for key, exception in exception_data.items():
-            cases[key] = exception
-        return cases
+            output[key] = exception
+        return output
+
+## Model core.
+#
+# Contract which compatible models must satisfy
+class ContractedModule(nn.Module):
+    """
+    Any torch module which wants to be compatible
+    with this system MUST implement its forward method
+    in the way contracted here.
+    """
+    def forward(self,
+                padding_shapes: Dict[str, torch.Tensor],
+                input_data: Dict[str, torch.Tensor],
+                logging_callback: LoggingCallback,
+                )->Dict[str, torch.Tensor]:
+        """
+
+        :param padding_shapes: Shapes padding data, per channel. 2d tensor indicating
+                       how much of each dimension in data was NOT padding,
+                       You may or may not use this.
+        :param input_data:
+            The actual batched data. Channels will be common with padding shapes. You
+        :return: The responses, per dictionary channel. May have differing
+                 channels than input data.
+        """
+        raise NotImplementedError("The forward method needs to be implemented with the specified contract")
 
 ##
 #
@@ -207,7 +334,7 @@ class CoreSyncProcessor(nn.Module):
     """
     def __init__(self,
                  batch_assembler: BatchAssembly,
-                 core_model: nn.Module,
+                 core_model: ContractedModule,
                  batch_disassembler: BatchDisassembly,
                  ):
         """
@@ -226,9 +353,10 @@ class CoreSyncProcessor(nn.Module):
 
     def forward(self,
                 selected_cases: List[str],
-                case_buffer: BatchCaseBuffer,
-                logging_callback: LoggingCallback
-                )->Dict[str, Dict[str, torch.Tensor] | Exception]:
+                case_buffer: DataCaseBuffer,
+                logging_callback: LoggingCallback,
+                termination_callback: TerminationCallback,
+                )->Dict[str, ExceptionAugmentedResponse]:
         """
         :param selected_cases:
             A list of string-based uuids. Each should uniquely identify a case that has been selected
@@ -236,31 +364,43 @@ class CoreSyncProcessor(nn.Module):
         :param case_buffer:
             The case buffer. This should contain within it a list of groups of tensor cases
             such as shapes, context, and
-        :return:
+        :return: A dictionary of uuids to nonbatched info.
         """
-        used_ids, exception_data, batch = self.batch_assembler(selected_cases,
-                                                               case_buffer,
-                                                               logging_callback
-                                                               )
+
+        used_ids, exception_data, batch, shapes = self.batch_assembler(selected_cases,
+                                                                       case_buffer,
+                                                                       logging_callback,
+                                                                       termination_callback)
+
+
         try:
-            batch = self.core_model(batch)
+            model_output = self.core_model(shapes, batch, logging_callback)
         except Exception as err:
             # Setup exception
             msg = f"""
-            Issue encountered across multiple uuids while attempting to run batch using core
-            model. This affected cases:
+            An issue was encountered while trying to use a neural core to process a batch.
+            The issue could not be tracked down to a single batch. The entire batch
+            is being discarded.
+            
+            This issue affected data entries:
+            
             {selected_cases}
-            The exact batch that caused this issue, if any, is not known.
+            
+            It occurred while using torch layer:
             """
             msg = textwrap.dedent(msg)
+            msg = msg + str(self.core_model)
             exception = RuntimeError(msg)
             exception.__cause__ = err
 
-            # Log exception, modify outputs so we will except on all entries
-            logging_callback(exception, 0)
-            used_ids = []
-            exception_data = {id : exception for id in selected_cases}
+            # Log exception
+            logging_callback(exception, 1)
 
-        output = self.batch_disassembler(selected_cases, exception_data, batch)
+            # Remove any attempt the model
+            used_ids = []
+            exception_data.update({id : exception for id in selected_cases})
+
+        output = self.batch_disassembler(used_ids, exception_data, shapes,
+                                         model_output, logging_callback, termination_callback)
         return output
 

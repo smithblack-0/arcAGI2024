@@ -3,7 +3,6 @@ Define the core async batch processor classes we can utilize
 """
 import asyncio
 import textwrap
-import warnings
 from dataclasses import dataclass
 
 import torch
@@ -11,15 +10,32 @@ from torch import nn
 from torch.futures import Future
 from abc import ABC, abstractmethod
 from typing import Dict, Tuple, Callable, List, Optional
-from .types import BatchCaseBuffer, LoggingCallback, TerminationCallback
+
 from .clustering import ClusteringStrategy
-from .core_processer import BatchAssembly, BatchDisassembly
 from ..data import ActionRequest
+from .types import (
+                    # Input handling, mostly
+                    DataCase,
+                    DataCaseBuffer,
+                    FutureProcessingBuffer,
+
+                    # Callbacks
+                    LoggingCallback,
+                    FutureProcessingCallback,
+                    TerminationCallback,
+
+                    # Outputs and stream
+                    CaseResponse,
+                    ExceptionAugmentedResponse
+
+
+)
+from core_processer import CoreSyncProcessor
 
 ## Basic batch strategy classes
 #
 # These primarily have the responsibility of getting the statistics
-# that the above clustering strategies need. At the moment, we base
+# that the  clustering strategies need. At the moment, we base
 # everything on position.
 class BatchStrategy(ABC):
     """
@@ -32,7 +48,7 @@ class BatchStrategy(ABC):
     It is dependency-injected with a clustering strategy
     """
     @abstractmethod
-    def get_vital_statistics(self, case_buffer: BatchCaseBuffer)->torch.Tensor:
+    def get_vital_statistics(self, case_buffer: DataCaseBuffer)->torch.Tensor:
         """
         An extremely important method, this gives us vital information on
         the various items in the request buffer. It needs to be compatible
@@ -43,36 +59,13 @@ class BatchStrategy(ABC):
         """
         pass
 
-    @abstractmethod
-    def batch_strategy_factory(self,
-                               **parameters
-                               )->Callable[[ClusteringStrategy], "BatchStrategy"]:
-        """
-        An implementation of a batch strategy factory. It will frequently
-        be the case that we would like to inject the clustering strategy
-        later on.
-
-        The batch strategy factory should setup a factory that
-        can be called with your implementation-specific parameters,
-        and will return a partial that can be invoked with a clustering
-        strategy.
-
-
-        **parameters: Your invokation parameters
-        :return: A callable for producing a BatchStrategy when given a clustering strategy.
-        """
-        pass
-
-
     def __init__(self,
                  clustering_strategy: ClusteringStrategy
                  ):
         self.clustering_strategy = clustering_strategy
 
-
-
     def __call__(self,
-                 batch_case_buffer: BatchCaseBuffer,
+                 batch_case_buffer: DataCaseBuffer,
                  batch_size: int,
                  logging_callback: LoggingCallback,
                  force_selection: str,
@@ -80,56 +73,6 @@ class BatchStrategy(ABC):
         vitals = self.get_vital_statistics(batch_case_buffer)
         output = self.clustering_strategy(vitals, batch_size, logging_callback, force_selection)
         return output
-
-
-###
-# Request Receiver
-#
-# The request processor is responsible for moving requests into
-# the batch case buffer. It is a mix of an interface and, if it ever
-# matters, a cache in and of itself.
-###
-
-class RequestReceiver(ABC):
-    """
-    Request Receiver
-
-    The request processor is responsible for moving requests into
-    the batch case buffer. It is a mix of an interface and, if it ever
-    matters, a cache in and of itself.
-
-    It moves and processes an incoming request, getting all callbacks
-    and such ready.
-    """
-    def __init__(self,
-                 cases_buffer: BatchCaseBuffer,
-                 callbacks_buffer:
-                 ):
-        self.cases_buffer = cases_buffer
-
-    @abstractmethod
-    def process_request(self, request: ActionRequest)->Dict[str, torch.Tensor]:
-        """
-        The method the implementer must implement for the class to function
-
-        It must take an action request and turn it into a dictionary of tensors.
-        These tensors will then be the only ones available downstream in the model.
-        :param request: An action request
-        :return: A dictionary of tensors, like {"shape" : tensor, "targets" : data}
-        """
-        pass
-    def __call__(self,
-                 request: ActionRequest,
-                 logging_callback: LoggingCallback
-                 )->Future:
-        """
-        The main registration method for placing requests into the
-        processing stream to be handled. We should create a future in response
-        to the request,
-        :param request:
-        :return:
-        """
-
 
 ###
 # Results processor
@@ -151,20 +94,24 @@ class ResultsProcessor(ABC):
     "process_model_results" must be implemented before
     the class can work
     """
+    def __init__(self,
+                 available_destinations: List[str]
+                 ):
+        self.destinations = available_destinations
 
     @abstractmethod
     def process_model_results(self,
-                              next_destination: str,
+                              available_destinations: List[str],
                               request: ActionRequest,
-                              results: Dict[str, torch.Tensor],
+                              results: CaseResponse,
                               ) -> ActionRequest:
         """
         The required abstract method. It should accept
         an action request, the results of processing the request,
         and integrate them into a novel action request. Notably,
-        the destination to use is also provided
+        the available destinations are also available for use
 
-        :param next_destination: The next action request destination. Send it here!
+        :param available_destinations: The valid next finite states
         :param request: The original action request
         :param results: The results of running the request
         :return: The revised action request that needs to be returned
@@ -172,193 +119,194 @@ class ResultsProcessor(ABC):
         pass
 
     def __call__(self,
-                 next_destination: str,
                  request: ActionRequest,
-                 results: Dict[str, torch.Tensor],
+                 results: CaseResponse,
                  ) -> ActionRequest:
         """
         When invoked, this will use the provided information
         to compute the next action request.
 
-        :param next_destination: The next destination to dispatch to. Make sure to match it!
-        :param request: The original action request
+\        :param request: The original action request
         :param results: The results of running the request
         :return: A new action request
         """
-        action_request = self.process_model_results(next_destination, request, results)
-        assert action_request.state_tracker.destination == next_destination
+
+        action_request = self.process_model_results(self.destinations, request, results)
+        assert action_request.state_tracker.destination in self.destinations
         return action_request
 
-
-
-## The main async machine, and some of the construction dataclasses
+###
 #
-# This is the actual Async Batch Processor layer that gets
-# most of the logic done.
+# Futures factory.
+#
+# The futures factory is designed to implement two parallel responsibilities
+# It develops futures, and it develops callbacks for processing the results
+# of the associated computations
+##
 
-class AsyncBatchProcessor(nn.Module):
+class FuturesFactory:
     """
-    *Purpose**:
+    Futures factory.
 
-    The central orchestrator for managing the batching and processing
-    workflow. It is dependency-injected with a Batching Strategy, Batch Assembly,
-    Batch Disassembly, and manages the request_buffer and batch_queue. It both
-    contains code for the batch processing subloop, and the pseudounbatched main
-    processing code
-
-    As far as information flowing in through the main forward method is concerned,
-    processing occurs in a linear manner, without batches, but with an indeterminate
-    await time. Meanwhile, the processing subloop will await until batches are available
-    at which point it will run.
-
-    It contains inside a collection of requests from which batches can be formed to
-    help ensure batches of similar length are created.
-
-    **Attributes**:
-    - **buffer_threshold**: An integer representing how big the request buffer gets
-    before we form and run a batch. It must be greater than or equal to batch size.
-    - **batch_size**: An integer representing the size of batches that the system
-    will attempt to form. While a batch smaller than this size can be run, a
-    batch larger than this size will never be formed.
-    - **request_buffer**: A dictionary that maps UUIDs to request tuples
-    (`future_callback, ActionRequest`).
-    - **batch_queue**: An `asyncio.Queue` that stores batches ready for processing.
-    - **batching_strategy**: The Batching Strategy instance for selecting requests
-    to form a batch.
-    - **batch_assembly**: The Batch Assembly instance for assembling batches from
-    selected requests.
-    - **batch_disassembly**: The Batch Disassembly instance for disassembling
-    processed batches and fulfilling futures/callbacks.
-    - **model**: The model that actually processes the batch. It must accept a batched
-              dictionary, and return a batched dictionary.
-    - **logging_callback**: A callback function used for logging purposes. If left
-    as `None`, logging is emitted as a warning.
-
-    **Methods**:
-    - **__call__**: Accepts an `ActionRequest` and returns a `Future`. It performs
-    the following sequence of actions:
-    - Registers the request in the request_buffer.
-    - Checks if the request_buffer size exceeds the buffer_threshold.
-    - If it does, it forms a batch using the `create_batch` helper method and
-    stores it in the batch_queue.
-    - Sets up a timer for the request's timeout using the `set_timeout_trigger`
-    helper method.
-    - Returns the `Future` to the caller.
-
-    - **processing_loop**: This method runs in a separate thread or as an
-    asynchronous loop.
-    - Waits for batches from the batch_queue.
-    - Calls the `model` with the assembled batch.
-    - Passes the results to Batch Disassembly for distribution to the original
-    requests.
-
-
-    **Helper Methods**
-    - **create_batch**: Accepts the request_buffer, a batch size, and any UUIDs to
-    force inclusion. This method first runs the Batching Strategy to select the
-    requests, then passes the selected UUIDs to the Batch Assembly to form the
-    batch. It returns the resulting batch and metadata list. This method does
-    not place the batch into the batch_queue—that is the responsibility of the
-    caller.
-
-    - **set_timeout_trigger**: A helper method designed to be registered as part of
-    an I/O loop. It should be called with a UUID, the request_buffer, and a
-    timeout in milliseconds. Upon invocation, it creates and activates a
-    function in `asyncio` that waits for the specified timeout. If the UUID is
-    still in the request_buffer after the timeout, it calls `create_batch` with
-    the UUID as a forcing entry, then places the completed batch into the
-    batch_queue.
-
+    This small class has two primary responsibilities.
+    It creates futures, and it creates callbacks to ultimately
+    process the computations associated with those futures.
     """
-    ###
-    #
-    # Define several very important helper methods
-    #
-    ###
+    def __init__(self,
+                 results_processor: ResultsProcessor,
+                 ):
+        self.results_processor = results_processor
 
-    def select_batch(self, force_inclusion):
-
-    def create_batch(self,
-                     force_inclusion: Optional[str] = None
-                     )->Tuple[List[MetadataPayload], Dict[str, torch.Tensor]]:
-        """
-        Create a batch out of the current resources. If needed, force
-        the inclusion of the given case in the batch
-
-        :param force_inclusion: The case to force inclusion on. Optional
-        :return: A batch that is ready for processing
-        """
-        try:
-            selection = self.batching_strategy(self.requests_buffer,
-                                               self.batch_size,
-                                               self.logging_callback,
-                                               force_inclusion
-                                               )
-        except Exception as e:
-            msg = f"""
-
-            
-            Unable to choose the elements of the buffer to form
-            into a batch. An issue occurred. The cases in the 
-            reqeust buffer were:            
-            {[key for key in self.requests_buffer.keys()]}
-            """
-            msg = textwrap.dedent(msg)
-            raise AsyncTerminalException(msg,
-                                 requests_buffer = self.requests_buffer,
-                                 ) from e
-
-        try:
-            metadata, batch = self.batch_assembly(self.requests_buffer,
-                                                  selection,
-                                                  self.logging_callback
-                                                  )
-            return metadata, batch
-        except Exception as e:
-            msg = f"""
-            
-            """
-
-        batch = self.batch_assembly(self.requests_buffer, selection, self.logging_callback)
-        return batch
-
-    def future_callback_factory(self,
+    def create_future_callback(self,
                                future: Future,
-                               request: ActionRequest,
-                               )->Callable[[Dict[str, torch.Tensor]], None]:
+                               id: str,
+                               logging_callback: LoggingCallback
+                               )->FutureProcessingCallback:
         """
-        Creates a callback designed to fufill a future
-        with an action request.
+        Creates a callback which will fufill or error out the
+        future, one way or another
 
-        :param future: The future to fufill
-        :param request: The request we will need to process
-        :return:
+        :param future: The future to build the callback around
+        :return: A callback that will either populate the future with
+                 the next action request, or an exception, depending on the data
         """
-        def future_callback(data: Dict[str, torch.Tensor]):
+        def future_callback(result: ExceptionAugmentedResponse):
+            # Handle the case in which an exception was encountered.
+            #
+            # We populate the future with the exception
+            if isinstance(result, Exception):
+                future.set_exception(result)
+
+            # We did NOT encounter an exception. Attempt
+            # to process and populate the future
             try:
-                # Get the next action request
-                new_request = self.action_factory(
-                                    request.state_tracker.id,
-                                    request,
-                                    self.logging_callback,
-                                    data
-                                    )
-                future.set_result(new_request)
-            except Exception as e:
-                future.set_exception(e)
+                action_result = self.results_processor(result)
+                future.set_result(action_result)
+            except Exception as err:
+                msg = f"""
+                Issue was encountered while attempting to run the 
+                results processor. This prevented the return of a 
+                valid future, despite the model running correctly.
+                This occurred while running callback for {id}
+                """
+                msg = textwrap.dedent(msg)
+                exception = RuntimeError(msg)
+                exception.__cause__ = err
+                logging_callback(exception, 0)
+                future.set_exception(exception)
+        return future_callback
 
-        return future_assignment_callback
+    def __call__(self,
+                 id: str,
+                 logging_callback: LoggingCallback,
+                 )->Tuple[Future, FutureProcessingCallback]:
+        """
+        The factory method.
 
+        We will create a future, and an associated processing callback
+
+        :param id: The id of the case we are building this for. Used in messages
+        :param logging_callback: The logging callback
+        :return:
+            - Future: A future which we promise to fill with a ActionRequest... or raise an Error.
+            - Callback: Should be called with the result of running the batch.
+        """
+        future = Future()
+        callback = self.create_future_callback(future, id, logging_callback)
+        return future, callback
+
+###
+# Request Receiver
+#
+# The request processor is responsible for moving requests into
+# the batch case buffer. It is a mix of an interface and, if it ever
+# matters, a cache in and of itself.
+###
+
+class RequestDataExtractor(ABC):
+    """
+    The request data extractor is one of the interfaces
+    that must be implemented for the model to function.
+    Simply put, it should extract from a request the
+    key tensors needed for batching and core model processing.
+    """
+
+    @abstractmethod
+    def process_request(self, request: ActionRequest) -> DataCase:
+        """
+        The method the implementer must implement for the class to function
+
+        It must take an action request and turn it into a dictionary of tensors.
+        These tensors will then be the only ones available downstream in the model.
+
+        :param request: An action request
+        :return: A dictionary of tensors, like {"shape" : tensor, "targets" : data}
+        """
+        pass
+    def __call__(self, request: ActionRequest) -> DataCase:
+        return self.process_request(request)
+
+
+##
+# End of user servicable logic. Beginning of wrapper classes and dataclasses
+##
+
+@dataclass
+class AsyncBuffers:
+    """
+    Contains the primary processing buffers, including
+    the async works.
+    """
+    cases_buffer: DataCaseBuffer
+    callbacks_buffer: FutureProcessingBuffer
+    selection_buffer: asyncio.Queue
+
+
+class RequestInserter(ABC):
+    """
+    Request Inserter
+
+    The request inserter is responsible for moving requests into
+    the batch case buffer and the callback buffer. These moves
+    are hopefully executed in a thread-safe manner.
+
+    It is also responsible for triggering the batch creation
+    logic once the amount of cases stored exceeds the buffer
+    threshold.
+
+    This class is not intended to be implemented by the user.
+    """
+    def __init__(self,
+                 # parameters
+                 buffer_threshold: int,
+                 batch_size: int,
+
+                 # Support classes
+                 future_factory: FuturesFactory,
+                 batch_strategy: BatchStrategy,
+                 data_extractor: RequestDataExtractor,
+                 ):
+        assert buffer_threshold >= batch_size
+
+        self.batch_size = batch_size
+        self.buffer_threshold = buffer_threshold
+        self.batch_strategy = batch_strategy
+        self.future_factory = future_factory
+        self.data_extractor = data_extractor
 
     def set_timeout_trigger(self,
                             id: str,
-                            timeout: float):
+                            timeout: float,
+                            buffers: AsyncBuffers,
+                            logging_callback: LoggingCallback
+                            ):
         """
         Sets a timeout trigger on the async task collection. In the event that
-        a case is not handled by the timeout, we force its run.
+        a case is not handled by the time it times out, we force its run.
 
         :param id: The id to force completion on timeout, if it still has not been handled
         :param timeout: The timeout to wait for, in milliseconds.
+        :parma buffers: The buffers to inspect for run completion
         """
         time_seconds = timeout/1000
 
@@ -372,155 +320,210 @@ class AsyncBatchProcessor(nn.Module):
                 await asyncio.sleep(time_seconds)
 
                 # Check if task has already been processed
-                if id not in self.requests_buffer:
+                if id not in buffers.cases_buffer:
                     return
+                # Task was NOT already processed. Log first
+                msg = f"""
+                Timeout was reached for feature with uuid: '{id}'
+                An attempt will be made to force a batch build. 
+                """
+                msg = textwrap.dedent(msg)
+                logging_callback(msg, 2)
 
-                # Create and store batch
-                metadata, batch = self.create_batch(id)
-                self.batch_queue.put_nowait((metadata, batch))
+                # Now force injection into task queue.q
+
+                selection = self.batch_strategy(buffers.cases_buffer, self.batch_size, logging_callback, id)
+                buffers.selection_buffer.put_nowait(selection)
 
             except Exception as e:
                 # Handle any potential exceptions
-                print(f"Error in timer_task for id {id}: {e}")
+                msg = f"Error in timer_tas for id {id}"
+                exception = RuntimeError(msg)
+                exception.__cause__ = e
+                logging_callback(exception, 0)
+                raise exception
 
         # Register it as a task
         asyncio.create_task(timer_task())
 
-    def register_request(self,
-                         factory_callback: ActionConstructionCallback,
-                         request: ActionRequest):
+    def __call__(self,
+                 buffers: AsyncBuffers,
+                 request: ActionRequest,
+                 logging_callback: LoggingCallback,
+                 )->Future:
         """
-        Registers an action request in the request buffer and,
-        should it be needed, forms a batch. This also includes setting
-        up the timeouts
+        The main registration method for placing requests into the
+        processing stream to be handled. We should create a future in response
+        to the request, which we return, and insert everything else where it needs
+        to go.
 
-        :param factory_callback: A callback that can be run to construct the next action request
-        :param request: The action request to register.
-        """
-        ##
-        # We basically have two jobs to do here.
-        #
-        # First, we need to actually make sure to register into the buffer
-        # the request. Second, if the buffer is full, we need to go make
-        # ourselves a batch.
-        #
-        ##
-
-
-        # Store the request in the dictionary.
-        id = request.state_tracker.id
-        self.requests_buffer[id] = (factory_callback, request)
-
-        # If needed, make and store a batch.
-        #
-        # All code here MUST be syncronous to avoid certain bugs.
-        if len(self.requests_buffer) >= self.buffer_threshold:
-            metadata, batch = self.create_batch()
-            self.batch_queue.put_nowait((metadata, batch))
-
-        # Setup the timeout.
-        self.set_timeout_trigger(id, request.state_tracker.timeout)
-
-
-    ## Init ##
-    #
-    # The majority of init is dependency-injected to follow
-    # best practices.
-    def __init(self,
-               buffer_threshold: int,
-               batch_size: int,
-               batching_strategy: BatchStrategy,
-               batch_assembly: BatchAssembly,
-               model_core: nn.Module,
-               batch_disassembly: BatchDisassembly,
-               action_factory: ActionFactory,
-               termination_callback: TerminationCallback,
-               logging_callback: Optional[LoggingCallback] = None
-               ):
-        """
-        Constructor for the AsynBatchProcessor class
-
-        :param buffer_threshold: The buffer threshold. When the buffer goas above this, we make a new batch
-        :param batch_size: The target batch size to reach
-        :param batching_strategy: The batching strategy dependency
-        :param batch_assembly: The batching assembly dependency
-        :param model_core: The main machine learing model
-        :param batch_disassembly: The batching disassembly dependency
-        :param action_factory: The action factory dependency
-        :param termination_callback: The termination callback
-
-        """
-        # Setup logging if needed
-        if logging_callback is None:
-            warnings.warn("Logging callback was not provided. Improvising, with verbosity of 1")
-            def logging_callback(message, verbosity):
-                if verbosity <= 1:
-                    print(message)
-
-        # Setup some resources
-
-        self.requests_buffer: RequestBuffer = {}
-        self.batch_queue: asyncio.Queue = asyncio.Queue()
-
-        # Store dependencies for later use
-
-        assert buffer_threshold >= batch_size
-        self.buffer_threshold = buffer_threshold
-        self.batch_size = batch_size
-        self.batching_strategy = batching_strategy
-        self.batch_assembly = batch_assembly
-        self.model_core = model_core
-        self.batch_disassembly = batch_disassembly
-        self.action_factory = action_factory
-        self.logging_callback = logging_callback
-
-    ## Main methods
-    #
-    # Primary methods are handled here.
-    def forward(self, request: ActionRequest) -> Future:
-        """
-        An invokation of the async batch processor layer,
-        requesting the return of the next action request.
-
-        We receive in response a future which is promised
-        to contain the next Action Request in the sequence
-
-        :param request:
-            The action request we are being asked to fufill
-        :return: A future which will contain an action request
+        :param request: The request to register
+        :param logging_callback: The logging callback
         """
 
-        future = Future()
-        callback = self.future_callback_factory(future, request)
-        self.register_request(callback, request)
+        # Handle insertion into the requests buffering
+        # features.
+
+        uuid = request.state_tracker.id
+        future, future_callback = self.future_factory(logging_callback)
+        buffers.cases_buffer[uuid] = self.data_extractor(request)
+        buffers.callbacks_buffer[uuid] = future_callback
+
+        # If we have gone above the threshold, handle a batch
+        if len(buffers.cases_buffer) >= self.buffer_threshold:
+            msg = f"""
+            Buffer threshold reached. Triggering batch build.
+            Buffer size: {len(buffers.cases_buffer)}
+            batch size: {self.batch_size}
+            """
+            msg = textwrap.dedent(msg)
+            logging_callback(msg, 3)
+            selection = self.batch_strategy(buffers.cases_buffer, self.batch_size, logging_callback, None)
+            buffers.selection_buffer.put_nowait(selection)
+
+        # Set a timeout to ensure each cases is eventually processed, then return the
+        # future
+
+        self.set_timeout_trigger(uuid, request.state_tracker.timeout, buffers, logging_callback)
+
         return future
+
+
+class AsyncBatchProcessor(nn.Module):
+    """
+    The primary process nurse, the async
+    batch processor layer is responsible for
+    both containing the code that a dispatcher
+    can interact with, alongside containing the
+    code used for processing individual batches.
+    """
+    @classmethod
+    def setup(cls,
+              buffer_threshold: int,
+              batch_size: int,
+              batch_strategy: BatchStrategy,
+              result_processor: ResultsProcessor,
+              request_extractor: RequestDataExtractor,
+              batch_processor: CoreSyncProcessor,
+              logging_callback: LoggingCallback,
+              termination_callback: TerminationCallback,
+              )->"AsyncBatchProcessor":
+        """
+        The setup function is the primary expected user
+        invoked function used to get an async batch processor
+        initialized. It will take over the responsibility
+        of binding the user-provided dependencies in their
+        correct classes. However, in the case future modifications
+        are needed, it is still possible to initialize the class
+        directly
+
+        :param buffer_threshold: Accumulate at least this many items before trying to make a batch
+        :param batch_size: Target batches of this size.
+            WARNING, not all batch strategies will consistently produce batches of this size
+
+        :param batch_strategy: The BatchStrategy instance, which selects uuids to form into batches
+        :param result_processor: The processor for results from the model run
+        :param request_extractor: The processor that creates data to feed into the model run
+        :param batch_processor: The actual model and batching mechanism. It too has builders
+        :param logging_callback: The logging callback. Self-explanatory.
+        :param termination_callback: A callback that returns true when it is time to end the session
+                                     and clean up resources.
+        :return: An instanced async batch processor
+        """
+
+        # Create the common buffers
+        buffers = AsyncBuffers(
+            cases_buffer = {},
+            callbacks_buffer = {},
+            selection_buffer = asyncio.Queue()
+        )
+
+        # Create the futures factory
+        futures_factory = FuturesFactory(result_processor)
+
+        # Create the inserter
+        inserter = RequestInserter(buffer_threshold,
+                                   batch_size,
+                                   futures_factory,
+                                   batch_strategy,
+                                   request_extractor
+                                   )
+
+        # Instance and return
+        return cls(buffers,
+                   inserter,
+                   batch_processor,
+                   logging_callback,
+                   termination_callback
+                    )
+
+    def __init__(self,
+                 buffers: AsyncBuffers,
+                 inserter: RequestInserter,
+                 processor: CoreSyncProcessor,
+                 logging_callback: LoggingCallback,
+                 termination_callback: TerminationCallback
+                 ):
+        """
+
+        :param buffers: The primary data structures we keep informtio nin
+        :param inserter: The primary mangement feature used to handle requests and insert into buffers
+        :param processor: The primary neural model processing and batching mechanism.
+        :param logging_callback: A callback used for logging
+        :param termination_callback: A callback. When it returns false, we kill off all
+               infinite async loops.
+        """
+        super().__init__()
+        self.buffers = buffers
+        self.inserter = inserter
+        self.processor = processor
+        self.logging_callback = logging_callback
+        self.termination_callback = termination_callback
 
     async def process_loop(self):
         """
         Asyncronous batch processing loop.
 
         This must be setup in a separate task, or thread, and
-        will process batches then split them up and return them
-        using callbacks
+        will process batches then split them up and return the
+        results to futures using callbacks.
         """
+        while not self.termination_callback():
+            # Wait until batch is ready to be processed
+            selection = await self.buffers.selection_buffer.get()
 
-        while True:
-            try:
-                # Wait until a batch needs to be processed.
-                #
-                # Then run the batch, and dispatch the results
+            # Process batch
+            outcome = self.processor(selected_cases = selection,
+                                     case_buffer = self.buffers.cases_buffer,
+                                     logging_callback = self.logging_callback
+                                     )
 
-                metadata, batch = await self.batch_queue.get()
-                batch_output = self.model_core(batch)
-                self.batch_disassembly(metadata, batch_output)
+            # Distribute results to callbacks
+            for uuid in outcome:
+                if uuid in self.buffers.callbacks_buffer:
+                    callback = self.buffers.callbacks_buffer.pop(uuid)
+                    callback(outcome[uuid])
+                else:
+                    msg = f"""
+                    Unrecoverable error encountered. Callback for '{uuid}' was not found,
+                    which should be impossible.
+                    """
+                    msg = textwrap.dedent(msg)
+                    exception = RuntimeError(msg)
+                    self.logging_callback(exception, 0)
+                    self.termination_callback(True)
+                    raise exception
+    def forward(self, request: ActionRequest) -> Future:
+        """
+        Main forward method. This will append the action
+        request to the processing stream, and return an awaitable
+        future
 
-            except Exception as e:
-                #TODO: propogate exceptions back into the futures that are waiting
-                raise e
-
-
-
-
-
+        :param request: An action request we wish to see completed
+        :return: A future. Await it, and access it's value for an action request.
+        """
+        return self.inserter(self.buffer,
+                             request,
+                             self.logging_callback)
 
 
