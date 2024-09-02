@@ -1,28 +1,153 @@
-"""
-Define the core async batch processor classes we can utilize
-"""
-
-import asyncio
-import torch
-import uuid
-import numpy as np
-from torch import nn
-from torch.nn import functional as F
 from abc import ABC, abstractmethod
-from typing import Dict, Tuple, Callable, List, Optional
-from .clustering import constrained_kmeans, assign_best_to_centroid
-from ..data import ActionRequest
 
-RequestBuffer = Dict[str, Tuple[Callable, ActionRequest]]
-LoggingCallback = Callable[[str, int], None]
+import numpy as np
+import heapq
+from typing import List, Callable, Tuple, Dict, Optional
+from .types import LoggingCallback
+import torch
 
-SHAPES_NAME = "shape"
-TARGETS_NAME = "targets"
-CONTEXT_NAME = "context"
 
-###
-# The clustering strategy collection are a few ways
-# of figuring out what a more optimal batch might be like.
+def initialize_centroids_kmeans_pp(data, k):
+    """ Initialize centroids using k-means++ method """
+    n_samples = data.shape[0]
+    centroids = np.empty((k, data.shape[1]))
+    centroids[0] = data[np.random.randint(0, n_samples)]
+
+    for i in range(1, k):
+        distances = np.min(np.linalg.norm(data[:, np.newaxis] - centroids[:i], axis=2), axis=1)
+        probabilities = distances / distances.sum()
+        centroids[i] = data[np.searchsorted(np.cumsum(probabilities), np.random.rand())]
+
+    return centroids
+
+def assign_best_to_centroid(datapoints: np.ndarray,
+                            centroid: np.ndarray,
+                            num_kept: int,
+                            measure: Callable[[np.ndarray, np.ndarray], np.ndarray],
+                            )->Dict[str, np.ndarray]:
+    """
+    Assigns the best 'N' datapoints to be part of the given centroids. Returns it
+    as a cluster.
+
+    :param datapoints: The datapoints to draw from
+    :param centroid: The centroid to build around
+    :param num_kept: How many datapoints can fit in the centroid
+    :return: A cluster
+    """
+
+    heap = []
+    distances = measure(datapoints, centroid)
+    priorities = -distances
+    for i in range(datapoints.shape[0]):
+        # Get features
+        priority = priorities[i]
+        point = datapoints[i]
+
+        # Push onto heap, then if needed shrink heap
+        heapq.heappush(heap, (priority, point, i ))
+        if len(heap) > num_kept:
+            heapq.heappop(heap)
+
+    # Reformat and return
+    priorities, points, indices = zip(*heap)
+    cluster = {"priorities" : np.ndarray(list(priorities)),
+               "points" : np.ndarray(list(points)),
+               "indices" : np.ndarray(list(indices))}
+    return cluster
+
+
+def assign_data_to_centroids(datapoint: np.ndarray,
+                            data_index: int,
+                            centroids: np.ndarray,
+                            centroid_buckets: List[List[Tuple[float, np.ndarray, int]]],
+                            measure: Callable[[np.ndarray, np.ndarray], np.ndarray],
+                            max_bucket_length: int):
+    """
+    Assign a datapoint to a centroid's bucket, rearranging if necessary.
+    """
+    distances = measure(datapoint, centroids)
+    priorities = -distances
+    centroid_priorities = np.argsort(distances)
+
+    for index in centroid_priorities:
+        heap = centroid_buckets[index]
+        priority = priorities[index]
+
+        # Add the datapoint and its index to the priority queue
+        heapq.heappush(heap, (priority, datapoint, data_index))
+
+        # If the bucket exceeds the maximum length, rearrange
+        if len(heap) > max_bucket_length:
+            _, point, idx = heapq.heappop(heap)
+            if point is datapoint:
+                continue
+            else:
+                assign_data_to_centroids(point, idx, centroids, centroid_buckets, measure, max_bucket_length)
+                return
+        else:
+            return
+    raise RuntimeError("Not able to assign a datapoint.")
+
+
+def constrained_kmeans(data: np.ndarray,
+                       k: int,
+                       max_cluster_size: int,
+                       measure: Callable[[np.ndarray, np.ndarray], np.ndarray],
+                       max_iters: int = 100,
+                        ) -> Tuple[
+                                    Tuple[np.ndarray, np.ndarray],
+                                    Dict[int, Dict[str, np.ndarray]],
+                                    ]:
+    """
+    Constrained k-means clustering using the assign_data_to_centroid function.
+    """
+    n_samples, n_features = data.shape
+    centroids = initialize_centroids_kmeans_pp(data, k)
+    centroid_buckets = {i: [] for i in range(k)}  # Make sure centroid buckets are always available.
+
+    for iteration in range(max_iters):
+        # Shuffle indices instead of data to avoid unnecessary data copying
+        data_indices = np.arange(n_samples)
+        np.random.shuffle(data_indices)
+
+        centroid_buckets = {i: [] for i in range(k)}  # Reinitialize buckets for each iteration
+
+        for index in data_indices:
+            point = data[index]
+            assign_data_to_centroids(point, index, centroids, centroid_buckets, measure, max_cluster_size)
+
+        # Update centroids based on current clusters
+        for i in range(k):
+            if centroid_buckets[i]:
+                points = np.array([item[1] for item in centroid_buckets[i]])
+                centroids[i] = points.mean(axis=0)
+            else:
+                # Handle empty clusters by reinitializing the centroid
+                centroids[i] = data[np.random.randint(0, n_samples)]
+
+    # Final cluster assignments and computations of std
+    clusters = {}
+    for i in range(k):
+        bucket = centroid_buckets[i]
+
+        priorities = []
+        points = []
+        indices = []
+        for j in range(len(bucket)):
+            priority, point, index = bucket[j]
+            priorities.append(priority)
+            points.append(point)
+            indices.append(index)
+
+        priorities = np.array(priorities)
+        points = np.array(points)
+        indices = np.array(indices)
+
+        clusters[i] = {"priorities" : priorities, "points" : points, "indices" : indices}
+    std = np.array([np.std(clusters[key]["points"]) for key in clusters])
+    return (centroids, std), clusters
+
+
 class ClusteringStrategy(ABC):
     """
     The clustering strategy class definition
@@ -48,6 +173,7 @@ class ClusteringStrategy(ABC):
         :param force_selection: This id must be included in the returned cluster.
         :return: A list of ids. They represent a cluster to form.
         """
+
 
 class QueueClusteringStrategy(ClusteringStrategy):
     """
@@ -103,6 +229,7 @@ class QueueClusteringStrategy(ClusteringStrategy):
         while len(output) < cluster_size:
             output.append(keys.pop(0))
         return output
+
 
 class ConstrainedKmeansStrategy(ClusteringStrategy):
     """
@@ -266,246 +393,3 @@ class ConstrainedKmeansStrategy(ClusteringStrategy):
         # Convert indices back to names and return
         output = self.select_ids_from_indices(vitals, indices)
         return output
-
-## Basic batch strategy classes
-#
-# These primarily have the responsibility of getting the statistics
-# that the above clustering strategies need. At the moment, we base
-# everything on position.
-class BatchStrategy(ABC):
-    """
-    The abstract batch strategy class.
-
-    The batch strategy class has the primary responsibility of
-    extracting important statistics from items in the request
-    buffer to allow the various clustering strategies to work.
-
-    It is dependency-njected with a clustering strategy
-    """
-    def __init__(self,
-                 clustering_strategy: ClusteringStrategy
-                 ):
-        self.clustering_strategy = clustering_strategy
-
-    @abstractmethod
-    def get_vital_statistics(self, requests: RequestBuffer)->torch.Tensor:
-        """
-        An extremely important method, this gives us vital information on
-        the various items in the request buffer. It needs to be compatible
-        with the clustering mechanism.
-
-        Exact details may vary
-        :return:
-        """
-
-    def forward(self,
-                request_buffer: RequestBuffer,
-                batch_size: int,
-                logging_callback: LoggingCallback,
-                force_selection: str,
-                )->List[str]:
-        vitals = self.get_vital_statistics(request_buffer)
-        output = self.clustering_strategy(vitals, batch_size, logging_callback, force_selection)
-        return output
-
-class TransformerBatchStrategy(BatchStrategy):
-    """
-    Implements a batch strategy to handle content that
-    is optimized to work with transformers.
-
-    What this actually means is we look at the product
-    of the shapes, since that is what content will flatten
-    down to. We also look at the length of the context.
-
-    We look to optimize the lengths so that when we
-    flatten a tensor, each tensor has lengths as close
-    together as possible.
-    """
-    def __init__(self,
-                 clustering_strategy: ClusteringStrategy,
-                 use_shape_info: bool,
-                 use_context_info: bool = True
-                 ):
-        super().__init__(clustering_strategy)
-        self.use_shape_info = use_shape_info
-        self.use_context_info = use_context_info
-    def get_vital_statistics(self, requests: RequestBuffer) ->Dict[str, torch.Tensor]:
-        vitals = {}
-        for key, (_, request) in requests.items():
-            statistics = []
-
-            if self.use_shape_info:
-                # Get the shape statistic. This will help us select
-                # based on the generation target
-                shape = request.subtask_details[SHAPES_NAME]
-                statistics.append(float(torch.prod(shape)))
-
-            if self.use_context_info:
-                # We also need to consider how much padding
-                # it is going to take to handle the context concatenation
-                context = request.subtask_details[CONTEXT_NAME]
-                statistics.append(context.shape[0])
-
-            # Combine together. Then store
-            statistics = torch.tensor(statistics)
-            vitals[key] = statistics
-        return vitals
-
-##
-# Batch assembly and dissassembly classes.
-#
-# This actually gets the job of putting a batch together... or taking it back apart and responding.
-
-class BatchAssembly(ABC):
-    """
-    The BatchAssembly class is an abstract class responsible for assembling
-    the tensors in the request buffer into a coherent batch that can be processed
-    by the model.
-
-    This class defines the interface and contract for assembling a batch.
-    Implementers of this class should handle any necessary padding and other
-    batch-specific logic.
-    """
-
-    def __init__(self):
-    @abstractmethod
-    def __call__(self,
-                 request_buffer: RequestBuffer,
-                 uuids: List[str],
-                 logging_callback: LoggingCallback
-                 ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, Callable]]]:
-        """
-        Assembles a batch of data from the selected requests.
-
-        :param request_buffer: The Request Buffer containing pending requests.
-        :param uuids: A list of UUIDs selected by the Batching Strategy.
-        :param logging_callback: A callback function for logging, which accepts a
-                                 message and a verbosity level.
-        :return:
-            - batch: A fully formed batch, which could be a tensor (or a set of tensors)
-                     ready for processing. Implementers should handle any necessary padding.
-            - metadata: A list of List[Tuple[UUID, Callable]], where each inner list
-                        corresponds to an entry in the batch and associates the UUIDs
-                        with their callbacks.
-        :effect: Modifies the request buffer to remove used requests.
-        """
-        pass
-
-
-class TransformerAssembly(BatchAssembly):
-    """
-    The transformer batch assembly mechanism.
-
-    This class can be configured to provide context,
-    shapes, and target data so long as the needed information
-    is being passed along through the training pipeline.
-
-    The shape and target information will be expected to be in the
-    subtask_details dictionary of each ActionRequest. The context
-    can be extracted from the state tracker feature.
-
-    --- expected usage ---
-
-    It is expected this will be used in a context-only configuration - for
-    control flow - and in a context+shape config for eval, context+shape+targets
-    for supervised training.
-    """
-    def __init__(self,
-                 include_context: bool,
-                 include_shapes: bool,
-                 include_targets: bool,
-                 num_channel_dim: int
-                 ):
-        """
-        :param include_context: Whether to include context info in the output dictionary
-        :param include_shapes: Whether to include shape info in the output dictionary
-        :param include_targets: Whether to include target info in the output dictionary.
-        :param num_channel_dim: The number of channel dimensions.
-                                  Everything before that will be flattened.
-
-        """
-        super().__init__()
-
-        self.include_context = include_context
-        self.include_shape = include_shapes
-        self.include_target = include_targets
-        self.num_embedding_dim = num_channel_dim
-
-    def __call__(self,
-                 request_buffer: RequestBuffer,
-                 uuids: List[str],
-                 logging_callback: LoggingCallback
-                 ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, Callable]]]:
-        """
-        Assembles a batch of data from the selected requests.
-
-        :param request_buffer: The Request Buffer containing pending requests.
-        :param uuids: A list of UUIDs selected by the Batching Strategy.
-        :param logging_callback: A callback function for logging, which accepts a
-                                 message and a verbosity level.
-        :return:
-            - batch: A fully formed batch, which could be a tensor (or a set of tensors)
-                     ready for processing. Implementers should handle any necessary padding.
-            - metadata: A list of List[Tuple[UUID, Callable]], where each inner list
-                        corresponds to an entry in the batch and associates the UUIDs
-                        with their callbacks.
-        :effect: Modifies the request buffer to remove used
-        """
-
-        # Define content accumulators
-        metadata = []
-        shapes = [] if self.include_shape else None
-        targets = [] if self.include_target else None
-        contexts = [] if self.include_context else None
-
-        # Define max length trackers. These will be used in the padding
-        # step.
-
-        targets_max_length = 0 if self.include_target else None
-        context_max_length = 0 if self.include_context else None
-
-        # Go and get all the information.
-        #
-        # Track as well the padding targets, to whatever degree is relevant
-        for uuid in uuids:
-            future, action_request = request_buffer.pop(uuid)
-            metadata.append((uuid, future))
-
-            if self.include_context:
-                # Handle context extraction. This includes updating the padding targets
-                # and getting the actual information
-                context = action_request.state_tracker.context
-                context_max_length = max(context_max_length, context.shape[0])
-                contexts.append(context)
-
-            if self.include_shape:
-                # Handle shape extraction. Shapes also are used to track target
-                # lengths
-                shape = action_request.subtask_details[SHAPES_NAME]
-                shapes.append(shape)
-
-            if self.include_target:
-                target = action_request.subtask_details[TARGETS_NAME]
-                target = target.flatten(0, -(self.num_embedding_dim + 1))
-                targets_max_length = max(targets_max_length, target.shape[0])
-
-        batched = {}
-        if self.include_shape:
-            shapes = torch.stack(shapes, dim=0)
-            batched["shape"] = shapes
-
-        if self.include_context:
-            contexts = [F.pad(context, (0, context_max_length - context.shape[0])) for context in contexts]
-            contexts = torch.stack(contexts, dim=0)
-            batched["context"] = contexts
-
-        if self.include_target:
-            targets = [F.pad(target, (0, targets_max_length-target.shape[0])) for target in targets]
-            targets = torch.stack(targets, dim=0)
-            batched["targets"] = targets
-
-        return batched, metadata
-
-
-
-

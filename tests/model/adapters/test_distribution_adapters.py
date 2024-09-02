@@ -1,10 +1,8 @@
 import unittest
 import torch
 from unittest.mock import MagicMock, patch
-from typing import Any, Dict, Type
-from src.model.adapters.io_adapters import IORegistry
-from src.model.adapters.distribution_adapters import (DistributionAdapterRegistry, DistributionAdapter,
-                                                      VocabularyDistributionAdapter, registry)
+from docs.old.adapters import IORegistry
+from docs.old.adapters.distribution_adapters import (DistributionAdapterRegistry, VocabularyDistributionAdapter, registry)
 
 class MockDistributionAdapter:
     """

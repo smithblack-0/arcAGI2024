@@ -1,9 +1,7 @@
 import unittest
 import torch
 from torch import nn
-from unittest.mock import MagicMock, patch
-from typing import Dict, Type, Any
-from src.model.adapters.io_adapters import IOAdapter, IORegistry, RMSImageIOAdapter, VocabularyIOAdapter, registry, \
+from docs.old.adapters import IOAdapter, IORegistry, RMSImageIOAdapter, VocabularyIOAdapter, registry, \
     ControllerIOAdapter, LogitSeparator
 
 

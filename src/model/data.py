@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 @dataclass
 class StateTracker:
+    id: str
     destination: str
     operation: str
     context: torch.Tensor
@@ -43,6 +44,7 @@ class StateTracker:
         outputs = outputs if outputs is not None else self.outputs
 
         return StateTracker(
+            self.id,
             destination,
             self.operation,
             context,

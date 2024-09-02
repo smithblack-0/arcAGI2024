@@ -1,6 +1,6 @@
 import unittest
 from typing import Callable
-from src.model.adapters.helper_utils import validate_config
+from docs.old.adapters.helper_utils import validate_config
 # Global flag to show error messages
 SHOW_MESSAGES = True
 
