@@ -56,9 +56,11 @@ class BatchAssembly(ABC):
             - batch: The batch that has been constructed. It had better have the same length as cases,
                      or it will throw an error.
             - nonpadding_shapes:
-                a 2d int tensor containing information on the extend of the nonpadding content in the batch.
-                For instance, a tensor containing [[2, 3],[4,6]] might represent a batch that contains a first image
-                of shape [2, 3], and a second image of shape [4, 6].
+                - a 2d int tensor containing information on the extend of the nonpadding content in the batch.
+                  For instance, a tensor containing [[2, 3],[4,6]] might represent a batch that contains a first image
+                  of shape [2, 3], and a second image of shape [4, 6].
+                - The first dimensions must match the number of created batches
+                - The second dimensions should match how many active information dimensions exist.
         """
         pass
 
@@ -144,7 +146,7 @@ class BatchAssembly(ABC):
         ##
         data = {key : [] for key in self.channel_names}
         for key in self.channel_names:
-            for i, batch_case in batch_cases:
+            for i, batch_case in enumerate(batch_cases):
                 data[key].append(batch_case[key])
 
         ###
@@ -161,14 +163,37 @@ class BatchAssembly(ABC):
                 
                 An issue was detected with the implemention of the make batch callback.
                 Either the returned batch tensor did not have the correct batch length,
-                or the returned shape tensor did not have the correct batch length.
+                or the returned shape tensor did not have the correct batch length. 
                 
                 This kind of issue is likely not associated with a particular case, and 
-                thus cannot be recovered from.
+                thus cannot be recovered from. It is probably associated with function
+                make_batch.
+                
                 
                 The expected batch shape was: {len(tensors)}
                 The constructed batch dim was: {batch.shape[0]}
                 The constructed shape batch dim was: {shape.shape[0]}
+
+                This occurred on channel {name}
+
+                """
+                msg = textwrap.dedent(msg)
+                exception = RuntimeError(msg)
+                logging_callback(exception, 0)
+                termination_callback(True)
+                raise exception
+
+            if shape.dim() != 2:
+                msg = f"""
+                A terminal error has occurred.
+                
+                It was expected that a shape tensor would always
+                be constructed with dimensionality equal to two. One
+                batch dimension, one shape dimension. However,
+                actually found {shape.dim()}
+                
+                This occurred on channel {name}
+                It is probably associated with an error in the implementation of make_batch.
                 """
                 msg = textwrap.dedent(msg)
                 exception = RuntimeError(msg)
@@ -236,6 +261,7 @@ class BatchDisassembly:
         # Take apart the padding shape data and reassociate each batch dimension
         # with a data case based on the run_uuids
 
+        logging_callback("Taking apart a batch in a batch dissembler", 3)
         shapes_dict = {id : {} for id in run_uuids}
         for channel, tensor in shapes_data.items():
             if tensor.shape[0] != len(run_uuids):
@@ -254,6 +280,20 @@ class BatchDisassembly:
                 logging_callback(exception, 0)
                 termination_callback(True)
                 raise exception
+            if tensor.dim() != 2:
+                msg = f"""
+                Terminal error encountered. 
+                
+                It was the case shape tensors were expected
+                to be 2d tensors. However, actually found
+                tensor with '{tensor.dim()}' dimensions
+                """
+                msg = textwrap.dedent(msg)
+                exception = RuntimeError(msg)
+                logging_callback(exception, 0)
+                termination_callback(True)
+                raise exception
+
             for id, subtensors in zip(run_uuids, tensor.unbind(0)):
                 shapes_dict[id][channel] = subtensors
 
@@ -263,7 +303,7 @@ class BatchDisassembly:
 
         response_cases = {id : {} for id in run_uuids}
         for key, tensor in model_data.items():
-            if tensor.shape[0] == len(run_uuids):
+            if tensor.shape[0] != len(run_uuids):
                 msg = f"""
                 Unrecoverable error encountered. It was expected that the tensors returned by
                 the model would have the same batch shape as what went in. For feature of name 
@@ -399,6 +439,7 @@ class CoreSyncProcessor(nn.Module):
             # Remove any attempt the model
             used_ids = []
             exception_data.update({id : exception for id in selected_cases})
+            model_output = {}
 
         output = self.batch_disassembler(used_ids, exception_data, shapes,
                                          model_output, logging_callback, termination_callback)

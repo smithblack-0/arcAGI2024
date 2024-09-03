@@ -126,7 +126,7 @@ class ResultsProcessor(ABC):
         When invoked, this will use the provided information
         to compute the next action request.
 
-\        :param request: The original action request
+        :param request: The original action request
         :param results: The results of running the request
         :return: A new action request
         """
