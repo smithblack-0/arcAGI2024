@@ -6,11 +6,8 @@ core classes
 
 
 import torch
-import numpy as np
 from typing import Callable, Dict, Tuple, Optional
-from ..config import Config
-from ..data import ActionRequest
-
+from src.old.model.config import Config
 
 # Data intake and batching
 DataCase = Dict[str, torch.Tensor]

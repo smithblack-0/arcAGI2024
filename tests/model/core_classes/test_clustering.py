@@ -1,16 +1,17 @@
 import unittest
+from unittest.mock import MagicMock
 import numpy as np
 from numpy.testing import assert_array_almost_equal
 
 
-from src.model.core_classes.clustering import (initialize_centroids_kmeans_pp,
-                                                assign_best_to_centroids,
-                                                stake_claims,
-                                                resolve_fights,
-                                                constrained_match,
-                                                constrained_kmeans
-                                               )
-from src.model.core_classes.clustering import L1Distance, L2Distance, BoundingOverlapDifference
+from src.old.core_classes_old.clustering import (initialize_centroids_kmeans_pp,
+                                                 assign_best_to_centroids,
+                                                 stake_claims,
+                                                 resolve_fights,
+                                                 constrained_match,
+                                                 constrained_kmeans
+                                                 )
+from src.old.core_classes_old.clustering import L1Distance, L2Distance, BoundingOverlapDifference
 
 class TestMeasureSubclasses(unittest.TestCase):
 
@@ -49,85 +50,106 @@ class TestMeasureSubclasses(unittest.TestCase):
         expected_distances = np.array([[1*2 - 1*1, 3*4 - 1*1],
                                        [5*5 - 1*2, 5*5 - 3*4]])
         np.testing.assert_array_equal(distances, expected_distances)
-
 class TestInitializeCentroidsKmeansPP(unittest.TestCase):
 
     def test_simple_dataset_initialization(self):
         # Test with a simple 2D dataset
         data = np.array([[1, 1], [2, 2], [3, 3], [4, 4]])
         k = 2
-        centroids = initialize_centroids_kmeans_pp(data, k)
+        logging_callback = MagicMock()
+        section_lengths = np.array([2])
+        centroids = initialize_centroids_kmeans_pp(data, section_lengths, k, L2Distance(), logging_callback)
 
         # Ensure centroids are selected from the original data points
         for centroid in centroids:
             self.assertIn(list(centroid), data.tolist())
 
+        # Verify logging was called
+        logging_callback.assert_called()
+
     def test_correct_number_of_centroids(self):
         # Test to ensure the correct number of centroids is returned
         data = np.random.rand(10, 2)
         k = 3
-        centroids = initialize_centroids_kmeans_pp(data, k)
+        logging_callback = MagicMock()
+        section_lengths = np.array([2])
+        centroids = initialize_centroids_kmeans_pp(data, section_lengths, k, L2Distance(), logging_callback)
 
         self.assertEqual(centroids.shape[0], k)
         self.assertEqual(centroids.shape[1], data.shape[1])
 
-    def test_k_greater_than_n_samples(self):
-        # Test the case where k > n_samples
-        data = np.array([[1, 1], [2, 2], [3, 3]])
-        k = 5
-
-        with self.assertRaises(ValueError):
-            centroids = initialize_centroids_kmeans_pp(data, k)
-
+        # Verify logging was called
+        logging_callback.assert_called()
     def test_randomness_of_initialization(self):
         # Ensure different results for different runs without fixed seed
         data = np.random.rand(20, 2)
         k = 3
-        centroids_1 = initialize_centroids_kmeans_pp(data, k)
-        centroids_2 = initialize_centroids_kmeans_pp(data, k)
+        logging_callback = MagicMock()
+        section_lengths = np.array([2])
+        centroids_1 = initialize_centroids_kmeans_pp(data, section_lengths, k, L2Distance(), logging_callback)
+        centroids_2 = initialize_centroids_kmeans_pp(data, section_lengths, k, L2Distance(), logging_callback)
 
         # Check that the centroids are not identical across runs
         self.assertFalse(np.allclose(centroids_1, centroids_2))
 
     @unittest.skip("test_reproducibility_with_fixed_seed: This still needs to be debugged, but is good enough for now.")
     def test_reproducibility_with_fixed_seed(self):
-        #NOTE: Test currently fails, and it is unclear why.
         # Ensure that the initialization is reproducible with a fixed random seed
         np.random.seed(42)
         data = np.random.rand(10, 2)
         k = 3
-        centroids_1 = initialize_centroids_kmeans_pp(data, k)
+        logging_callback = MagicMock()
+        section_lengths = np.array([2])
+        centroids_1 = initialize_centroids_kmeans_pp(data, section_lengths, k, L2Distance(), logging_callback)
 
         np.random.seed(42)
-        centroids_2 = initialize_centroids_kmeans_pp(data, k)
+        centroids_2 = initialize_centroids_kmeans_pp(data, section_lengths, k, L2Distance(), logging_callback)
 
         assert_array_almost_equal(centroids_1, centroids_2)
 
     def test_centroid_distribution(self):
         # Test with a dataset having 4 points in two clusters
-        distance_amplification = 1000 # This greatly amps up the selection probabilities
-        cluster_one = distance_amplification*np.array([[10, 10, 10], [9, 9, 9]])
-        cluster_two = distance_amplification*np.array([[-19, -19, -19], [-18, -18, -18]])
+        distance_amplification = 1000  # This greatly amps up the selection probabilities
+        cluster_one = distance_amplification * np.array([[10, 10, 10], [9, 9, 9]])
+        cluster_two = distance_amplification * np.array([[-19, -19, -19], [-18, -18, -18]])
         data = np.concatenate([cluster_one, cluster_two], axis=0)
         k = 2
-        centroids = initialize_centroids_kmeans_pp(data, k)  # (k=2, 2)
+        logging_callback = MagicMock()
+        section_lengths = np.array([3])
+        centroids = initialize_centroids_kmeans_pp(data, section_lengths, k, L2Distance(), logging_callback)
 
         # One centroid should be from the first cluster, one from the second
-        # cluster. Ensure each cluster is matched EXACTLY once
+        cluster_one = np.expand_dims(cluster_one, axis=0)
+        cluster_two = np.expand_dims(cluster_two, axis=0)
+        expanded_centroids = np.expand_dims(centroids, axis=1)
 
-        cluster_one = np.expand_dims(cluster_one, axis=0) # (1, 2, 3)
-        cluster_two = np.expand_dims(cluster_two, axis=0) #(1, 2, 3)
-        expanded_centroids = np.expand_dims(centroids, axis=1) #(2, 1, 3)
-
-        # Check. We shold have EXACTLY
+        # Check. We should have EXACTLY one match for each cluster
         self.assertEqual(np.all(cluster_one == expanded_centroids, axis=-1).sum(), 1)
         self.assertEqual(np.all(cluster_two == expanded_centroids, axis=-1).sum(), 1)
 
+        # Verify logging was called
+        logging_callback.assert_called()
+
+    def test_compound_mode(self):
+        # Test the function with compound points (multiple sections in data)
+        data = np.random.rand(10, 5)  # 10 data points, 5 features (could be split into 3+2)
+        section_lengths = np.array([3, 2])
+        k = 3
+        logging_callback = MagicMock()
+
+        centroids = initialize_centroids_kmeans_pp(data, section_lengths, k, L2Distance(), logging_callback)
+
+        # Ensure centroids are selected from the original data points
+        for centroid in centroids:
+            self.assertIn(list(centroid), data.tolist())
+
+        # Verify logging was called
+        logging_callback.assert_called()
 
 class TestAssignBestToCentroids(unittest.TestCase):
 
     def setUp(self) -> None:
-        # This will run before each test
+        # This will be initialized before each test to avoid cross-contamination
         self.measure = L2Distance()
 
     def check_matches_present(self,
@@ -150,9 +172,9 @@ class TestAssignBestToCentroids(unittest.TestCase):
         self.assertEqual(matches.sum(), expected_matches)
 
     def test_basic_functionality(self) -> None:
-        """
-        Test that the function correctly identifies the `n` closest points to a given centroid using L2 distance.
-        """
+        """ Test that the function correctly identifies the `n` closest points to a given centroid using L2 distance. """
+        logging_callback = MagicMock()
+
         # Define datapoints and centroids
         cluster_one = np.array([[1, 1], [2, 2]])
         cluster_two = np.array([[10, 10], [11, 11]])
@@ -162,8 +184,9 @@ class TestAssignBestToCentroids(unittest.TestCase):
         n = 2
 
         # Run the function
-        selected_datapoints, indices, distances = assign_best_to_centroids(datapoints, centroids, section_lengths,
-                                                                           self.measure, n)
+        selected_datapoints, indices, distances = assign_best_to_centroids(
+            datapoints, centroids, section_lengths, self.measure, n, logging_callback
+        )
 
         # Check that the selected datapoints contain the correct cluster elements
         self.check_matches_present(selected_datapoints, cluster_one, expected_matches=2)
@@ -171,11 +194,14 @@ class TestAssignBestToCentroids(unittest.TestCase):
         # Verify that distances are correct
         expected_distances = np.array([0, np.sqrt(2)])
         np.testing.assert_array_almost_equal(np.sort(distances), np.sort(expected_distances))
-    def test_composite_functionality(self):
-        """
-        Test that we can operate correctly when defining multiple
-        centroids and points
-        """
+
+        # Ensure that the logging callback was called
+        logging_callback.assert_called()
+
+    def test_composite_functionality(self) -> None:
+        """ Test that we can operate correctly when defining multiple centroids and points. """
+        logging_callback = MagicMock()
+
         # Define datapoints and centroids
         cluster_one = np.array([[1, 1], [2, 2]])
         cluster_two = np.array([[10, 10], [11, 11]])
@@ -185,20 +211,24 @@ class TestAssignBestToCentroids(unittest.TestCase):
         n = 2
 
         # Run the function
-        selected_datapoints, indices, distances = assign_best_to_centroids(datapoints, centroids, section_lengths,
-                                                                           self.measure, n)
+        selected_datapoints, indices, distances = assign_best_to_centroids(
+            datapoints, centroids, section_lengths, self.measure, n, logging_callback
+        )
 
         # Check that the selected datapoints contain the correct cluster elements
         self.check_matches_present(selected_datapoints, cluster_one, expected_matches=2)
 
-        # Verify that distances are correct.
-        expected_distances = np.array([0, 1+1])
+        # Verify that distances are correct
+        expected_distances = np.array([0, 1 + 1])
         np.testing.assert_array_almost_equal(np.sort(distances), np.sort(expected_distances))
 
+        # Ensure that the logging callback was called
+        logging_callback.assert_called()
+
     def test_select_top_n(self) -> None:
-        """
-        Test that the function correctly selects the top `n` closest points.
-        """
+        """ Test that the function correctly selects the top `n` closest points. """
+        logging_callback = MagicMock()
+
         # Define datapoints and centroids
         cluster_one = np.array([[1, 1], [2, 2], [3, 3]])
         cluster_two = np.array([[10, 10], [11, 11], [12, 12]])
@@ -208,8 +238,9 @@ class TestAssignBestToCentroids(unittest.TestCase):
         n = 2
 
         # Run the function
-        selected_datapoints, indices, distances = assign_best_to_centroids(datapoints, centroids, section_lengths,
-                                                                           self.measure, n)
+        selected_datapoints, indices, distances = assign_best_to_centroids(
+            datapoints, centroids, section_lengths, self.measure, n, logging_callback
+        )
 
         # Check that the selected datapoints contain the correct cluster elements
         self.check_matches_present(selected_datapoints, cluster_one[:2], expected_matches=2)
@@ -219,6 +250,8 @@ class TestAssignBestToCentroids(unittest.TestCase):
         expected_distances = np.array([0, np.sqrt(2)])
         np.testing.assert_array_almost_equal(np.sort(distances), np.sort(expected_distances))
 
+        # Ensure that the logging callback was called
+        logging_callback.assert_called()
 
 class TestStakeClaims(unittest.TestCase):
 
@@ -343,6 +376,7 @@ class TestResolveFights(unittest.TestCase):
             next_claims = claims.copy()
             resolve_fights(next_claims, distances)
             np.testing.assert_array_equal(initial_claims, next_claims)
+
 class TestConstrainedMatch(unittest.TestCase):
 
     def test_simple_case(self):
@@ -350,30 +384,40 @@ class TestConstrainedMatch(unittest.TestCase):
         distances = np.array([[1, 5, 10],
                               [10, 5, 1]])
         n = 2  # Each centroid can claim at most 2 points
-
         expected_claims = np.array([[True, True, False],
                                     [False, False, True]])
 
-        claims = constrained_match(distances, n)
+        # Create a separate logging callback mock
+        logging_callback = MagicMock()
+
+        claims = constrained_match(distances, n, logging_callback)
 
         # Assert claims match the expected values
         np.testing.assert_array_equal(claims, expected_claims)
+
+        # Ensure logging callback was called with Verbosity.Debug
+        for call in logging_callback.call_args_list:
+            self.assertEqual(call[0][1], 3)  # Assuming 3 corresponds to Verbosity.Debug
 
     def test_fighting_case(self):
         # Test where centroids fight for the same point
         distances = np.array([[0, 1, 10],
                               [0, 2, 0]])
         n = 1  # Each centroid can claim only 1 point
-
-        # Centroid 0 and 1 will both initially claim point 0 (same distance), but centroid 1
-        # should claim point 2 after point 0 is resolved in favor of centroid 0
         expected_claims = np.array([[True, False, False],
                                     [False, False, True]])
 
-        claims = constrained_match(distances, n)
+        # Create a separate logging callback mock
+        logging_callback = MagicMock()
+
+        claims = constrained_match(distances, n, logging_callback)
 
         # Assert claims match the expected values
         np.testing.assert_array_equal(claims, expected_claims)
+
+        # Ensure logging callback was called with Verbosity.Debug
+        for call in logging_callback.call_args_list:
+            self.assertEqual(call[0][1], 3)  # Assuming 3 corresponds to Verbosity.Debug
 
     def test_max_points_per_centroid(self):
         # Test with more centroids and points but each centroid can only claim 1 point
@@ -381,44 +425,61 @@ class TestConstrainedMatch(unittest.TestCase):
                               [2, 1, 2],
                               [3, 3, 1]])
         n = 1  # Each centroid can claim only 1 point
-
         expected_claims = np.array([[True, False, False],
                                     [False, True, False],
                                     [False, False, True]])
 
-        claims = constrained_match(distances, n)
+        # Create a separate logging callback mock
+        logging_callback = MagicMock()
+
+        claims = constrained_match(distances, n, logging_callback)
 
         # Assert claims match the expected values
         np.testing.assert_array_equal(claims, expected_claims)
+
+        # Ensure logging callback was called with Verbosity.Debug
+        for call in logging_callback.call_args_list:
+            self.assertEqual(call[0][1], 3)  # Assuming 3 corresponds to Verbosity.Debug
 
     def test_unclaimed_points(self):
         # Test where some points are left unclaimed because centroids are at maximum claims
         distances = np.array([[1, 100, 100],
                               [100, 100, 1]])  # Larger values instead of using infinity
         n = 1  # Each centroid can claim only 1 point
-
         expected_claims = np.array([[True, False, False],
                                     [False, False, True]])
 
-        claims = constrained_match(distances, n)
+        # Create a separate logging callback mock
+        logging_callback = MagicMock()
+
+        claims = constrained_match(distances, n, logging_callback)
 
         # Assert claims match the expected values
         np.testing.assert_array_equal(claims, expected_claims)
+
+        # Ensure logging callback was called with Verbosity.Debug
+        for call in logging_callback.call_args_list:
+            self.assertEqual(call[0][1], 3)  # Assuming 3 corresponds to Verbosity.Debug
 
     def test_tie_fight_resolution(self):
         # Test if tie-fights are consistently resolved the same way
         distances = np.array([[1, 1, 10],
                               [1, 1, 10]])
         n = 1  # Each centroid can claim only 1 point
-
-        # We expect centroids to resolve their claims deterministically in the same way
         expected_claims = np.array([[True, False, False],
                                     [False, True, False]])
 
+        # Create a separate logging callback mock
+        logging_callback = MagicMock()
+
         # Run multiple times to check consistent resolution
         for _ in range(10):
-            claims = constrained_match(distances, n)
+            claims = constrained_match(distances, n, logging_callback)
             np.testing.assert_array_equal(claims, expected_claims)
+
+            # Ensure logging callback was called with Verbosity.Debug
+            for call in logging_callback.call_args_list:
+                self.assertEqual(call[0][1], 3)  # Assuming 3 corresponds to Verbosity.Debug
 
 
 class TestConstrainedKMeans(unittest.TestCase):

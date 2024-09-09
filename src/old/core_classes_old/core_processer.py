@@ -9,8 +9,7 @@ from .types import (
     DataCaseBuffer,
     ExceptionAugmentedResponse,
 )
-from dataclasses import dataclass
-from ..config import Config
+
 
 ##
 # Batch assembly and disassembly classes.

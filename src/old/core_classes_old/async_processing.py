@@ -9,10 +9,10 @@ import torch
 from torch import nn
 from torch.futures import Future
 from abc import ABC, abstractmethod
-from typing import Dict, Tuple, Callable, List, Optional
+from typing import Tuple, List
 
 from .clustering import ClusteringStrategy
-from ..data import ActionRequest
+from src.old.model.data import ActionRequest
 from .types import (
                     # Input handling, mostly
                     DataCase,
@@ -126,7 +126,7 @@ class ResultsProcessor(ABC):
         When invoked, this will use the provided information
         to compute the next action request.
 
-        :param request: The original action request
+            :param request: The original action request
         :param results: The results of running the request
         :return: A new action request
         """

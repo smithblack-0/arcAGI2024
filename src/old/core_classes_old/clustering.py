@@ -1,9 +1,10 @@
+import textwrap
 from abc import ABC, abstractmethod
 
 import numpy as np
-import heapq
 from typing import List, Callable, Tuple, Dict, Optional
-from .types import LoggingCallback
+from .types import LoggingCallback, TerminationCallback
+from src.old.model.config import Verbosity
 import torch
 class Measure(ABC):
     """
@@ -121,7 +122,11 @@ class BoundingOverlapDifference(Measure):
 
 
 def initialize_centroids_kmeans_pp(data: np.ndarray,
-                                   k: int) -> np.ndarray:
+                                   section_lengths: np.ndarray,
+                                   k: int,
+                                   measure: Measure,
+                                   logging_callback: LoggingCallback,
+                                   ) -> np.ndarray:
     """
     Initialize centroids using the k-means++ method.
 
@@ -138,26 +143,54 @@ def initialize_centroids_kmeans_pp(data: np.ndarray,
     3. This process is repeated until k centroids are selected.
 
     :param data: np.ndarray
-        The dataset as a 2D NumPy array with shape (n_samples, n_features).
+        The dataset of compressed points as a 2D NumPy array with shape (n_samples, n_features).
+    :param segment_lengths:
+        - Shows how much of n_features is associated with each point in the compressed point
+        - n_feature may consist of the concatenated of related points, like the shape of a
+          context tensor and of an image tensor.
     :param k: int
-        The number of centroids to initialize.
-
+        - The number of centroids to initialize.
+    :param logging_callback:
+        - The logging callback
     :return: np.ndarray
         An array of shape (k, n_features) containing the initialized centroids.
     """
-    n_samples = data.shape[0]
-    centroids = np.empty((k, data.shape[1]))
+    n_samples, n_features = data.shape
+    split_indices = np.cumsum(section_lengths)[:-1]  # Convert lengths to split indices
+    point_arrays = np.split(data, split_indices, axis=-1)
+    centroids = np.zeros((k, data.shape[1]))
+
+    msg = f"""
+    Initializing centroids for a kmeans like process. Centroids are being
+    initialized:
+    
+    with number of samples to draw from: {n_samples}
+    with number of features per compound point: {n_features}
+    with number of centroids being: {k}
+    """
+    msg = textwrap.dedent(msg)
+    logging_callback(msg, Verbosity.Debug.value)
 
     # Step 1: Randomly select the first centroid from the data points
     centroids[0] = data[np.random.randint(0, n_samples)]
 
     for i in range(1, k):
-        # Step 2: Compute the distance from each point to its nearest centroid
-        distances= np.min(np.linalg.norm(data[:, np.newaxis] - centroids[:i], axis=2), axis=1)
+
+        # Step 2: Compute the distance from each point to its nearest centroid.
+        # Each point and centroid is split into its respective sections, and the distances
+        # are computed and accumulated across all sections. This ensures that the overall
+        # distance is based on all features (or sub-points) of each concatenated point.
+        centroid_arrays = np.split(centroids, split_indices, axis=-1)
+        distances = np.zeros((k, data.shape[0]))
+        for centroid, point in zip(centroid_arrays, point_arrays):
+            distances += measure(point, centroid)
+        print("distances", distances)
+        distances = np.min(distances, axis=0)
 
         # Step 3: Square the distances and then calculate the probability of selection
-        distances= distances + 1e-10 # Prevent division by zero.
+        distances= distances + 1e-6 # Prevent division by zero.
         probabilities: np.ndarray = distances**2 / np.sum(distances**2)
+        print("probabilities", probabilities)
 
         # Step 4: Use np.random.choice for multinomial selection from the data points
         centroids[i] = data[np.random.choice(n_samples, p=probabilities)]
@@ -170,10 +203,12 @@ def assign_best_to_centroids(datapoints: np.ndarray,
                              section_lengths: np.ndarray,
                              measure: Measure,
                              n: int,
+                             logging_callback: LoggingCallback,
                             )->Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     A function to use when assigning data to centroids based on
-    the idea of keeping the best 'n' cases.
+    the idea of keeping the best 'n' cases. If there are less than
+    n datapoints, return as many as we can.
 
     An additional complication is the allowance of processing of
     corrolated centroid/datapoint sets using the same measure.
@@ -215,6 +250,17 @@ def assign_best_to_centroids(datapoints: np.ndarray,
         - distances:
             - The distance of each winner from the centroid.
     """
+
+    msg = f"""
+    Assign best to centroid has been invoked.
+    
+    number_to_attempt_to_assign: {n}
+    number_of_datapoints_drawing_from {datapoints.shape[0]}
+    n_features: {datapoints.shape[1]}
+    section_lengths: {section_lengths}
+    """
+    msg = textwrap.dedent(msg)
+    logging_callback(msg, Verbosity.Debug.value)
 
     # Step one - split into sections
     split_indices = np.cumsum(section_lengths)[:-1]  # Convert lengths to split indices
@@ -378,8 +424,10 @@ def resolve_fights(claims: np.ndarray,
     # Assign the winner for each fight by setting the correct claims to True
     claims[winners, fight_indices] = True
 
+
 def constrained_match(distances: np.ndarray,
                       n: int,
+                      logging_callback: LoggingCallback
                       ) -> np.ndarray:
     """
     Finds the best constrained match for the given distance table. This
@@ -406,10 +454,17 @@ def constrained_match(distances: np.ndarray,
         The distance matrix between centroids and points. Shape (centroids, datapoints).
     :param n:
         The maximum number of points that each centroid can claim.
+    :param logging_callback:
+        - A logging callback.
+        - Used to log various vital information.
     :return:
         claims: The final claims matrix after resolving all fights.
                 Shape: (centroids, datapoints), with True indicating a claim.
     """
+
+    # Log the shape of the distance matrix and the value of n
+    logging_callback(f"Constrained match invoked with distances shape: {distances.shape} and n = {n}",
+                     Verbosity.Debug.value)
 
     # Set up tracking: claims matrix to track centroid claims on points
     claims = np.zeros_like(distances, dtype=bool)
@@ -419,22 +474,25 @@ def constrained_match(distances: np.ndarray,
     # While points remain unclaimed and not all centroids are full,
     # stake claims per centroid, then resolve any fights.
     while not (all_points_claimed() or all_centroids_full()):
+        logging_callback("Staking claims for centroids...", Verbosity.Debug.value)
         stake_claims(claims, distances, n)
+
+        logging_callback("Resolving fights between centroids...", Verbosity.Debug.value)
         resolve_fights(claims, distances)
 
     # Return the final claims matrix
+    logging_callback("Final claims matrix computed.", Verbosity.Debug.value)
     return claims
-
-
 
 def constrained_kmeans(datapoints: np.ndarray,
                        section_lengths: np.ndarray,
                        k: int,
                        n: int,
                        measure: Measure,
+                       logging_callback: LoggingCallback,
                        max_iters: int = 100,
                        tolerance: float = 0.0001,
-                       )->List[Dict[str, np.ndarray]]:
+                       ) -> List[Dict[str, np.ndarray]]:
     """
     The constrained kmeans algorithm is similar in behavior to
     the standard kmeans, but contains a notable twist. This
@@ -463,100 +521,70 @@ def constrained_kmeans(datapoints: np.ndarray,
         - The tolerance
         - When gains are under this, we end generation.
     """
-    # Step one.
-    #
-    # This is setup. We split the points into their separate sections,
-    # and initialize the centroids to decent default values. We also
-    # go ahead and initialize the last_total_std used to check threshold
-    # conditions
 
-    split_indices = np.cumsum(section_lengths)[:-1]  # Convert lengths to split indices
+    # Step one: Initial setup and logging
+    split_indices = np.cumsum(section_lengths)[:-1]
     point_arrays = np.split(datapoints, split_indices, axis=-1)
-    centroid_arrays = [initialize_centroids_kmeans_pp(point_array, k) for point_array in point_arrays]
+
+    logging_callback(f"Starting constrained kmeans with {datapoints.shape[0]} datapoints, "
+                     f"{datapoints.shape[1]} features, and {k} clusters.", Verbosity.Debug.Value)
+
+    centroid_arrays = initialize_centroids_kmeans_pp(datapoints, section_lengths, k, measure, logging_callback)
     centroids = np.concatenate(centroid_arrays, axis=-1)
 
     last_total_distance = np.inf
 
-    # Run constrained kmeans process
     for i in range(max_iters):
+        logging_callback(f"Iteration {i + 1} of constrained kmeans", Verbosity.Debug.Value)
 
-        ## Step 2:
-        #  Compute the distance matrices for each array subset,
-        #  and combine them together to get the overall distances
-
+        ## Step 2: Compute the distance matrices for each array subset
         distances = np.zeros([k, datapoints.shape[0]])
         centroid_arrays = np.split(centroids, split_indices, axis=-1)
         for point_array, centroid_array in zip(point_arrays, centroid_arrays):
             distances += measure(point_array, centroid_array)
 
-        ##
-        # Step 3:
-        #
-        # We get the claims matrix, then decode it into several
-        # important quantities such as the optimal points index,
-        # points mask, and unselected points index
+        logging_callback(f"Distances shape: {distances.shape}. Maximum points per cluster: {n}", Verbosity.Debug.Value)
 
-        claims_matrix = constrained_match(distances, n)
+        ## Step 3: Compute claims matrix and decode claims
+        claims_matrix = constrained_match(distances, n, logging_callback)
         point_indices = np.argsort(claims_matrix, axis=1)[:, -n:]
-
         centroids_index = np.expand_dims(np.arange(claims_matrix.shape[0]), axis=-1)
         centroid_indices = np.broadcast_to(centroids_index, point_indices.shape)
         point_mask = claims_matrix[centroid_indices, point_indices]
 
-        ##
-        # Step 4:
-        #
-        # Based on the claims, recompute our total distances, and decide
-        # whether it would be better to break here
-
+        ## Step 4: Recompute total distances and check termination condition
         distance_clusters = distances[centroid_indices, point_indices]
-        distance_per_centroid = np.sum(distance_clusters*point_mask, axis=-1)
+        distance_per_centroid = np.sum(distance_clusters * point_mask, axis=-1)
         new_total_distance = np.sum(distance_per_centroid)
+
+        logging_callback(f"New total distance: {new_total_distance}, last total distance: {last_total_distance}", Verbosity.Debug.Value)
+
         if (last_total_distance - new_total_distance) < tolerance:
+            logging_callback(f"Convergence reached at iteration {i + 1}. Exiting.", Verbosity.Debug.Value)
             break
+
         last_total_distance = new_total_distance
 
-        # Step 5:
-        #
-        # Recompute the centroids as a mean of the selected datapoints,
-        # while ignoring the masked entries.
-
-        point_clusters = datapoints.take(point_indices, axis=0) # shape: centroid, points, data_dim
+        # Step 5: Recompute centroids
+        point_clusters = datapoints.take(point_indices, axis=0)
         expanded_mask = np.expand_dims(point_mask, axis=-1)
-        centroids = np.sum(point_clusters*expanded_mask, axis=1)/(np.sum(expanded_mask, axis=1)+ 1e-9)
+        centroids = np.sum(point_clusters * expanded_mask, axis=1) / (np.sum(expanded_mask, axis=1) + 1e-9)
 
-    # Step 6:
-    #
-    # Perform actual production of results. For efficiencies sake,
-    # the kmeans process runs using masks rather than split lists or dicts,
-    # but we split up the output into such.
-
+    # Step 6: Final cluster results
     datapoint_clusters = datapoints.take(point_indices, axis=0)
     clusters = []
     for i in range(k):
-        cluster = {}
-
-        # Get and store the centroid associated with this
-        # cluster, and the total distance for that centroid.
-
-        cluster["centroid"] = centroids[i, :]
-        cluster["total_distance"] = distance_per_centroid[i]
-
-        # Get and store all datapoints that are assigned within the
-        # cluster, and the indices of these datapoints. This will
-        # include shortening them with a mask
-
-        cluster_datapoints = datapoint_clusters[i, :]
-        cluster_indices = point_indices[i, :]
-        cluster_mask = point_mask[i, :]
-
-        cluster["datapoints"] = cluster_datapoints[cluster_mask]
-        cluster["indices"] = cluster_indices[cluster_mask]
-
-        # Append
+        cluster = {
+            "centroid": centroids[i, :],
+            "total_distance": distance_per_centroid[i],
+            "datapoints": datapoint_clusters[i, :][point_mask[i, :]],
+            "indices": point_indices[i, :][point_mask[i, :]]
+        }
         clusters.append(cluster)
-    return clusters
 
+    logging_callback(f"Constrained kmeans completed. {len(clusters)} clusters formed.", Verbosity.Debug.Value)
+
+    return clusters
 
 class ClusteringStrategy(ABC):
     """
@@ -567,21 +595,94 @@ class ClusteringStrategy(ABC):
     will have various important dimensions, and we can see
     these dimensions and act to minimize padding.
     """
+
     @abstractmethod
-    def __call__(self,
-                vitals: Dict[str, torch.Tensor],
+    def cluster(self,
+                point_data: torch.Tensor,
+                section_lengths: List[int],
                 cluster_size: int,
                 logging_callback: LoggingCallback,
-                force_selection: Optional[str]
+                force_inclusion: int,
+                )->torch.Tensor:
+        """
+        The implementation of the clustering mechanism shall go here.
+        It is required that the implemented function look at the point
+        details - which will usually contain information like shape
+        or position - and return the best valid cluster
+
+        Note that point_details may be a cancotonation of multiple,
+        for example, tensor dimensions - in which case, you can use
+        section length to indicate how much of the elements are associated
+        with each dimension.
+
+        :param point_data:
+            - Details usable for clustering. Usually specifies various shapes
+              of important tensors
+            - Shape (num_options, num_elements)
+            - num_options is the number of datapoints we can consider when making
+              clusters
+            - Keep in mind elements may be concatenated
+        :param section_lengths:
+            - Details used for combined clustering. It is the case elements can
+              be passed in a concatenated format if - for example - you have two
+              tensors you need to consider while clustering.
+            - You need to specify how many elements belong to each tensor. For instance,
+              for two points one of shape [1, 2, 3] and another [2, 5], you would specifiy
+              [3, 2] since the first had length 3 and the second length 2
+        :param cluster_size:
+            - The size to attempt to make the cluster. This will generally act as a target,
+              but may not always be satisfied
+        :param logging_callback:
+            - The logging callback. Used for logging. Enough said, I think
+        :param force_inclusion:
+            An index. Will have to index one of num_options. If provided, this option
+            MUST be included.
+        :return:
+            - An index tensor of shape (L), where L <= cluster_size.
+            - These indices will indicate what of num_options were selected.
+        """
+
+
+    def __call__(self,
+                uuids: List[str],
+                point_options: torch.Tensor,
+                section_lengths: List[int],
+                cluster_size: int,
+                logging_callback: LoggingCallback,
+                termination_callback: TerminationCallback,
+                force_inclusion: Optional[str] = None,
                 )->List[str]:
         """
-        Creates a list of items which should be placed in a batch together.
+        A function designed to perform clustering and return the selected
+        important uuids.
 
-        :param vitals: A mapping of the ids of a case to the important dimension statistics for it.
-        :param cluster_size: The size of the cluster to form
-        :param logging_callback: The logging callback function
-        :param force_selection: This id must be included in the returned cluster.
-        :return: A list of ids. They represent a cluster to form.
+        :param uuids:
+            - The uuids list, which is used to match uuids to tensor dimensions
+            - Must be the same length as the number of options
+        :param batch_vitals:
+            - The various point information to cluster. May encode things like tensor shapes or other
+              relevant computational details.
+            - Shape (options, num_features)
+            - Options MUST be the same length as uuids
+            - num_features may be a concenation of features such as shapes of different tensors
+        :param section_lengths:
+        :param cluster_size:
+        :param logging_callback:
+        :param force_inclusion:
+        :return:
+        """
+
+
+
+        """
+        Creates a list of items which should be placed in a batch together.
+        
+        :param vitals: A collection of information informing us about stuff relating
+                       to the vital statistics for things to be clustered, such as 
+                       shape.
+                       
+                       Shape (num_points, num_features). num_features may be concatenated
+        :param section_lengths: Vitals 
         """
 
 

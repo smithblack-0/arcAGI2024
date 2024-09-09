@@ -7,26 +7,66 @@ a proper config and just display the right properties
 
 from enum import Enum
 
+class Verbosity(Enum):
+    Debug = 3
+    Anomaly = 2
+    NonterminalError = 1
+    TerminalError = 0
+
+
+class SchemaConfig(Enum):
+
+
 class Config(Enum):
     """
     The config object. Contains a bunch of config info
     """
-    # Data channel names
-    #
-    # This mainly controls what things are called as they
-    # flow through dictionaries.
+    # Mode names and Mode feature
+    STOP_GEN = "Stop"
+    TEXT_MODE = "Text"
+    GRIDMODE = "GridInt"
+    MODES = [STOP_GEN, TEXT_MODE, GRIDMODE]
 
-    SHAPES_NAME = "shape"
-    TARGETS_NAME = "targets"
-    CONTEXT_NAME = "context"
+    # Zone names and Zone features
 
-    ### Debug
+    RULEGEN = "RuleStatement"
+    SCENARIOGEN = "Scenario"
+    SCENARIOANSWER = "ScenarioAnswer"
+    RULESDEDUCTIONSTEPS = "RulesDeductionSteps"
+    RULESDEDUCEDANSWER = "RulesDeductedAnswer"
+    SOLUTIONSTEPS = "SolutionSteps"
+    SOLUTIONANSWER = "Solution"
+    ZONES = [RULEGEN,
+             SCENARIOGEN,
+             SCENARIOANSWER,
+             RULESDEDUCTIONSTEPS,
+             RULESDEDUCEDANSWER,
+             SOLUTIONSTEPS,
+             SOLUTIONANSWER]
 
-    DEBUG = False
+    ##
+    # Allowed access per zone. Very important to avoid leaking information
+    # where it is not allowed.
+    ##
 
+    ZONE_ACCESS = { RULEGEN : [],
+                    SCENARIOGEN : [RULEGEN],
+                    SCENARIOANSWER : [RULEGEN, SCENARIOGEN],
+                    RULESDEDUCTIONSTEPS: [SCENARIOGEN],
+                    RULESDEDUCEDANSWER: [SCENARIOGEN, RULESDEDUCTIONSTEPS],
+                    SOLUTIONSTEPS: [SCENARIOGEN, RULESDEDUCEDANSWER],
+                    SOLUTIONANSWER: [SCENARIOGEN, RULESDEDUCEDANSWER, SOLUTIONSTEPS],
+    }
 
-    ### Logging stuff
+    ##
+    # Automated forcing per zone.
+    ##
 
-    LOGGING = True # Whether logging is enabled
-    LOGGING_VERBOSITY_THRESHOLD = 3 # Messages with this and below verbosity are displayed
-    LOGGING_DESTINATION = "console" # Where to send the messages
+    ZONE_FORCING = {RULESDEDUCEDANSWER : RULEGEN,
+                    SOLUTIONANSWER: SCENARIOANSWER}
+
+    ##
+    # Shapes for the modes
+    ##
+
+    SHAPES = {STOP_GEN : [], }

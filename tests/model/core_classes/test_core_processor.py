@@ -3,8 +3,8 @@ from unittest.mock import MagicMock
 from typing import List, Tuple
 import torch
 from torch.nn import functional as F
-from src.model.core_classes.core_processer import (BatchAssembly, BatchDisassembly,
-                                                   CoreSyncProcessor, ContractedModule)
+from src.old.core_classes_old.core_processer import (BatchAssembly, BatchDisassembly,
+                                                     CoreSyncProcessor, ContractedModule)
 
 ### Batch Assembly testing ###
 

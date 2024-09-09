@@ -1,6 +1,6 @@
 import unittest
 import torch
-from src.model.schema import SchemaRegistry
+from src.old.model.schema import SchemaRegistry
 
 
 class TestSchemaTracker(unittest.TestCase):

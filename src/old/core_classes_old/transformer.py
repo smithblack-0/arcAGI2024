@@ -14,10 +14,10 @@ from typing import Dict, List, Tuple, Callable
 import torch
 from torch.nn import functional as F
 
-from src.model.core_classes.async_processing import BatchStrategy, RequestBuffer, SHAPES_NAME, \
+from src.old.core_classes_old.async_processing import BatchStrategy, RequestBuffer, SHAPES_NAME, \
     CONTEXT_NAME, LoggingCallback, TARGETS_NAME
-from src.model.core_classes.clustering import ClusteringStrategy
-from src.model.core_classes.core_processer import BatchAssembly
+from src.old.core_classes_old.clustering import ClusteringStrategy
+from src.old.core_classes_old.core_processer import BatchAssembly
 
 
 class TransformerBatchStrategy(BatchStrategy):
