@@ -8,15 +8,15 @@ from typing import Callable
 from enum import Enum
 
 class Events(Enum):
-    CELL_SELECTED = "cell_selected"
+    # Intercell and zone events
+    PALETTEREQUEST = "ask_for_palette_color"
     PALETTE_CHANGED = "palette_changed"
     SHAPE_CHANGED = "shape_changed"
-    IS_CELL_DATA_SAVED = "is_data_collection_saved"
-    FLUSH_CELL_DATA = "flush_cell_data"
+    EDITMADE = "edit_made"
 
-    # Copy paste mechanism
-    COPY_CELL = "copy_cell"
-    PASTE_CELL = "paste_cell"
+    # Case selection mainly
+    UNSAVED_CHANGES = "unsaved_changes"
+
 
 class EventBus:
     """Centralized event bus to manage event dispatching and listening."""

@@ -7,134 +7,152 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QTextEdit, QScrollArea, QFrame,
                              QGridLayout, QLabel, QLineEdit, QSizePolicy)
 from PyQt5.QtGui import QFont
-from PyQt5.QtCore import QObject, QEvent, Qt
+from PyQt5.QtCore import QObject, QEvent, Qt, QSize
+from src.data_tools.events import Events, EventBus
+from src.data_tools.mytypes import Block, Blocks
+
+#import copy
+from typing import Dict, Any
+from PyQt5.QtWidgets import QFrame, QVBoxLayout, QPushButton, QHBoxLayout
+from PyQt5.QtCore import pyqtSignal
 from src.data_tools.events import Events, EventBus
 
 
-#
 class AbstractCell(QFrame):
     """
-    The abstract cell class is a QFrame that is
-    designed to be docked into a CellEditor. Think
-    along the lines of ipynb cells, and you will
-    not be too wrong.
+    The abstract cell class is a QFrame designed to be docked into a CellEditor.
+    It provides core functionality for managing payload data of a given block,
+    emitting an event when an edit is made.
 
-    ---- user attributes ----
+    ---- Public Attributes ----
+    config: Dict[str, Any]
+        Configuration dictionary for the cell.
+    event_bus: EventBus
+        Event bus used for publishing and subscribing to global events.
 
-    config: The config items
-    event_bus:
-        - The EventBus object, which allows various global events.
+    ---- Public Methods ----
+    - `delete_self()`: Deletes this cell from the parent.
+    - `promote_self()`: Moves this cell higher in the list.
+    - `demote_self()`: Moves this cell lower in the list.
+    - `copy_self()`: Copies this cell into the clipboard.
+    - `paste_above()`: Pastes the clipboard content above this cell.
+    - `paste_below()`: Pastes the clipboard content below this cell.
+
+    ---- Properties ----
+    - `payload`: Getter and setter for the payload content, emitting an event on edit.
+    - `mode`: Getter for the cell's mode.
     """
 
-    # Setup the two subclass functions
-    # designed to handle payload manipulation
-    # and default assignment
+    # ----- Getter and Setter for Payload -----
+    def get_payload(self) -> Any:
+        """Returns a deepcopy of the current payload."""
+        return copy.deepcopy(self._block["payload"])
 
-    def default_payload(self) -> Any:
-        """Sets up a default payload for a new block."""
-        raise NotImplementedError("Need to implement default payload to add cells.")
-
-    def commit_payload(self, payload: Any):
-        """Commits a fresh payload to the block"""
+    def set_payload(self, new_payload: Any):
+        """Sets a new payload and emits the EDITMADE event."""
         if "debug" in self.config and self.config["debug"]:
-            print("change in payload follows")
-            print(payload)
-        self.block['payload'] = payload
+            print("Setting new payload")
+            print(new_payload)
+        self._block["payload"] = new_payload
+        self.event_bus.publish(Events.EDITMADE.value, self)
 
-    # Setup some important cell callbacks
-    # used to interact with the broader
-    # gui.
+    @property
+    def mode(self) -> str:
+        """Returns the mode of the cell."""
+        return self._block["mode"]
+
+    # ----- Payload Initialization -----
+    def default_payload(self) -> Any:
+        """
+        Returns a default payload if none is provided in the block.
+        Must be implemented by subclasses to define the default behavior.
+        """
+        raise NotImplementedError("Subclasses must implement default_payload")
+
+    # ----- Initialization and Layout -----
+    def __init__(self,
+                 parent: QFrame,
+                 config: Dict[str, Any],
+                 block: Dict[str, Any],
+                 event_bus: EventBus):
+        """
+        Initializes the abstract cell with configuration, block data, and event bus.
+
+        :param parent: The parent widget to attach to.
+        :param config: The configuration dictionary.
+        :param block: The block dictionary reference for the cell data.
+        :param event_bus: EventBus used for emitting and subscribing to events.
+        """
+        super().__init__(parent)
+
+        # Store the block privately
+        self._block = block
+
+        # If the payload has not been set, assign a default payload
+        if "payload" not in self._block or self._block["payload"] is None:
+            self.set_payload(self.default_payload())
+
+        # Set static parameters
+        self.config = config
+        self.event_bus = event_bus
+        self.parent = parent
+
+        # Setup the layout for buttons and cell management
+        self.setFrameStyle(QFrame.Panel | QFrame.Raised)
+        self.layout = QVBoxLayout(self)
+        self.button_layout = QHBoxLayout()
+
+        # Add buttons for managing the cell
+        self.delete_button = QPushButton("Delete", self)
+        self.delete_button.clicked.connect(self.delete_self)
+        self.button_layout.addWidget(self.delete_button)
+
+        self.promote_button = QPushButton("Promote", self)
+        self.promote_button.clicked.connect(self.promote_self)
+        self.button_layout.addWidget(self.promote_button)
+
+        self.demote_button = QPushButton("Demote", self)
+        self.demote_button.clicked.connect(self.demote_self)
+        self.button_layout.addWidget(self.demote_button)
+
+        self.copy_button = QPushButton("Copy", self)
+        self.copy_button.clicked.connect(self.copy_self)
+        self.button_layout.addWidget(self.copy_button)
+
+        self.paste_above_button = QPushButton("Paste Above", self)
+        self.paste_above_button.clicked.connect(self.paste_above)
+        self.button_layout.addWidget(self.paste_above_button)
+
+        self.paste_below_button = QPushButton("Paste Below", self)
+        self.paste_below_button.clicked.connect(self.paste_below)
+        self.button_layout.addWidget(self.paste_below_button)
+
+        self.layout.addLayout(self.button_layout)
+
+    # ----- Cell Management Methods -----
     def delete_self(self):
         """Deletes this cell by calling the parent delete function."""
         self.parent.delete_cell(self)
 
     def promote_self(self):
-        """Promotes cell in cell list by invoking parent promote function."""
+        """Promotes this cell by invoking the parent promote function."""
         self.parent.promote_cell(self)
 
     def demote_self(self):
-        """Demotes cell in cell list by invoking parent demote function"""
+        """Demotes this cell by invoking the parent demote function."""
         self.parent.demote_cell(self)
 
     def copy_self(self):
-        """Invokes the parent's copy function to move cell block into clipboard."""
+        """Copies this cell into the clipboard."""
         self.parent.copy_cell(self)
 
     def paste_above(self):
-        """Pastes the contents of the clipboard above the cell"""
+        """Pastes the clipboard content above this cell."""
         self.parent.paste_cell_above(self)
 
     def paste_below(self):
-        """Pastes the contents of the clipboard below the cell"""
+        """Pastes the clipboard content below this cell."""
         self.parent.paste_cell_below(self)
-    def __init__(self,
-                 parent: QWidget,
-                 config: Dict[str, Any],
-                 block: Dict[str, Any],
-                 event_bus: EventBus):
-        """
-        Abstract cells must be initialized with several
-        things. These things are:
-
-        :param parent: The parent to attach to.
-        :param config: The dictionary with any needed config info
-        :param block: The block dictionary reference. This will always exist,
-                      but may not always have a payload reference.
-        :param event_bus: The EventBus for communication.
-        """
-
-        super().__init__(parent)
-
-        # If the payload has not been set up, set a default payload
-        if "payload" not in block:
-            block["payload"] = self.default_payload()
-
-        # Store the parameters for later use
-        self.config = config
-        self.parent = parent
-        self.block = block
-        self.event_bus = event_bus
-
-        # Layout for the abstract cell
-        self.setFrameStyle(QFrame.Panel | QFrame.Raised)
-        self.layout = QVBoxLayout(self)
-
-        # Create a horizontal layout for the buttons
-        self.button_layout = QHBoxLayout()
-
-        # Delete button common to all cell types
-        self.delete_button = QPushButton("Delete", self)
-        self.delete_button.clicked.connect(self.delete_self)
-        self.button_layout.addWidget(self.delete_button)
-
-        # Promote button to move higher in general layout
-        self.promote_button = QPushButton("Promote", self)
-        self.promote_button.clicked.connect(self.promote_self)
-        self.button_layout.addWidget(self.promote_button)
-
-        # Demote button to move lower in general layout
-        self.demote_button = QPushButton("Demote", self)
-        self.demote_button.clicked.connect(self.demote_self)
-        self.button_layout.addWidget(self.demote_button)
-
-        # Copy button to move a copy of this cell into the clipboard
-        self.copy_button = QPushButton("Copy", self)
-        self.copy_button.clicked.connect(self.copy_self)
-        self.button_layout.addWidget(self.copy_button)
-
-        # Paste above button. Does what it says
-        self.paste_above_button = QPushButton("Paste Above", self)
-        self.paste_above_button.clicked.connect(self.paste_above)
-        self.button_layout.addWidget(self.paste_above_button)
-
-        # Paste below button.
-        self.paste_below_button = QPushButton("Paste Below", self)
-        self.paste_below_button.clicked.connect(self.paste_below)
-        self.button_layout.addWidget(self.paste_below_button)
-
-        # Add the button layout (horizontal) to the main layout (vertical)
-        self.layout.addLayout(self.button_layout)
-
 
 class BlockCellEditor(QWidget):
     """
@@ -170,9 +188,16 @@ class BlockCellEditor(QWidget):
     # Define some helper functions
     ##
 
-    def get_index_based_on_cell(self, cell: Dict[str, Any])->int:
-        return self.blocks.index(cell.block)
-
+    def get_index_based_on_cell(self, cell: AbstractCell)->int:
+        """Gets the index based on the cell"""
+        # Unfortunately, list.index uses == for tracking down
+        # the index, rather than "is". This causes it to choke on
+        # numpy arrays. So we implement our own flavor.
+        target_block = cell.block
+        for i, block in enumerate(self.blocks):
+            if target_block is block:
+                return i
+        raise KeyError("Cound not find index")
     ##
     # Define cell manipulator functions for promotion, demotion,
     # addition, and deletion, plus whatever other abstract cell callbacks are needed.
@@ -190,7 +215,7 @@ class BlockCellEditor(QWidget):
     def demote_cell(self, cell: AbstractCell):
         """Demote cell to live lower on the list"""
         index = self.get_index_based_on_cell(cell)
-        if index == len(self.cells_instance) - 1:
+        if index == len(self.blocks) - 1:
             # Do nothing. Cannot demote any further
             return
 
@@ -243,11 +268,16 @@ class BlockCellEditor(QWidget):
         if block is not None:
             # Insert it. Or append if appropriate
             target_index = index + 1
-            if target_index == len(self.cells_instance):
+            if target_index == len(self.blocks):
                 self.blocks.append(block)
             else:
-                self.blocks.insert(block)
+                self.blocks.insert(index, block)
             self.render_cells()
+
+    def new_cell(self, cell_type: str):
+        block = {"mode" : cell_type}
+        self.blocks.append(block)
+        self.render_cells()
 
     ###
     # Rendering mechanism. Matches blocks to cells, when
@@ -272,7 +302,7 @@ class BlockCellEditor(QWidget):
 
     def __init__(self,
                  config: Dict[str, Any],
-                 blocks: List[Dict[str, Any]],
+                 blocks: Blocks,
                  event_bus: EventBus,
                  parent: Optional[Any] = None):
 
@@ -330,14 +360,17 @@ class TextCell(AbstractCell):
         return ""
 
     def communicate_update(self):
-        self.commit_payload(self.text_edit.toPlainText())
-
-    def __init__(self, parent: BlockCellEditor, config: Dict[str, Any], block: Dict[str, Any], event_bus: EventBus):
+        self.set_payload(self.text_edit.toPlainText())
+    def __init__(self,
+                 parent: BlockCellEditor,
+                 config: Dict[str, Any],
+                 block: Block,
+                 event_bus: EventBus):
         super().__init__(parent, config, block, event_bus)
 
         # Text editor specific to the TextCell
         self.text_edit = QTextEdit(self)
-        self.text_edit.setPlaceholderText("Enter some text...")
+        self.text_edit.setText(self.get_payload())
         self.text_edit.textChanged.connect(self.communicate_update)
 
         # Add the text editor to the layout
@@ -400,96 +433,141 @@ class ShapeFrame(QFrame):
         """Sets the current shape in the input fields."""
         self.row_input.setText(str(rows))
         self.col_input.setText(str(cols))
+class ColorSquare(QFrame):
+    """
+    Represents a single square in the grid. It changes color based on the current palette and
+    updates the grid's payload when clicked.
+    """
+    def __init__(self,
+                 grid: "Grid",
+                 row: int,
+                 col: int,
+                 color_id: int,
+                 color_map: Dict[int, str],
+                 square_size: int):
+        super().__init__(grid)
+        self.grid = grid
+        self.row = row
+        self.col = col
+        self.color_id = color_id
+        self.color_map = color_map
+        self.square_size = square_size
+        self.setFixedSize(square_size, square_size)
+        self.setStyleSheet(f"background-color: {self.color_map[color_id]};")
+        self.setFrameStyle(QFrame.StyledPanel | QFrame.Plain)
 
+    def update_color(self, new_color_id: int):
+        """Updates the square's color."""
+        self.color_id = new_color_id
+        self.setStyleSheet(f"background-color: {self.color_map[self.color_id]};")
+
+    def mousePressEvent(self, event):
+        """Handles mouse click events to change the color of the square."""
+        new_color_id = self.grid.palette
+        self.grid.update_square_color(self.row, self.col, new_color_id)
 
 class Grid(QFrame):
     """
     A frame containing clickable elements that can be recolored
-    according to the palette. It is synchronized to a numpy
-    backend, and listens for palette change or shape change events.
+    according to the palette. It interacts directly with the parent cell's payload,
+    fetching and updating the grid state via the parent.
     """
 
+    def __init__(self,
+                 reshape_bus: EventBus,
+                 palette_bus: EventBus,
+                 color_map: Dict[int, str],
+                 square_size: int,
+                 parent: AbstractCell):
+        super().__init__(parent)
+
+        # Save configuration and parent reference
+        self.palette = 0  # Default color selection
+        self.color_map = color_map
+        self.square_size = square_size
+        self.parent = parent
+        self.squares = {}  # To store ColorSquare instances by (row, col)
+
+        # Set up signals
+        reshape_bus.subscribe(Events.SHAPE_CHANGED.value, self.on_shape_changed)
+        palette_bus.subscribe(Events.PALETTE_CHANGED.value, self.on_palette_changed)
+
+        # Initialize palette
+        palette_bus.publish(Events.PALETTEREQUEST.value, self.on_palette_changed)
+
+        # Set up the layout to display the grid
+        self.grid_layout = QGridLayout(self)
+        self.grid_layout.setSpacing(1)  # Adjust spacing between squares
+        self.setLayout(self.grid_layout)
+
+        # Ensure that the aspect ratio is maintained and the grid is not resizable independently
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+        # Draw the grid for the first time
+        self.repaint_grid()
+
+        # Set frame style
+        self.setFrameStyle(QFrame.StyledPanel | QFrame.Plain)
+        self.setLineWidth(2)
+
+    def sizeHint(self):
+        """Override sizeHint to ensure a fixed aspect ratio."""
+        rows, cols = self.parent.get_payload().shape
+        total_width = cols * self.square_size
+        total_height = rows * self.square_size
+        return QSize(total_width, total_height)
+
+    def repaint_grid(self):
+        """Rebuild the grid of squares based on the current state of the parent's payload."""
+        # Clear the current layout
+        while self.grid_layout.count() > 0:
+            item = self.grid_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        # Get the current grid dimensions from the parent's payload
+        grid_data = self.parent.get_payload()
+        rows, cols = grid_data.shape
+
+        # Create grid squares and store them
+        self.squares.clear()
+        for row in range(rows):
+            for col in range(cols):
+                color_id = grid_data[row, col]
+                square = ColorSquare(self, row, col, color_id, self.color_map, self.square_size)
+                self.squares[(row, col)] = square
+                self.grid_layout.addWidget(square, row, col)
+
     def on_shape_changed(self, rows: int, cols: int):
-        """Resizes the grid and updates the grid collection."""
+        """Resizes the grid and updates the parent's payload."""
         new_grid = np.zeros((rows, cols), dtype=int)
-        old_grid = self.block['payload']
+        old_grid = self.parent.get_payload()
 
         # Copy over the old grid values to the new grid, adding padding if needed
         min_rows = min(rows, old_grid.shape[0])
         min_cols = min(cols, old_grid.shape[1])
         new_grid[:min_rows, :min_cols] = old_grid[:min_rows, :min_cols]
 
-        self.block['payload'] = new_grid
-        self.parent.commit_payload(self.block["payload"])
-        self.repaint()  # Redraw the grid with the new shape
+        # Update the parent's payload with the new grid
+        self.parent.set_payload(new_grid)
+        self.repaint_grid()
 
     def on_palette_changed(self, palette: int):
         """Updates the currently selected palette color."""
         self.palette = palette
 
-    def update_square_color(self, row: int, col: int):
+    def update_square_color(self, row: int, col: int, new_color_id: int):
         """Updates the selected square with the current palette color."""
-        self.block["payload"][row, col] = self.palette
-        self.repaint()  # Redraw the grid with the updated colors
-        self.parent.commit_payload(self.block["payload"])
+        grid_data = self.parent.get_payload()  # Get the current grid from the parent
+        grid_data[row, col] = new_color_id
 
-    def __init__(self,
-                 block: Dict[str, Any],
-                 reshape_bus: EventBus,
-                 palette_bus: EventBus,
-                 color_map: Dict[int, str],
-                 button_size: int,
-                 parent: AbstractCell,
-                 ):
-        super().__init__(parent)
+        # Update the parent's payload to trigger further updates
+        self.parent.set_payload(grid_data)
 
-        # Save configuration and block state
-        self.block = block
-        self.palette = 0  # Default color selection
-        self.color_map = color_map
-        self.button_size = button_size
-        self.parent = parent
+        # Update the specific square color without redrawing the entire grid
+        square = self.squares[(row, col)]
+        square.update_color(new_color_id)
 
-        # Set up signals
-        reshape_bus.subscribe(Events.SHAPE_CHANGED.value, self.on_shape_changed)
-        palette_bus.subscribe(Events.PALETTE_CHANGED.value, self.on_palette_changed)
-
-        # Set up the layout to display the grid
-        self.grid_layout = QGridLayout(self)
-        self.setLayout(self.grid_layout)
-
-        # Draw the grid for the first time
-        self.repaint()
-
-        # Set frame style
-        self.setFrameStyle(QFrame.StyledPanel | QFrame.Plain)
-        self.setLineWidth(2)
-
-    def repaint(self):
-        """Redraw the grid of squares based on the current state of block['payload']."""
-        # Clear the current layout
-        for i in reversed(range(self.grid_layout.count())):
-            widget = self.grid_layout.itemAt(i).widget()
-            if widget is not None:
-                widget.deleteLater()
-
-        # Get the current grid dimensions from the block's payload
-        grid_data = self.block["payload"]
-        rows, cols = grid_data.shape
-
-        # Create grid buttons
-        for row in range(rows):
-            for col in range(cols):
-                button = QPushButton(self)
-                button.setFixedSize(self.button_size, self.button_size)  # Set the size of each square
-                color_id = grid_data[row, col]
-                button.setStyleSheet(f"background-color: {self.color_map[color_id]};")
-
-                # Connect the click event to update the corresponding square
-                button.clicked.connect(lambda _, r=row, c=col: self.update_square_color(r, c))
-
-                # Add the button to the grid layout
-                self.grid_layout.addWidget(button, row, col)
 
 @BlockCellEditor.register_decorator("intgrid")
 class GridEditorCell(AbstractCell):
@@ -501,15 +579,20 @@ class GridEditorCell(AbstractCell):
     user can edit the colors to be the current color palette
     color, or reshape the grid inside.
     """
+
+    def get_payload(self) -> np.ndarray:
+        """Reimplimentation of get paylaod to avoid deepcopy hit"""
+        return np.copy(self._block["payload"])
+
     def default_payload(self) -> Any:
-        return np.zeros([1, 1])
+
+        return np.zeros([5, 5], dtype=int)
+
     def __init__(self,
                  parent: QWidget,
                  config: Dict[str, Any],
-                 block: Dict[str, Any],
-                 globals_bus: EventBus
-                 ):
-
+                 block: Block,
+                 globals_bus: EventBus):
         super().__init__(parent, config, block, globals_bus)
 
         # Setup layout
@@ -521,19 +604,19 @@ class GridEditorCell(AbstractCell):
         color_map = config["color_map"]
         button_size = config["grid_element_size"]
 
-        # Create display. Hopefully working
-        self.grid_display = Grid(block,
-                                 reshape_bus,
-                                 globals_bus,
-                                 color_map,
-                                 button_size,
-                                 self)
+        # Create grid display
+        self.grid_display = Grid(reshape_bus=reshape_bus,
+                                 palette_bus=globals_bus,
+                                 color_map=color_map,
+                                 square_size=button_size,
+                                 parent=self)
         self.display_layout.addWidget(self.grid_display)
 
-        # Create reshape display
+        # Create reshape frame
         self.reshape_frame = ShapeFrame(reshape_bus, self)
         self.display_layout.addWidget(self.reshape_frame)
 
+        # Add the layouts
         self.layout.insertLayout(0, self.display_layout)
 
 def main():
