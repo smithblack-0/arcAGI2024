@@ -17,7 +17,7 @@ config = {
 },
 "flash_cycle_time": 0.2,
 "num_flashes": 3,
-"grid_element_size": 20,
+"grid_element_size": 30,
 "color_map": {
     0: "#000000",  # Black
     1: "#0000FF",  # Blue

@@ -247,8 +247,9 @@ class BlockCellEditor(QWidget):
         block_response = []
         append_block = lambda block: block_response.append(block)
         self.event_bus.publish(Events.PASTE_CELL.value, append_block)
-        block = block_response.pop()
-        return block
+        if len(block_response) != 0:
+            return block_response.pop()
+        return None
 
     def paste_cell_above(self, cell: AbstractCell):
         """Paste the contents of the clipboard above the indicated cell"""
