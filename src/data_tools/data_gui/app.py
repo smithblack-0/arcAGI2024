@@ -29,7 +29,7 @@ config = {
     7: "#FFA500",  # Orange
     8: "#ADD8E6",  # Light Blue
     9: "#8B0000"   # Dark Red
-},  # White, Black, Red
+},
 "cell_size": 50,  # Cell size for GridEditorCell
 }
 
