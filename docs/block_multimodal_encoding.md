@@ -1,5 +1,10 @@
 # Block Multimodal Generation
 
+* Batch
+* Zone
+* Items
+* Channel
+
 ## What is it?
 
 Block Multimodal Generation is an generation mechanism designed to represent

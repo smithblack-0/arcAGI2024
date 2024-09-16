@@ -1,51 +1,21 @@
-import sys
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QTabWidget
+import torch
 
-class MainWindow(QWidget):
-    def __init__(self):
-        super().__init__()
+# Initialize input tensor (destination)
+input = torch.zeros(3, 5)
 
-        # Set up the main layout for the window
-        self.layout = QVBoxLayout()
+# Define index tensor for one dimension
+index = torch.tensor([0, 1, 2, 0, 1])
 
-        # Create a QTabWidget to hold the tabs
-        self.tabs = QTabWidget()
+# Define source tensor
+src = torch.tensor([[10, 20, 30, 40, 50],
+                    [60, 70, 80, 90, 100],
+                    [110, 120, 130, 140, 150]]).float()
 
-        # Create the first tab with some text
-        self.tab1 = QWidget()
-        self.tab1_layout = QVBoxLayout()
-        self.tab1_label = QLabel("This is the content of the first tab.")
-        self.tab1_layout.addWidget(self.tab1_label)
-        self.tab1.setLayout(self.tab1_layout)
+# Broadcast the index to match the shape of src
+index_broadcasted = index.expand(src.shape)
 
-        # Create the second tab with different text
-        self.tab2 = QWidget()
-        self.tab2_layout = QVBoxLayout()
-        self.tab2_label = QLabel("This is the content of the second tab.")
-        self.tab2_layout.addWidget(self.tab2_label)
-        self.tab2.setLayout(self.tab2_layout)
+# Scatter using the broadcasted index
+output = input.scatter(1, index_broadcasted, src)
 
-        # Add tabs to the QTabWidget
-        self.tabs.addTab(self.tab1, "Tab 1")
-        self.tabs.addTab(self.tab2, "Tab 2")
-
-        # Add the QTabWidget to the main layout
-        self.layout.addWidget(self.tabs)
-
-        # Set the layout for the main window
-        self.setLayout(self.layout)
-
-        # Set window properties
-        self.setWindowTitle("Tabbed Interface Example")
-        self.setGeometry(100, 100, 400, 300)
-
-
-# Main function to run the application
-def main():
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec_())
-
-if __name__ == "__main__":
-    main()
+print("Broadcasted Index:\n", index_broadcasted)
+print("Output:\n", output)

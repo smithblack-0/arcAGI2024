@@ -1,14 +1,12 @@
-"""
-This module defines schema and zone based builders and mechanisms
-to help make it easier to produce sane schemas and build
-features.
-"""
 import torch
 from typing import List, Any, Dict
 from dataclasses import dataclass
 from .config import Config
 
-SchemaTensorType = torch.Tensor
+
+
+
+
 
 
 @dataclass
