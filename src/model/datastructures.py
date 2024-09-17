@@ -1,9 +1,10 @@
 import torch
+from torch.nn import functional as F
 from typing import List, Dict, Optional, Tuple, TypeVar
 NestedList = TypeVar('NestedList')
 
 
-class TensorChannelSpec:
+class TensorChannelManager:
     """
     A helper class that manages tensor channels and allows structured, programmatic
     access to different features stored within the last dimension of a tensor.
@@ -233,6 +234,187 @@ class TensorChannelSpec:
         tensor_slice = self.slices[channel_name]
         tensor = tensor.clone()
         tensor[..., tensor_slice] = replacement
+
+    def filter(self,
+               tensor: torch.Tensor,
+               nonpadding_mask: torch.Tensor,
+               channel: str,
+               filter: torch.Tensor
+               )->Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Performs filtration pf the indicated MTC tensor by looking at the indicated channel,
+        and only retaining the item if it has an integer in it that matches something in filter.
+
+        :param tensor:
+            - The MTC tensor to filter. Shape (..., items, channels)
+        :param nonpadding_mask:
+            - A nonpadding tensor.
+            - Filtration is usually most useful on batched entities
+            - Shape (..., items)
+        :param channel:
+            - The channel to select then manipulate.
+            - Must be within our selected channels
+        :param filter:
+            - The integer values to filter with
+            - Only integers that match are included
+            - Shape: (filters, L)
+            - L matches channel length
+        :return:
+
+        """
+        # Perform sanity checks and assertions
+        assert tensor.device == filter.device
+        assert tensor.device == nonpadding_mask.device
+        assert channel in self.channel_allocs
+        assert tensor.shape[:-1] == nonpadding_mask.shape
+        assert filter.dim() == 2
+        assert filter.shape[-1] == self.channel_spec[channel]
+
+        # Construct a boolean mask that will associate each element in the channel with one of the
+        # active channels, or nothing
+
+        channel_tensors = self.extract(tensor, channel) # (..., items, L)
+        channel_tensors = channel_tensors.unsqueeze(dim=-2) #(..., items, 1, L)
+        channels_mask = (channel_tensors == filter) #(..., items, filter, L)
+        channels_mask = torch.all(channels_mask, dim=-1) #(..., items, filter)
+        channels_mask = torch.any(channels_mask, dim=-1) #(..., items)
+
+        # Figure out the maximum number of items to be included, and thus the
+        # needed padding size. Then create destination tensors
+
+        max_final_items = int(channels_mask.sum(dim=-1).max())
+        shape = list(tensor.shape)
+        shape[-2] = max_final_items
+
+        destination_tensor = torch.full(shape, 0, device=tensor.device, dtype=tensor.dtype)
+        destination_padding = torch.full(shape[:-1], False, device=tensor.device, dtype=nonpadding_mask.dtype)
+
+        # Adjust the modes mask to get a destination modes mask that will land the
+        # pieces in place. We do this by sorting to keep the true mask entries.
+        # This ensures that all active elements are in place starting at zero and
+        # getting higher.
+        #
+        # Then move everything into place using the masks.
+        destination_mask, _ = torch.sort(channels_mask, dim=-2, descending=True, stable=True)
+        destination_mask = destination_mask[..., :max_final_items]
+
+        destination_tensor[destination_mask.unsqueeze(-1)] = tensor[channels_mask.unsqueeze(-1)]
+        destination_padding[destination_mask] = nonpadding_mask[channels_mask]
+
+        # Return
+        return destination_tensor, destination_padding
+
+    def batch(self,
+              tensors: NestedList[torch.Tensor]
+              )->Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Batches a collection of tensors, possibly recursively, by adding
+        padding (0) in place where needed. Returns both a data tensor, and
+        a nonpadding mask indicating what elements were not padding, and where.
+
+        :param tensors:
+            - A list or nested list of tensors to batch.
+            - The tensors in the list must all have shape (items, channels)
+            - The nested list structure does not have to have lists of the same length.
+              Padding is automatically injected where needed, including for varying lengths of
+              lists. However, the number of DIMENSIONS must always be the same, even if the length of
+              the lists can vary.
+        :return:
+        """
+
+
+        # Create the main processing arrays.
+
+
+        tensors_requiring_padding: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        shape_checker = None
+        for item in tensors:
+            if isinstance(item, torch.Tensor):
+                # Base case encountered. We store the tensor and make a padding
+                # mask that is filled entirely with true, indicating all elements
+                # active.
+                assert item.shape[-1] == self.channel_length
+
+                if shape_checker is None:
+                    shape_checker = item.shape[:-1]
+                else:
+                    assert item.shape[:-1] == shape_checker
+
+                entry = (item, torch.ones_like(item, dtype=torch.bool))
+                tensors_requiring_padding.append(entry)
+            else:
+                # Item is a list. It will need to be recursively processed
+                tensors_requiring_padding.append(self.batch(item))
+
+
+        # Get the maximum length. Then pad all to match.
+        maximum_length = max([item.shape[-2] for item, _ in tensors_requiring_padding])
+        tensor_stack = []
+        paddings_stack = []
+        for tensor, padding in tensors_requiring_padding:
+            # Pad tensor to match maximum length
+            pad_op = (0, 0, 0, maximum_length - tensor.shape[-2])
+            tensor = F.pad(tensor, pad_op)
+
+            # Pad padding to match maximum length
+            pad_op = (0, maximum_length-padding.shape[-2])
+            padding = F.pad(padding, pad_op)
+
+            # Append
+            tensor_stack.append(tensor)
+            paddings_stack.append(padding)
+
+        batched_tensor = torch.stack(tensor_stack, dim=0)
+        batched_padding = torch.stack(paddings_stack, dim=0)
+
+        return batched_tensor, batched_padding
+
+    from typing import List, Union, Tuple, TypeVar
+    import torch
+
+    # Define the type for nested lists of tensors
+    T = TypeVar('T', bound=torch.Tensor)
+    NestedList = Union[T, List['NestedList']]
+
+    class TensorChannelManager:
+        # (Previous methods, like batch...)
+
+        def unbatch(self,
+                    tensors: torch.Tensor,
+                    nonpadding_mask: torch.Tensor
+                    ) -> torch.Tensor | NestedList[torch.Tensor]:
+            """
+            Recursively unbatches a tensor into individual tensors or nested lists, removing padding along the way.
+
+            The recursion stops when the input tensor reaches 2D (items, channels), and at that
+            point, the padding is removed using the non-padding mask, and the valid entries
+            are returned. If the input is higher-dimensional, it will return a nested list.
+
+            :param tensors:
+                - A batched tensor of shape (..., items, channels).
+            :param nonpadding_mask:
+                - A mask of shape (..., items) indicating valid entries.
+            :return:
+                - A tensor with padding removed or a nested list, preserving the structure of the input.
+            """
+            # Recursive case: unbind until we reach the 2D base case
+            if tensors.ndim > 2:
+                return [self.unbatch(subtensor, submask) for subtensor, submask in
+                        zip(tensors.unbind(0), nonpadding_mask.unbind(0))]
+
+            # Base case: tensors of shape (items, channels)
+            # Unsqueeze the nonpadding_mask to match the dimensions of the tensor for indexing
+            valid_tensor = tensors[nonpadding_mask.bool().unsqueeze(-1)]
+
+            # Return the unpadded tensor
+            return valid_tensor
+
+
+class SpecMap:
+
+
+
+
 class HeaderSpec:
     """
     The `HeaderSpec` class abstracts the layout of data in a multimodal token channel (MTC) tensor,
@@ -285,7 +467,7 @@ class HeaderSpec:
     def headers_length(self)->int:
         return len(self.headers)
     def __init__(self,
-                 channel_spec: TensorChannelSpec,
+                 channel_spec: TensorChannelManager,
                  headers: List[str]
                  ):
         """
@@ -372,7 +554,7 @@ class ModeSpec:
     def __init__(self,
                  channel_name: str,
                  modes: str,
-                 channel_spec: TensorChannelSpec ):
+                 channel_spec: TensorChannelManager):
         assert channel_name in channel_spec.channel_allocs
         self.channel_name = channel_name
         self.modes = modes
@@ -512,7 +694,7 @@ class ZoneSpec:
 
     def __init__(self,
                  zone_channel: str,
-                 channel_spec: TensorChannelSpec,
+                 channel_spec: TensorChannelManager,
                  zones: List[str]
                  ):
         assert zone_channel in channel_spec.channel_allocs

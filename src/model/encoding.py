@@ -12,7 +12,7 @@ from typing import Any, List, Dict, Tuple
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from src.model.datastructures import TensorChannelSpec
+from src.model.datastructures import TensorChannelManager
 
 
 ## Registries, for zones, schemas, etcetera
@@ -69,7 +69,7 @@ class TokenChannelConverter:
     def __init__(self,
                  schema: List[int],
                  metadata: BlockMetadata,
-                 channel_spec: TensorChannelSpec,
+                 channel_spec: TensorChannelManager,
                  ):
         self.metadata = metadata
         self.spec = channel_spec
