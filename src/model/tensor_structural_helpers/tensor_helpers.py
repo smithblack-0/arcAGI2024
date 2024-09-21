@@ -1,6 +1,7 @@
 import torch
 from torch.nn import functional as F
-from typing import List, Dict, Optional, Tuple, TypeVar
+from typing import List, Dict, Optional, Tuple, TypeVar, Any
+from abc import ABC, abstractmethod
 NestedList = TypeVar('NestedList')
 
 
@@ -234,6 +235,139 @@ class TensorChannelManager:
         tensor_slice = self.slices[channel_name]
         tensor = tensor.clone()
         tensor[..., tensor_slice] = replacement
+class BoundChannel:
+    """
+    Bind to a particular channel, and enables setting to and extracting
+    from that channel.
+    """
+    def __init__(self,
+                 channel: str,
+                 channel_spec: TensorChannelManager
+                 ):
+        assert channel in channel_spec.channel_allocs
+        self.channel = channel
+        self.channel_spec = channel_spec
+    def set(self, mtc_tensor: torch.Tensor, values: torch.Tensor)->torch.Tensor:
+        """
+        Sets the channel within the mtc tensor to be equal to the given value
+        or values.
+
+        :param tensor:
+            - The mtc tensor to set as
+            - Should have shape (..., total_channel_width)
+        :param values:
+            - The values to set the channel width
+            - Can have broadcastable shape of (..., channel_width), with channel width specific to
+              given bound channel
+            - Remaining dimensions will be broadcast, so dimensions must match otherwise
+        :return:
+            - A copy of the mtc_tensor
+            - The values have been set in their appropriate locations.
+        """
+        pass
+    def create(self, value: torch.Tensor):
+        """
+        Creates a mtc tensor using the given values as the channel
+        entries, and lets everything else be blank.
+
+        :param value:
+            - The value tensor.
+            - Shape (..., items, channel_width)
+            - Must have a shape of at least (items, channel_width)
+            - channel_width is the width of the channel feature we are bound to
+        :return:
+            - Tensor
+            - Shape (..., items, channels)
+            - Channels is width of all the channels
+            - Value is inserted at the right location.
+        """
+        pass
+    def extract(self, mtc_tensor: torch.Tensor)->torch.Tensor:
+        """
+        Extracts my bound channel from the mtc_tensor.
+
+        :param mtc_tensor: The tensor to extract from
+        :return: The extracted tensor
+        """
+class BoundChannelManager:
+    """
+    * Bound to a particular channel, like 'mode' or 'data'
+    * Capable of setting data to, or creating tensors based on,
+      that channel.
+    * Methods:
+        - set: Sets
+        - create:
+    """
+    @abstractmethod
+    def decode_value(self, value: Any)->torch.Tensor:
+        """
+        Takes in a 'value' feature and returns a tensor of
+        an integer or integers that fits in the channel.
+
+        :param value:
+            - Could be anything, depending on the subclass.
+            - Int, intgrid, str would be common expectations.
+        :return: A int tensor. Something of shape (..., channel_width).
+        """
+        pass
+
+    def __init__(self,
+                 channel: str,
+                 channel_spec: TensorChannelManager,
+                 ):
+        assert channel in channel_spec.channel_allocs
+        self.channel = channel
+        self.channel_spec = channel_spec
+
+    def create(self, value: Any)->torch.Tensor:
+        decoded = self.decode_value(value)
+        tensors = {name : None for name in self.channel_spec.channel_allocs}
+        tensors[self.channel] = decoded
+        return self.channel_spec.combine(tensors)
+
+    def set(self, tensor: torch.Tensor, value: Any)->torch.Tensor:
+        decoded = self.decode_value(value)
+        replacement = decoded.broadcast_to(tensor.shape)
+        return self.channel_spec.replace(tensor, self.channel, replacement)
+
+    def extract(self, tensor: torch.Tensor)->torch.Tensor:
+
+
+    def convert(self, tensor: torch.Tensor)->NestedList[Any]:
+
+
+    @abstractmethod
+    def set(self, tensor: torch.Tensor, value: Any)->torch.Tensor:
+        """
+        Set mechanism. It should pledge to set the bound channel
+        in the given tensor to the given value, whatever that might
+        mean.
+        :param tensor:
+        :param value:
+        :return:
+        """
+
+        pass
+
+    @abstractmethod
+    def create(self, value: Any)->torch.Tensor:
+        pass
+
+    @abstractmethod
+    def extract(self, tensor: torch.Tensor)->torch.Tensor:
+        pass
+
+
+    def __init__(self,
+                 channel: str,
+                 channel_spec: TensorChannelManager
+                 ):
+
+class BatchMagic:
+    """
+    A special class responsible for knowing how to batch, unbatch,
+    and generally work with batches of MTC tensors.
+    """
 
     def filter(self,
                tensor: torch.Tensor,
@@ -305,60 +439,106 @@ class TensorChannelManager:
         return destination_tensor, destination_padding
 
     def batch(self,
-              tensors: NestedList[torch.Tensor]
+              tensors: torch.Tensor | NestedList[torch.Tensor]
               )->Tuple[torch.Tensor, torch.Tensor]:
         """
-        Batches a collection of tensors, possibly recursively, by adding
-        padding (0) in place where needed. Returns both a data tensor, and
-        a nonpadding mask indicating what elements were not padding, and where.
+        Batches a collection of tensors, potentially organized in nested lists, by adding
+        necessary padding (with zeros) to align the dimensions. This method recursively processes
+        nested lists of tensors to ensure that all elements are padded to a uniform shape.
 
+        Returns a batched tensor and a corresponding non-padding mask that indicates which
+        elements in the resulting batched tensor are valid (i.e., not padding).
+
+        ---- Parameters ----
         :param tensors:
-            - A list or nested list of tensors to batch.
-            - The tensors in the list must all have shape (items, channels)
-            - The nested list structure does not have to have lists of the same length.
-              Padding is automatically injected where needed, including for varying lengths of
-              lists. However, the number of DIMENSIONS must always be the same, even if the length of
-              the lists can vary.
+            A list or nested list of tensors that are to be batched.
+            Each tensor in the list must have the same number of dimensions, even if the size
+            of the dimensions (lengths) may vary. Tensors should all have the same last dimension
+            (the channels dimension).
+
+            Example:
+                If the tensors are of shape (items, channels), you may have:
+                    - A nested list like: [[tensor_a, tensor_b], [tensor_c]]
+                    - With tensor_a.shape == (10, 5), tensor_b.shape == (12, 5), tensor_c.shape == (8, 5)
+
+        ---- Returns ----
         :return:
+            A tuple containing:
+            - batched_tensor: A tensor with shape `(..., max_items, channels)`,
+              where batch_size reflects the structure of the nested list and max_items is
+              the length after padding.
+
+            - nonpadding_mask: A mask with shape `(..., max_items)`, where `True`
+              indicates a valid (non-padded) entry and `False` indicates padding. This mask
+              can be used to track and later remove padded values.
+
+        ---- Example Workflow ----
+        If provided a nested list of tensors:
+            tensors = [[tensor_a, tensor_b], [tensor_c]]
+
+        Where:
+            - tensor_a.shape == (10, 5)
+            - tensor_b.shape == (12, 5)
+            - tensor_c.shape == (8, 5)
+
+        The result would be:
+            - batched_tensor.shape == (2, 2, 12, 5)  # Batch of 2, max items 12, and 5 channels
+            - nonpadding_mask.shape == (2, 2, 12)    # Same structure, marking valid vs. padded elements.
         """
 
-
         # Create the main processing arrays.
+        #
+        # We need to gather the tensors together that will end up in a batch,
+        # alongside gathering the width to pad to on each of the dimensions.
 
 
         tensors_requiring_padding: List[Tuple[torch.Tensor, torch.Tensor]] = []
-        shape_checker = None
+        max_dimension_length = None
         for item in tensors:
             if isinstance(item, torch.Tensor):
                 # Base case encountered. We store the tensor and make a padding
                 # mask that is filled entirely with true, indicating all elements
                 # active.
                 assert item.shape[-1] == self.channel_length
+                dimension_lengths = torch.tensor(item.shape[:-1], device=item.device)
 
-                if shape_checker is None:
-                    shape_checker = item.shape[:-1]
+                # This logic gathers information on what to pad to for each dimensions
+                if max_dimension_length is None:
+                    max_dimension_length = dimension_lengths
                 else:
-                    assert item.shape[:-1] == shape_checker
+                    # We detect when you are trying to combine tensors of differing number of dimensions.
+                    #
+                    # Since it then becomes ambiguous on how to pad and combine, we throw. Otherwise, we keep
+                    # the largest of the dimensions to pad to.
+                    assert max_dimension_length.shape[-1] == item.dim()
+                    max_dimension_length = torch.maximum(max_dimension_length, dimension_lengths)
 
                 entry = (item, torch.ones_like(item, dtype=torch.bool))
                 tensors_requiring_padding.append(entry)
             else:
                 # Item is a list. It will need to be recursively processed
                 tensors_requiring_padding.append(self.batch(item))
+        assert max_dimension_length is not None
 
-
-        # Get the maximum length. Then pad all to match.
-        maximum_length = max([item.shape[-2] for item, _ in tensors_requiring_padding])
         tensor_stack = []
         paddings_stack = []
         for tensor, padding in tensors_requiring_padding:
-            # Pad tensor to match maximum length
-            pad_op = (0, 0, 0, maximum_length - tensor.shape[-2])
-            tensor = F.pad(tensor, pad_op)
+            assert tensor.shape[:-1] == padding.shape
 
-            # Pad padding to match maximum length
-            pad_op = (0, maximum_length-padding.shape[-2])
-            padding = F.pad(padding, pad_op)
+            # Construct the padding operator. This will be based on
+            # padding the dimensions other than the channel dimension
+            # to the maximum length
+
+            padding_amount = [target - actual for target, actual in zip(max_dimension_length, tensor.shape)]
+            padding_operator = []
+            for pad_length in reversed(padding_amount):
+                padding_operator.extend([0, pad_length])
+
+            # Pad the padding tensor to match
+            padding = F.pad(padding, padding_operator, value=False)
+
+            # Pad the tensor to match. Do not pad the channels dimension
+            tensor = F.pad(tensor, [0, 0] + padding_operator)
 
             # Append
             tensor_stack.append(tensor)
@@ -369,187 +549,45 @@ class TensorChannelManager:
 
         return batched_tensor, batched_padding
 
-    from typing import List, Union, Tuple, TypeVar
-    import torch
-
-    # Define the type for nested lists of tensors
-    T = TypeVar('T', bound=torch.Tensor)
-    NestedList = Union[T, List['NestedList']]
-
-    class TensorChannelManager:
-        # (Previous methods, like batch...)
-
-        def unbatch(self,
-                    tensors: torch.Tensor,
-                    nonpadding_mask: torch.Tensor
-                    ) -> torch.Tensor | NestedList[torch.Tensor]:
-            """
-            Recursively unbatches a tensor into individual tensors or nested lists, removing padding along the way.
-
-            The recursion stops when the input tensor reaches 2D (items, channels), and at that
-            point, the padding is removed using the non-padding mask, and the valid entries
-            are returned. If the input is higher-dimensional, it will return a nested list.
-
-            :param tensors:
-                - A batched tensor of shape (..., items, channels).
-            :param nonpadding_mask:
-                - A mask of shape (..., items) indicating valid entries.
-            :return:
-                - A tensor with padding removed or a nested list, preserving the structure of the input.
-            """
-            # Recursive case: unbind until we reach the 2D base case
-            if tensors.ndim > 2:
-                return [self.unbatch(subtensor, submask) for subtensor, submask in
-                        zip(tensors.unbind(0), nonpadding_mask.unbind(0))]
-
-            # Base case: tensors of shape (items, channels)
-            # Unsqueeze the nonpadding_mask to match the dimensions of the tensor for indexing
-            valid_tensor = tensors[nonpadding_mask.bool().unsqueeze(-1)]
-
-            # Return the unpadded tensor
-            return valid_tensor
-
-
-class SpecMap:
-
-
-
-
-class HeaderSpec:
-    """
-    The `HeaderSpec` class abstracts the layout of data in a multimodal token channel (MTC) tensor,
-    enabling the model to set or retrieve features needed for block generation without directly
-    interacting with the underlying data structure. It specializes in managing the header encodings
-    required for Block Multimodal Decoding, where various modes (e.g., image, text) and structural
-    attributes (e.g., shape) must be predicted to facilitate flexible content generation.
-
-    This class is designed to provide a clear interface for creating, manipulating, and extracting
-    header tensors that contain essential metadata for the model. Unlike payload data, headers are
-    metadata blocks that control how subsequent content in the tensor is generated, ensuring
-    that mode and shape predictions are properly integrated into the decoding process. This is the
-    class that will know what header goes where, and how to extract header data from a tensor.
-
-    **Purpose**:
-    The key purpose of this class is to decouple the model's interaction with headers from the
-    underlying tensor layout. This allows for flexible data conversion and interaction with
-    headers across various TensorChannelSpec schemas, without being tightly bound to a specific
-    architectural implementation or task (e.g., inference vs. evaluation).
-
-    **Usage Scenarios**:
-    - Creating headers for embedding as input to large language models (LLMs) to predict modes
-      (such as content type) and shapes during Block Multimodal Decoding.
-    - Extracting specific header information (e.g., mode or shape) from block tensors, enabling
-      modular and adaptable interaction with data layouts.
-    - Discarding headers when transitioning from MTC blocks to content data during tasks like detokenization.
-
-    **Instantiation**:
-    The class is instantiated by binding it to a `TensorChannelSpec` and specifying a sequence of
-    headers. It will generate or extract these headers in the given order, allowing flexible
-    interaction with different tensor schemas.
-
-    :param channel_spec: The `TensorChannelSpec` that defines the channel allocations for the headers.
-    :param headers: A list of headers (as strings) that specify the sequence of header generation.
-
-    Example:
-    ```python
-    channel_spec = TensorChannelSpec(...)
-    headers = ["mode", "shape"]
-    header_spec = HeaderSpec(channel_spec, headers)
-    ```
-
-    Methods:
-    --------
-    - `create_headers`: Generates a collection of header tensors for embedding.
-    - `extract_header`: Extracts a specific header from a block tensor.
-    - `discard_headers`: Removes all header information from a block tensor, preserving only the data content.
-    """
-    @property
-    def headers_length(self)->int:
-        return len(self.headers)
-    def __init__(self,
-                 channel_spec: TensorChannelManager,
-                 headers: List[str]
-                 ):
+    def unbatch(self,
+                tensors: torch.Tensor,
+                nonpadding_mask: torch.Tensor
+                ) -> torch.Tensor | NestedList[torch.Tensor]:
         """
-        :param channel_spec: The channel spec to bind to
-        :param headers: The headers to expect, and in the indicted order
-        """
-        assert all(header in channel_spec.channel_allocs for header in headers)
-        self.channel_spec = channel_spec
-        self.headers = headers
-    def create_headers(self,
-                             header_tensors: Dict[str, torch.Tensor]
-                             )->torch.Tensor:
-        """
-        Creates a collection of "header" tensors based on the provided header
-        tensor dictionary. Notably, to allow downstream generative logic discretion
-        on operation if desired, header construction is cumulative such that
-        the later headers will contain the information from earlier headers, plus
-        new details.
+        Recursively unbatches a tensor into individual tensors or nested lists, removing padding along the way.
 
-        Additionally, header construction can be incomplete, to allow embedding during
-        generative processes when we might be making the headings in the first place.
-        In this situation, you may provide only a few of the headings - HOWEVER, these must
-        be provided in order.
+        The recursion stops when the input tensor reaches 2D (items, channels), and at that
+        point, the padding is removed using the non-padding mask, and the valid entries
+        are returned. If the input is higher-dimensional, it will return a nested list.
 
-        :param header_tensors: Dictionary
-            - Note: If incomplete, headers must be defined in order.
-            - Key: Channel allocations matching headers associated with the spec
-            - Values:  Tensors of shape (..., D) where D is the channel allocation width for
-                       each kind, and ... is common among all tensors
+        :param tensors:
+            - A batched tensor of shape (..., items, channels).
+        :param nonpadding_mask:
+            - A mask of shape (..., items) indicating valid entries.
         :return:
-            - A tensor of shape (..., header_length, channel_length).
+            - A tensor with padding removed or a nested list, preserving the structure of the input.
         """
-        # Subselect the headers that are active, and validate
-        headers = self.headers[:len(header_tensors)]
-        assert set(header_tensors.keys())==set(headers), "header tensor keys missing or in wrong order"
+        # Recursive case: unbind until we reach the 2D base case
+        if tensors.ndim > 2:
+            return [self.unbatch(subtensor, submask) for subtensor, submask in
+                    zip(tensors.unbind(0), nonpadding_mask.unbind(0))]
 
-        # Construct the headers
-        header_constructor = {channel: None for channel in self.channel_spec.channel_allocs}
-        output = []
-        for header in headers:
-            header_constructor[header] = header_tensors[header]
-            output.append(self.channel_spec.combine(header_constructor))
+        # Base case: tensors of shape (items, channels)
+        # Unsqueeze the nonpadding_mask to match the dimensions of the tensor for indexing
+        valid_tensor = tensors[nonpadding_mask.bool().unsqueeze(-1)]
 
-        # Return
-        return torch.stack(output, dim=-2)
+        # Return the unpadded tensor
+        return valid_tensor
 
-    def extract_header(self, tensor: torch.Tensor, header: str)->torch.Tensor:
-        """
-        Extracts the value of a particular header tensor. The header
-        can be further disassembled using a TensorChannelSpec to get the actual
-        values if needed.
 
-        :param tensor:
-          - A tensor in channel spec form, which is presumed to have headers attached.
-          - Shape (..., items, channels)
-        :param header: The header to extract
-        :return: A tensor with reduced dimensions, which comes from getting that header.
-        """
-        assert header in self.headers
-        index = self.headers.index(header)
-        return tensor.index_select(dim=-2, index=index)
 
-    def discard_headers(self, tensor: torch.Tensor)->torch.Tensor:
-        """
-        Completely discards a section of header length from an incoming
-        MTC encoded collection. This can be used to remove metadata from
-        encodings before decoding
-
-        :param tensor:
-            - The tensor to remove the headings from
-            - Shape (..., items, channels)
-        :return:
-            - A tensor with the header region removed
-        """
-        return tensor[..., self.headers_length:, :]
 
 class ModeSpec:
     """
     The mode spec keeps track of the various modes that
     are currently active, and what integers are associated
     with what modes. It also abstracts away the process of
-    checking for modes
+    checking for modesc
     """
     def __init__(self,
                  channel_name: str,

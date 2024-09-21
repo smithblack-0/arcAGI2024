@@ -7,4 +7,3 @@ from dataclasses import dataclass
 from .schemas import Schema, Header
 
 
-
