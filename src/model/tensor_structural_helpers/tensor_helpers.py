@@ -1,9 +1,170 @@
+import textwrap
+
 import torch
+from functools import cached_property
 from torch.nn import functional as F
 from typing import List, Dict, Optional, Tuple, TypeVar, Any
 from abc import ABC, abstractmethod
 NestedList = TypeVar('NestedList')
 
+
+
+class TensorChannelSpec:
+    """
+    A data class that defines the channels
+    and provides information about them
+    """
+    @property
+    def channels(self)->List[str]:
+        return list(self.spec.keys())
+
+    @property
+    def channel_widths(self)->Dict[str, int]:
+        return self.spec.copy()
+
+    @property
+    def total_width(self)->int:
+        return sum(self.spec.values())
+
+    @cached_property
+    def slices(self)->Dict[str, slice]:
+        position = 0
+        output = {}
+        for name, length in self.spec.items():
+            output[name] = slice(position, position+length)
+            position += length
+        return output
+
+    def __init__(self, channel_spec: Dict[str, int]):
+        self.spec = channel_spec
+
+class MTCTensorManager:
+    """
+    A helper class designed to be bound to
+    and promise to edit values of a particular
+    tensor channel spec.
+
+    ---- MTC tensor ----
+
+    TODO: Brief description
+
+    ---- methods ----
+    TODO
+    """
+    ###
+    # Validation mechanisms.
+    ##
+    def validate_channels(self, channels: List[str]):
+        """Validates that a given channel list is sane and addresses actual channels"""
+        if len(set(channels)) != len(channels):
+            raise ValueError('Channels must have unique values')
+        for channel_name in channels:
+            if channel_name not in self.channel_spec.channels:
+                msg = f"Channel of name '{channel_name}' is not among '{self.channel_spec.channels}}'"
+                raise ValueError(msg)
+
+    def validate_channel_width(self, channels: List[str], channel_width: int):
+        """Validates that a given channel collection is compatible with a given channel width"""
+        required_length = sum(self.channel_spec.channel_widths[channel] for channel in channels)
+        if required_length != channel_width:
+            msg = f"""
+            The selected channels were: {channels}
+            These were expected to be associated with tensors of width: {required_length}
+            However, we actually got a tensor of width {channel_width}
+            """
+            msg = textwrap.dedent(msg)
+            raise ValueError(msg)
+
+
+    ## Init ##
+
+    def __init__(self,
+                 channel_spec: TensorChannelSpec
+                 ):
+        self.channel_spec = channel_spec
+    def create_mtc_tensor(self,
+               channels: str | List[str],
+               values: torch.Tensor,
+               )->torch.Tensor:
+        """
+        Populates the given channels with the given values.
+        Everything else is padded out to be zero. The channel information
+        is expected to be provided in values along the last dimension in
+        the specified channel order.
+
+        :param channels:
+            - The channels to insert into.
+            - Order matters.
+            - Do not repeat channels
+            - Information must be associated in that order over in values.
+        :param values:
+            - The values to create the MTC tensor out of.
+            - The channels that are active should be defined within this
+        :return:
+            - An MTC tensor.
+        """
+
+        # Input standardization
+        if not isinstance(channels, list):
+            channels = [channels]
+
+        # Validation
+        if __debug__:
+            self.validate_channels(channels)
+            self.validate_channel_width(channels, values.shape[-1])
+
+        # Separate the values into sections associated with each individual channel
+        split_indices = [0] + [self.channel_spec.channel_widths[channel] for channel in channels]
+        split_indices = split_indices[:-1]
+        split_indices = torch.cumsum(torch.tensor(split_indices), dim=0)
+        sections = torch.split(values, split_indices, dim=-1)
+
+        # Create the output tensor
+        shape = list(values.shape)
+        shape[-1] = self.channel_spec.total_width
+        output = torch.zeros(shape, dtype=values.dtype, device=values.device)
+
+        # Commit the values to the proper locations, in sequence
+        for channel, section in zip(channels, sections):
+            target_slice = self.channel_spec.slices[channel]
+            output[..., target_slice] = section
+
+        return output
+
+
+
+    def set_mtc_tensor(self,
+                   mtc_tensor: torch.Tensor,
+                   channels: str | List[str],
+                   values: torch.Tensor
+                   ):
+        """
+        :param mtc_tensor:
+         - The MTC tensor we are managing. We plan on setting to some of the channels
+        :param channels:
+        :param values:
+        :return:
+        """
+        # Input standardization
+        if not isinstance(channels, list):
+            channels = [channels]
+
+        # Validation
+        if __debug__:
+            self.validate_channels(channels)
+            self.validate_channel_width(channels, values.shape[-1])
+            self.validate_mtc_tensor(mtc_tensor,)
+
+
+
+    def extract_mtc_tensor(self,
+                           channels: List[str]
+                           )->Tuple['MTCTensorManager', torch.Tensor]:
+        """
+
+        :param channels:
+        :return:
+        """
 
 class TensorChannelManager:
     """
@@ -118,6 +279,40 @@ class TensorChannelManager:
     def channel_length(self) -> int:
         return sum(self.channel_spec.values())
 
+    @property
+    def channel_width(self)->Dict[str, int]:
+        return self.channel_spec
+
+    ##
+    # Validation logic.
+    #
+    # All error messages MUST be thrown as originating
+    # from something in here. Anything else is a bug
+    ##
+    def validate_channel_selections(self,
+                                    channels: List[str],
+                                    ):
+        """
+        Validation for whether the given channels exists.
+        :param channels: A list of the channels to check
+        :raises: ValueError if one of the provided channels does not exist
+        """
+        # Throws an exception if any channel in the provided list
+        # was not actually a valid channel.
+        for channel in channels:
+            if channel not in self.channel_spec:
+                msg = f"""
+                Channel Validation Error
+                
+                Channel of name '{channel}' was interacted with, but is not defined.
+                The only defined channels are {self.channel_allocs}.
+                """
+                msg = textwrap.dedent(msg)
+                raise ValueError(msg)
+
+    def validate_channel_width(self,):
+
+
     def __init__(self, channel_spec: Dict[str, int]):
         self.channel_spec = channel_spec
     def get_common_shape(self,
@@ -208,7 +403,7 @@ class TensorChannelManager:
 
     def replace(self,
                 tensor: torch.Tensor,
-                channel_name: str,
+                channel_names: str | List[str],
                 replacement: torch.Tensor
                 )->torch.Tensor:
         """
@@ -218,9 +413,10 @@ class TensorChannelManager:
         :param tensor:
             - The tensor to start with
             - Shape (..., items, channels)
-        :param channel_name:
-            - The feature to replace
+        :param channel_names:
+            - The features to replace
             - Must be in channel allocs
+            - Must be the case
         :param replacement:
             - The thing to replace with.
             - Must be shape (..., items, D), with D matching alloc with
@@ -228,6 +424,16 @@ class TensorChannelManager:
             - A tensor with the elements replaced
             - Shape (..., items, channels)
         """
+
+        # Input standardization
+        if not isinstance(channel_names, list):
+            channel_names = [channel_names]
+
+        # Validation
+        if __debug__:
+            self.validate_channel_selections(channel_names)
+            self.validate_valid_channel_width(channel_names, replacement.shape[-1])
+
         assert channel_name in self.channel_allocs
         assert replacement.shape[-1] == self.channel_spec[channel_name]
         assert replacement.shape[:-1] == tensor.shape[:-1]
@@ -235,11 +441,22 @@ class TensorChannelManager:
         tensor_slice = self.slices[channel_name]
         tensor = tensor.clone()
         tensor[..., tensor_slice] = replacement
-class BoundChannel:
+
+
+
+class BoundChannels:
     """
-    Bind to a particular channel, and enables setting to and extracting
-    from that channel.
-    """
+     A utility class that binds to a particular channel within a Multimodal Token Channels (MTC) tensor.
+     This class provides methods to interact with the bound channel, allowing setting, extracting, and
+     creating MTC tensors for that channel.
+
+     **Purpose**:
+     To streamline access and modification of individual channels in the MTC tensor, where each
+     channel represents a different feature in the data (e.g., mode, data, zone). The `BoundChannel`
+     acts as an adapter for working with the specific channel and handles broadcasting and dimensional
+     alignment when setting values.
+     """
+
     def __init__(self,
                  channel: str,
                  channel_spec: TensorChannelManager
@@ -247,121 +464,85 @@ class BoundChannel:
         assert channel in channel_spec.channel_allocs
         self.channel = channel
         self.channel_spec = channel_spec
-    def set(self, mtc_tensor: torch.Tensor, values: torch.Tensor)->torch.Tensor:
-        """
-        Sets the channel within the mtc tensor to be equal to the given value
-        or values.
 
-        :param tensor:
-            - The mtc tensor to set as
-            - Should have shape (..., total_channel_width)
+    def set(self, mtc_tensor: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
+        """
+        Set the specified channel in the MTC (Multimodal Token Channels) tensor to the provided values.
+
+        This method assigns the provided values to the channel bound during the initialization of
+        the `BoundChannel`. The `values` tensor must match the channel width, and it will be
+        broadcasted to align with the non-channel dimensions of `mtc_tensor`.
+
+        ---- Parameters ----
+        :param mtc_tensor:
+            - The MTC tensor to modify.
+            - Shape: `(..., total_channel_width)` where `total_channel_width` is the combined width of all channels.
+
         :param values:
-            - The values to set the channel width
-            - Can have broadcastable shape of (..., channel_width), with channel width specific to
-              given bound channel
-            - Remaining dimensions will be broadcast, so dimensions must match otherwise
+            - The values to assign to the channel.
+            - Shape: `(..., channel_width)`, where `channel_width` matches the width of the bound channel.
+            - The dimensionality of `values` should not exceed that of `mtc_tensor`.
+            - It will be broadcasted to match `mtc_tensor` in all non-channel dimensions.
+
+        ---- Returns ----
         :return:
-            - A copy of the mtc_tensor
-            - The values have been set in their appropriate locations.
+            - A modified copy of `mtc_tensor` with the values set in the bound channel.
+            - Shape: Same as `mtc_tensor` (`(..., total_channel_width)`).
         """
-        pass
-    def create(self, value: torch.Tensor):
-        """
-        Creates a mtc tensor using the given values as the channel
-        entries, and lets everything else be blank.
+        # Ensure the last dimension of `values` matches the channel width in the MTC tensor
+        assert values.shape[-1] == self.channel_spec.channel_spec[self.channel]
 
+        # Ensure the dimensionality of `values` does not exceed that of `mtc_tensor`
+        assert values.dim() <= mtc_tensor.dim()
+
+        # Prepare the broadcast shape for `values` to match `mtc_tensor`
+        broadcast_shape = list(mtc_tensor.shape)
+        broadcast_shape[-1] = values.shape[-1]
+        replacement = values.broadcast_to(broadcast_shape)
+
+        # Use the channel spec to replace the bound channel in `mtc_tensor` with the broadcasted `values`
+        return self.channel_spec.replace(mtc_tensor, self.channel, replacement)
+
+    def create(self, value: torch.Tensor) -> torch.Tensor:
+        """
+        Creates a new MTC tensor with the provided values assigned to the bound channel.
+        All other channels will be initialized to zeros.
+
+        ---- Parameters ----
         :param value:
-            - The value tensor.
-            - Shape (..., items, channel_width)
-            - Must have a shape of at least (items, channel_width)
-            - channel_width is the width of the channel feature we are bound to
+            - The value tensor to assign to the channel.
+            - Shape: `(..., items, channel_width)`, where `channel_width` corresponds to the width of the bound channel.
+
+        ---- Returns ----
         :return:
-            - Tensor
-            - Shape (..., items, channels)
-            - Channels is width of all the channels
-            - Value is inserted at the right location.
+            - A new MTC tensor where the bound channel contains `value` and all other channels are filled with zeros.
+            - Shape: `(..., items, total_channels)`, where `total_channels` corresponds to the combined width of all channels.
         """
-        pass
-    def extract(self, mtc_tensor: torch.Tensor)->torch.Tensor:
-        """
-        Extracts my bound channel from the mtc_tensor.
+        assert value.shape[-1] == self.channel_spec.channel_spec[self.channel]
 
-        :param mtc_tensor: The tensor to extract from
-        :return: The extracted tensor
-        """
-class BoundChannelManager:
-    """
-    * Bound to a particular channel, like 'mode' or 'data'
-    * Capable of setting data to, or creating tensors based on,
-      that channel.
-    * Methods:
-        - set: Sets
-        - create:
-    """
-    @abstractmethod
-    def decode_value(self, value: Any)->torch.Tensor:
-        """
-        Takes in a 'value' feature and returns a tensor of
-        an integer or integers that fits in the channel.
+        # Create a dictionary of None values for all channels, except for the bound channel.
+        tensors = {name: None for name in self.channel_spec.channel_allocs}
+        tensors[self.channel] = value
 
-        :param value:
-            - Could be anything, depending on the subclass.
-            - Int, intgrid, str would be common expectations.
-        :return: A int tensor. Something of shape (..., channel_width).
-        """
-        pass
-
-    def __init__(self,
-                 channel: str,
-                 channel_spec: TensorChannelManager,
-                 ):
-        assert channel in channel_spec.channel_allocs
-        self.channel = channel
-        self.channel_spec = channel_spec
-
-    def create(self, value: Any)->torch.Tensor:
-        decoded = self.decode_value(value)
-        tensors = {name : None for name in self.channel_spec.channel_allocs}
-        tensors[self.channel] = decoded
+        # Combine the values into a new tensor where the bound channel is set and others are filled with zeros.
         return self.channel_spec.combine(tensors)
 
-    def set(self, tensor: torch.Tensor, value: Any)->torch.Tensor:
-        decoded = self.decode_value(value)
-        replacement = decoded.broadcast_to(tensor.shape)
-        return self.channel_spec.replace(tensor, self.channel, replacement)
-
-    def extract(self, tensor: torch.Tensor)->torch.Tensor:
-
-
-    def convert(self, tensor: torch.Tensor)->NestedList[Any]:
-
-
-    @abstractmethod
-    def set(self, tensor: torch.Tensor, value: Any)->torch.Tensor:
+    def extract(self, mtc_tensor: torch.Tensor) -> torch.Tensor:
         """
-        Set mechanism. It should pledge to set the bound channel
-        in the given tensor to the given value, whatever that might
-        mean.
-        :param tensor:
-        :param value:
+        Extracts the values from the bound channel within the provided MTC tensor.
+
+        ---- Parameters ----
+        :param mtc_tensor:
+            - The MTC tensor to extract from.
+            - Shape: `(..., total_channel_width)`.
+
+        ---- Returns ----
         :return:
+            - A tensor containing the values from the bound channel.
+            - Shape: `(..., channel_width)`, where `channel_width` corresponds to the width of the bound channel.
         """
+        return self.channel_spec.extract(mtc_tensor, self.channel)
 
-        pass
-
-    @abstractmethod
-    def create(self, value: Any)->torch.Tensor:
-        pass
-
-    @abstractmethod
-    def extract(self, tensor: torch.Tensor)->torch.Tensor:
-        pass
-
-
-    def __init__(self,
-                 channel: str,
-                 channel_spec: TensorChannelManager
-                 ):
 
 class BatchMagic:
     """
