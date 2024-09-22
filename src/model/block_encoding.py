@@ -9,7 +9,6 @@ from torch import nn
 from torch.nn import functional as F
 from transformers import PreTrainedTokenizer
 from channel_bound_tensors import CBTensor, CBTensorSpec
-from config import Config
 from typing import Dict, List, Any, Callable, Tuple
 from abc import ABC, abstractmethod
 
@@ -50,7 +49,8 @@ class AbstractBlockDataProcessor(ABC):
     def encode(self,
                payload: Any,
                mode: int,
-               submode: int)->CBTensor:
+               submode: int
+               )->Tuple[CBTensor, Tuple[int, ...]]:
         """
         Encodes a payload into a CBTensor, with set information for
         index, shape, mode, submode, and data. Any extra channels are
@@ -59,7 +59,10 @@ class AbstractBlockDataProcessor(ABC):
         :param payload: The payload to encode
         :param mode: The mode to mark it encoded as
         :param submode: The submode to mark it encoded as
-        :return: The CBTensor.
+        :return:
+            - The CBTensor.
+            - The nonchannel shape.
+                - Used downstream, and we avoid fishing it out of the CBTensor this way
         """
 
         # Define the shape and data feature.
@@ -93,8 +96,7 @@ class AbstractBlockDataProcessor(ABC):
         # Construct and return
         tensor = CBTensor.create_from_channels(constructor)
         tensor = tensor.rebind_to_spec(self.spec)
-        return tensor
-
+        return tensor, nonchannel_shape
     def decode(self, tensor: CBTensor)->Any:
         """
         Decodes a CBTensor into original content, whatever
@@ -140,13 +142,58 @@ class AbstractBlockDataProcessor(ABC):
         self.mode_data_width = mode_data_width
 
 class TextBlockDataProcessor(AbstractBlockDataProcessor):
+    """
+    Tokenizes and detokenizes text blocks. The payload
+    in these blocks will always be strings. Can use
+    various different tokenizers.
+    """
 
     def encode_helper(self, payload: Any) ->torch.Tensor:
         assert isinstance(payload, str)
+        tokens = self.tokenizer.encode(payload)
+        tokens = torch.tensor(tokens, dtype=torch.long, device=self.device)
+        return tokens
+
+    def decode_helper(self, tensor: torch.Tensor) -> Any:
+        text = self.tokenizer.decode(tensor)
+        return text
 
     def __init__(self,
                  tokenizer: PreTrainedTokenizer,
-                 spec: CBTensorSpec
+                 spec: CBTensorSpec,
+                 device: torch.device = torch.device("cpu")
                  ):
         self.tokenizer = tokenizer
+        self.device = device
         super().__init__(spec, "text", 1)
+
+class IntGridBlockDataProcessor(AbstractBlockDataProcessor):
+    """
+    Converts 'intgrids' - grids of integer data which might
+    be pieces on a chessboard, arc-agi data, etc -
+    into a flattened tensor representation. Will always be
+    an N x M grid
+    """
+    def __init__(self,
+                 spec: CBTensorSpec,
+                 device: torch.device = torch.device("cpu")
+                 ):
+        super().__init__(spec, "intgrid", 2)
+        self.device = device
+    def encode_helper(self, payload: Any) ->torch.Tensor:
+        return torch.tensor(payload, device=self.device, dtype=torch.long)
+    def decode_helper(self, tensor: torch.Tensor) -> Any:
+        return tensor.tolist()
+
+class BlockProcessor:
+    """
+    Constructs the headers for blocks.
+    These are needed in order to ensure the model
+    has a way
+    """
+    def __init__(self,
+                 mode_start_spec: ModeSpec,
+                 mode_stop_spec:
+                 mode_
+
+                 ):

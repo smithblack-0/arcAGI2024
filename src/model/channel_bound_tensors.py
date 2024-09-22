@@ -4,7 +4,7 @@ import torch
 from types import MappingProxyType
 from functools import cached_property
 from torch.nn import functional as F
-from typing import List, Dict, Optional, Tuple, TypeVar, Any
+from typing import List, Dict, Optional, Tuple, TypeVar, Any, Union
 from abc import ABC, abstractmethod
 NestedList = TypeVar('NestedList')
 
@@ -210,7 +210,7 @@ class CBTensor:
         :param destination_tensor: The per-channel widths of the destination.
         :raises ValueError: If the shapes differ
         """
-        for channel_name in destination_widths.keys():
+        for channel_name in source_widths.keys():
             if source_widths[channel_name] != destination_widths[channel_name]:
                 msg = f"""
                 Channel widths are mismatched for channel of name{channel_name}
@@ -276,25 +276,32 @@ class CBTensor:
         """
 
 
-        # Create the spec and get the tensor to broadcast match
+        # Create the spec.
         spec = {channel : tensor_channels[channel].shape[-1] for channel in tensor_channels.keys()}
-        highest_key = max(tensor_channels.keys(), key = lambda channel : tensor_channels[channel].dim())
-        highest_dimensional_tensor = tensor_channels[highest_key]
-        dtype = highest_dimensional_tensor.dtype
-        device = highest_dimensional_tensor.device
-        broadcast_shape = list(highest_dimensional_tensor.shape[:-1])
+
+        # Get the broadcast shape for the nonchannel portion, by combining the shapes of
+        # the pieces.
+        broadcast_shape = [1]
+        for tensor in tensor_channels.values():
+            nonchannel_shape = tensor.shape[:-1]
+
+            if __debug__:
+                cls.validate_broadcastable(broadcast_shape, nonchannel_shape)
+
+            broadcast_shape = torch.broadcast_shapes(tensor.shape[:-1], broadcast_shape)
+        broadcast_shape = list(broadcast_shape)
 
         # Construct the tensor core. Broadcast as needed.
         output = []
         for channel in tensor_channels.keys():
-            required_shape = broadcast_shape + [case.shape[-1]]
             case = tensor_channels[channel]
+            required_shape = broadcast_shape + [case.shape[-1]]
             case = case.broadcast_to(required_shape)
             output.append(case)
         tensor = torch.cat(output, dim=-1)
         return CBTensor(spec, tensor)
     def __init__(self,
-                 spec: CBTensorSpec | Dict[str, int],
+                 spec: Union[CBTensorSpec, Dict[str, int]],
                  tensor: Optional[torch.Tensor],
                  ):
         # Data standardization
@@ -313,7 +320,7 @@ class CBTensor:
     # Cross CB tensor logic. We are given and get back CB tensors
     ##
 
-    def rebind_to_spec(self, spec: CBTensorSpec | Dict[str, int])->'CBTensor':
+    def rebind_to_spec(self, spec: Union[CBTensorSpec, Dict[str, int]])->'CBTensor':
         """
         Rebinds the current `CBTensor` to a new specification, which can add or reorder
         channels.
@@ -345,8 +352,8 @@ class CBTensor:
 
         # Validation
         if __debug__:
-            self.validate_channels_exist(spec.channels, self.channels)
-            self.validate_common_channel_widths(spec.channel_widths, self.channel_widths)
+            self.validate_channels_exist(self.channels, spec.channels)
+            self.validate_common_channel_widths(self.channel_widths, spec.channel_widths)
 
         # Create new CBTensor
         shape = list(self.tensor.shape[:-1]) + [spec.total_width]
@@ -418,7 +425,7 @@ class CBTensor:
         outcome = torch.cat(outcome, dim=-1)
         return CBTensor(self.spec, outcome)
 
-    def gather_channels(self, channels: str | List[str])->'CBTensor':
+    def gather_channels(self, channels: Union[str,List[str]])->'CBTensor':
         """
         Gathers a subset of channels from the current tensor and returns a new `CBTensor`
         containing only the selected channels.
@@ -453,7 +460,7 @@ class CBTensor:
 
         # Validate
         if __debug__:
-            self.validate_channels_exist(self.channels, channels)
+            self.validate_channels_exist(channels, self.channels)
 
         # Spec the outcome
         # Get the tensors
