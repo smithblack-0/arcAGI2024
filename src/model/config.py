@@ -12,6 +12,25 @@ class Verbosity(Enum):
     Anomaly = 2
     NonterminalError = 1
     TerminalError = 0
+class ModesDefinition:
+    Control = 0
+    ModeSelect = 1
+    ShapeSelect = 2
+    Indicator = 3
+    Data = 4
+class ControlSubModes(Enum):
+    StartBlock = 0
+    EndBlock = 1
+    NextZone = 2
+    EndZones = 3
+
+class IndicatorSubmodes(Enum):
+    ZoneIndicator = 0
+    SequenceIndicator = 1
+
+class ModeSpec:
+    Modes = ModesDefinition
+    ControlSubModes = ControlSubModes
 
 
 

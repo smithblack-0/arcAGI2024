@@ -192,8 +192,5 @@ class BlockProcessor:
     has a way
     """
     def __init__(self,
-                 mode_start_spec: ModeSpec,
-                 mode_stop_spec:
-                 mode_
-
                  ):
+
