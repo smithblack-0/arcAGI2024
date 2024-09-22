@@ -1,15 +1,14 @@
 import textwrap
 
-`import torch
+import torch
+from types import MappingProxyType
 from functools import cached_property
 from torch.nn import functional as F
 from typing import List, Dict, Optional, Tuple, TypeVar, Any
-from dataclasses import dataclass
 from abc import ABC, abstractmethod
 NestedList = TypeVar('NestedList')
 
 
-@dataclass(frozen=True)
 class CBTensorSpec:
     """
     The CB tensor spec is designed to hold channel binding (CB) data
@@ -64,6 +63,8 @@ class CBTensorSpec:
         for name in self.channels:
             output[name] = slice(self.start_index[name], self.end_index[name])
         return output
+    def __init__(self, spec: Dict[str, int]):
+        self.spec = MappingProxyType(spec)
 
     def __contains__(self, item: str)->bool:
         return item in self.spec
@@ -219,26 +220,6 @@ class CBTensor:
                 """
                 msg = textwrap.dedent(msg)
                 raise ValueError(msg)
-
-    def validate_tensor_channel_width(self, channels: List[str], tensor_width: int):
-        """
-        Validates that a given collection of channels will match up with the given channel
-        width
-
-        :param channels: The channels being targeted
-        :param channel_width: The width of the provided
-        """
-        target_width = sum(self.channel_widths[channel] for channel in channels)
-        if target_width != tensor_width:
-            msg = f"""
-            The tensor is not compatible with the channels. 
-            
-            The channels selected require a width of {target_width}.
-            However, actually got {target_width} instead.
-            """
-            msg = textwrap.dedent(msg)
-            raise ValueError(msg)
-
 
     @staticmethod
     def validate_broadcastable(destination_shape: Tuple[int, ...],
@@ -515,7 +496,7 @@ class CBTensor:
         """
         return {name : self.tensor[..., self.slices[name]] for name in self.channels}
 
-
+'''
 
 class BatchMagic:
     """
@@ -593,7 +574,7 @@ class BatchMagic:
         return destination_tensor, destination_padding
 
     def batch(self,
-              tensors: torch.Tensor | NestedList[torch.Tensor]
+              tensors: torch.Tensor | NestedList
               )->Tuple[torch.Tensor, torch.Tensor]:
         """
         Batches a collection of tensors, potentially organized in nested lists, by adding
@@ -732,3 +713,4 @@ class BatchMagic:
 
         # Return the unpadded tensor
         return valid_tensor
+'''

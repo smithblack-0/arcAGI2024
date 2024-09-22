@@ -7,7 +7,7 @@ class TestCBTensorSpecBehavioral(unittest.TestCase):
 
     def test_spec_immutability(self):
         spec = CBTensorSpec({'channel_1': 5, 'channel_2': 3})
-        with self.assertRaises(FrozenInstanceError):
+        with self.assertRaises(TypeError):
             spec.spec['channel_1'] = 10
 
     def test_channels_property(self):
