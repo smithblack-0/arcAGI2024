@@ -8,10 +8,8 @@ Basically
 
 """
 import torch
-from .tensor_helpers import TensorChannelManager
-from dataclasses import dataclass
+from src.model.channel_bound_tensors import TensorChannelManager
 from typing import List, Dict, Any
-from abc import ABC, abstractmethod
 
 
 class StringSpec:
