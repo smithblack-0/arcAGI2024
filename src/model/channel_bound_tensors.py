@@ -1,12 +1,15 @@
 import textwrap
 
-import torch
+`import torch
 from functools import cached_property
 from torch.nn import functional as F
 from typing import List, Dict, Optional, Tuple, TypeVar, Any
+from dataclasses import dataclass
 from abc import ABC, abstractmethod
 NestedList = TypeVar('NestedList')
 
+
+@dataclass(frozen=True)
 class CBTensorSpec:
     """
     The CB tensor spec is designed to hold channel binding (CB) data
@@ -22,6 +25,8 @@ class CBTensorSpec:
     end_index: For each channel, what the end index for the channel is.
     slices: For each channel, what the slice addressing that channel would be.
     """
+
+    spec: Dict[str, int]
 
     @property
     def channels(self)->List[str]:
@@ -59,10 +64,6 @@ class CBTensorSpec:
         for name in self.channels:
             output[name] = slice(self.start_index[name], self.end_index[name])
         return output
-
-    def __init__(self, channel_spec: Dict[str, int]):
-        assert len(set(channel_spec.keys())) == len(channel_spec)
-        self.spec = channel_spec
 
     def __contains__(self, item: str)->bool:
         return item in self.spec
