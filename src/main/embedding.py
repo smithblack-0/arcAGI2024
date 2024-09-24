@@ -10,7 +10,7 @@ Payload data is represented using **mode-dimension channels**, where each input 
 target is defined by two integers: the mode (indicating the type of data, such
 as text or image) and the associated data value. The module supports various
 dimensionalities (e.g., text as 1D, images as 3D), and all data flows through
-the model in batches. Zero-padding is used to manage different dimensional
+the main in batches. Zero-padding is used to manage different dimensional
 requirements across modes, allowing diverse data types to coexist within the
 same batch.
 
@@ -42,15 +42,15 @@ For example:
   color channels (3D).
 
 The schema tensor is immutable once created and is used during both setup and
-runtime to ensure that the model correctly processes different data types. It
+runtime to ensure that the main correctly processes different data types. It
 provides a unified mechanism for handling multimodal data, ensuring that even
 with different dimensional structures, all data can be processed together
-within the same model.
+within the same main.
 
 ### Responsibilities
 
 The module's key responsibilities are:
-1. Embedding mode-dimension channel data for model training.
+1. Embedding mode-dimension channel data for main training.
 2. Generating logits according to provided schemas for each mode.
 3. Processing losses for each mode of operation.
 4. Managing data integration to ensure compatibility between different
@@ -413,7 +413,7 @@ class TokenEmbeddings(AbstractModeEmbedding):
 class LinearEmbeddings(AbstractModeEmbedding):
     """
     Creates a linear embedding mechanism that processes the entire input (modes + dimensions)
-    together, allowing the model to learn how to handle the modes and dimensions jointly.
+    together, allowing the main to learn how to handle the modes and dimensions jointly.
 
     ### When to Use
     This layer is suitable when dealing with data where nearby numbers are related,
@@ -426,7 +426,7 @@ class LinearEmbeddings(AbstractModeEmbedding):
     ### How to Use
     Initialize the `LinearEmbeddings` layer with the required parameters and then call
     the layer on the input data. The input should contain both the mode and dimension
-    data in the same tensor, formatted as `(batch, mode + dimensions)`. The model will
+    data in the same tensor, formatted as `(batch, mode + dimensions)`. The main will
     handle both mode and dimension jointly.
 
     Example:
@@ -452,7 +452,7 @@ class LinearEmbeddings(AbstractModeEmbedding):
     This class processes the entire input (modes + dimensions) together using several
     linear layers. The input is projected into a tensor of shape `internal_dims`,
     processed through `num_layers` with linear projections and ReLU activations, and
-    then projected to the final embedding dimension. The model learns to encode both
+    then projected to the final embedding dimension. The main learns to encode both
     modes and dimensions jointly, rather than separating them.
     """
 

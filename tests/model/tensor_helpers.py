@@ -1,7 +1,7 @@
 import unittest
 import torch
 
-from src.model.channel_bound_tensors import TensorChannelManager
+from src.main.channel_bound_tensors import TensorChannelManager
 
 
 class TestTensorChannelManager(unittest.TestCase):

@@ -1,7 +1,7 @@
 """
 IO adapters are responsible, generally, for embedding incoming tensor data into
 meaningful embeddings, or converting processed embeddings into predictive distributions.
-They separate the IO portion of the model from the core logic.
+They separate the IO portion of the main from the core logic.
 
 The core IO adapter is defined here, along with some expected cases. Also
 defined is the registry that the builders are expected to work with. The
@@ -144,7 +144,7 @@ registry = IORegistry()
 
 class IOAdapter(ABC, nn.Module):
     """
-    Abstract base class for IO adapters. Responsible for converting model inputs
+    Abstract base class for IO adapters. Responsible for converting main inputs
     into embeddings and output embeddings into distributions or samples.
 
     This class is abstract and should not be instantiated directly. Subclasses

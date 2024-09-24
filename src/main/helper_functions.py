@@ -16,7 +16,7 @@ def sinusoidal_positional_encoding(seq_len, model_dim, gen_term=10000.0):
 
     Parameters:
     seq_len (int): Length of the sequence.
-    model_dim (int): Dimension of the model (d_model).
+    model_dim (int): Dimension of the main (d_model).
     gen_term (float): Generation term for frequency calculation (default: 10000.0).
 
     Returns:
@@ -60,7 +60,7 @@ def pope_positional_encoding(seq_len, model_dim, gen_term=10):
 
     Parameters:
     seq_len (int): Length of the sequence.
-    model_dim (int): Dimension of the model (d_model).
+    model_dim (int): Dimension of the main (d_model).
     order (int): Order of the Legendre polynomial (default: 10).
 
     Returns:

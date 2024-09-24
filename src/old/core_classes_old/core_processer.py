@@ -32,7 +32,7 @@ class BatchAssembly(ABC):
     batch. The second is, per batch dimension, a 2d shape tensor specifying the extend of
     the nonbatched content in that dimension.
 
-    The content that is sent on to the model will depend somewhat on the parameters provided
+    The content that is sent on to the main will depend somewhat on the parameters provided
     on initialization.
     """
 
@@ -213,9 +213,9 @@ class BatchDisassembly:
     they all boil down to working to produce a single datastructure.
 
     One of the responsibilities is to split up the results produced
-    by the machine learning model and reassociate each of the batch
+    by the machine learning main and reassociate each of the batch
     dimensions with a uuid counterpart. We keep whatever dict channels were
-    provided by the model.
+    provided by the main.
 
     Another responsibility is to break up the shape
     padding details and again associate them back with uuids. This information
@@ -240,11 +240,11 @@ class BatchDisassembly:
         """
         Runs the batch dissassembly process. One detail
 
-        :param run_uuids: The uuids associated with the batches that were run through the model
+        :param run_uuids: The uuids associated with the batches that were run through the main
         :param exception_data: The uuids associated with batches that had exceptions detected.
         :param shapes_data: The mapping of dict channel to the unpadded shape.
         :param model_data:
-            The mapping of dict channel to the results of running the model.
+            The mapping of dict channel to the results of running the main.
             Note: Likely different from shapes channels.
         :param logging_callback:
             The logging callback. Used to make certain decisions.
@@ -297,7 +297,7 @@ class BatchDisassembly:
                 shapes_dict[id][channel] = subtensors
 
 
-        ## Take apart the response produced by invoking the model,
+        ## Take apart the response produced by invoking the main,
         # and associated each element back with it's uuid case.
 
         response_cases = {id : {} for id in run_uuids}
@@ -305,7 +305,7 @@ class BatchDisassembly:
             if tensor.shape[0] != len(run_uuids):
                 msg = f"""
                 Unrecoverable error encountered. It was expected that the tensors returned by
-                the model would have the same batch shape as what went in. For feature of name 
+                the main would have the same batch shape as what went in. For feature of name 
                 '{key}' this was not the case. 
                 
                 expected_shape: {len(run_uuids)}
@@ -381,7 +381,7 @@ class CoreSyncProcessor(nn.Module):
         :param batch_assembler:
             A mechanism to assemble a batch out of the target ids and the batches lying in the buffer.
         :param core_model:
-            A core machine learning model to process the batch with. Should expect and return dictionaries
+            A core machine learning main to process the batch with. Should expect and return dictionaries
         :param batch_disassembler:
             A mechanism that retunrs
         """
@@ -435,7 +435,7 @@ class CoreSyncProcessor(nn.Module):
             # Log exception
             logging_callback(exception, 1)
 
-            # Remove any attempt the model
+            # Remove any attempt the main
             used_ids = []
             exception_data.update({id : exception for id in selected_cases})
             model_output = {}

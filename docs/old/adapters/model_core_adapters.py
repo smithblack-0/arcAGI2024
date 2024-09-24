@@ -1,8 +1,8 @@
 """
 For the purpose of this section, the "core" of a
-model is a section that
+main is a section that
 
-The core of a model is something found under many,
+The core of a main is something found under many,
 but not all, models for image processing or text
 data.
 

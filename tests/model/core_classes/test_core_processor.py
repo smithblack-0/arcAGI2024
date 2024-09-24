@@ -387,7 +387,7 @@ class TestBatchDisassemblyErrorConditions(unittest.TestCase):
         termination_callback.assert_called_once_with(True)
 
     def test_model_output_batch_size_mismatch(self):
-        # Test case where the model output tensor batch size does not match the run_uuids
+        # Test case where the main output tensor batch size does not match the run_uuids
         run_uuids = ["dataset1", "dataset2"]
         exception_data = {}
         batch = {"channel1": torch.tensor([[2.0, 3.0], [1.0, 0.0]]),
@@ -527,7 +527,7 @@ class TestCoreSyncProcessorErrorConditions(unittest.TestCase):
                 return True
         return False
     def test_model_processing_exception(self):
-        # Test where the model processing raises an exception
+        # Test where the main processing raises an exception
 
         channels = ["channel1", "channel2"]
         cases_backend = {"dataset1": {"channel1": torch.tensor([2.0, 3.0]), "channel2": torch.tensor([1.0])},

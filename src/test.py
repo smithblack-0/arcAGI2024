@@ -1,138 +1,89 @@
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import numpy as np
-import matplotlib.pyplot as plt
 
+# Define dimensions
+embed_dim = 64  # Embedding dimension
+num_heads = 8   # Number of attention heads
+seq_len = 10    # Sequence length
+batch_size = 4  # Batch size
 
-# Generate data
-def generate_data(num_samples=1000):
-    x1 = np.random.uniform(low=-10, high=10.0, size=(num_samples, 1))  # First feature
-    x2 = np.random.uniform(low=-10, high=10.0, size=(num_samples, 1))  # Second feature
-    y = x1 * x2  # Target is the product of x1 and x2
-    X = np.hstack((x1, x2))  # Stack features together
-    return torch.Tensor(X), torch.Tensor(y)
+# Create some random inputs
+query = torch.randn(seq_len, batch_size, embed_dim)
+key = torch.randn(seq_len+1, batch_size, embed_dim)
+value = torch.randn(seq_len+1, batch_size, embed_dim)
 
+# Create key_padding_mask for attention
+key_padding_mask = torch.randint(0, 2, (batch_size, seq_len+1)).bool()
 
-# Define the Headed Bilinear Layer
-class HeadedBilinearLayer(nn.Module):
-    def __init__(self, in_features, out_features, num_heads, bias=True):
-        super(HeadedBilinearLayer, self).__init__()
-        self.num_heads = num_heads
-        self.bilinear = nn.Bilinear(in_features // num_heads, in_features // num_heads, out_features // num_heads,
-                                    bias=bias)
+# Initialize multihead attention layer with batch_first=False
+multihead_attn_no_batch_first = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, batch_first=False)
+# Initialize multihead attention layer with batch_first=True
+multihead_attn_batch_first = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, batch_first=True)
 
-    def forward(self, x):
-        batch_size, input_dim = x.shape
-        head_dim = input_dim // self.num_heads
+# 1. Run with batch_first=False, average_attn_weights=True
+attn_output_no_batch_first, attn_weights_no_batch_first = multihead_attn_no_batch_first(
+    query=query,
+    key=key,
+    value=value,
+    key_padding_mask=key_padding_mask,
+    need_weights=True,
+    average_attn_weights=True
+)
 
-        # Reshape the input into heads (batch_size, num_heads, head_dim)
-        x_reshaped = x.view(batch_size, self.num_heads, head_dim)
+# 2. Run with batch_first=True, average_attn_weights=True
+query_bf = query.transpose(0, 1)  # Transpose to shape (batch_size, seq_len, embed_dim)
+key_bf = key.transpose(0, 1)
+value_bf = value.transpose(0, 1)
 
-        # Perform bilinear interaction across all heads in parallel
-        output_heads = self.bilinear(x_reshaped, x_reshaped)  # Bilinear across heads
+attn_output_batch_first, attn_weights_batch_first = multihead_attn_batch_first(
+    query=query_bf,
+    key=key_bf,
+    value=value_bf,
+    key_padding_mask=key_padding_mask,
+    need_weights=True,
+    average_attn_weights=True
+)
 
-        # Reshape back to original shape (batch_size, out_dim)
-        output = output_heads.view(batch_size, -1)
-        return output
+# 3. Run with batch_first=False, average_attn_weights=False
+attn_output_no_batch_first_no_avg, attn_weights_no_batch_first_no_avg = multihead_attn_no_batch_first(
+    query=query,
+    key=key,
+    value=value,
+    key_padding_mask=key_padding_mask,
+    need_weights=True,
+    average_attn_weights=False
+)
 
+# 4. Run with batch_first=True, average_attn_weights=False
+attn_output_batch_first_no_avg, attn_weights_batch_first_no_avg = multihead_attn_batch_first(
+    query=query_bf,
+    key=key_bf,
+    value=value_bf,
+    key_padding_mask=key_padding_mask,
+    need_weights=True,
+    average_attn_weights=False
+)
 
-# Define the composite model with LinearReLU, Headed BilinearReLU, and final LinearReLU
-class CompositeMultiplicationModel(nn.Module):
-    def __init__(self):
-        super(CompositeMultiplicationModel, self).__init__()
-        self.fc1 = nn.Linear(2, 64)  # First linear layer
-        self.headed_bilinear = HeadedBilinearLayer(64, 64, num_heads=8)  # Headed bilinear layer with 8 heads
-        self.fc2 = nn.Linear(64, 1)  # Final linear layer
+# Print the shapes to compare attention outputs and weights
+print("=== Batch First=False, average_attn_weights=True ===")
+print("Attn Output shape (no batch first):", attn_output_no_batch_first.shape)
+print("Attn Weights shape (no batch first):", attn_weights_no_batch_first.shape)
 
-    def forward(self, x):
-        x = torch.relu(self.fc1(x))  # First LinearReLU layer
-        x = torch.relu(self.headed_bilinear(x))  # Headed BilinearReLU layer
-        x = self.fc2(x)  # Final Linear layer
-        return x
+print("\n=== Batch First=True, average_attn_weights=True ===")
+print("Attn Output shape (batch first):", attn_output_batch_first.shape)
+print("Attn Weights shape (batch first):", attn_weights_batch_first.shape)
 
+print("\n=== Batch First=False, average_attn_weights=False ===")
+print("Attn Output shape (no batch first, no avg weights):", attn_output_no_batch_first_no_avg.shape)
+print("Attn Weights shape (no batch first, no avg weights):", attn_weights_no_batch_first_no_avg.shape)
 
-# Train the model
-def train_model(model, X_train, y_train, epochs=1000, lr=0.001):
-    criterion = nn.MSELoss()  # Mean Squared Error Loss
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+print("\n=== Batch First=True, average_attn_weights=False ===")
+print("Attn Output shape (batch first, no avg weights):", attn_output_batch_first_no_avg.shape)
+print("Attn Weights shape (batch first, no avg weights):", attn_weights_batch_first_no_avg.shape)
 
-    losses = []
-    for epoch in range(epochs):
-        model.train()
+# Check if the weights are in the same order by comparing them
+print("\n=== Weights Comparison (average_attn_weights=True) ===")
+print(torch.allclose(attn_weights_no_batch_first, attn_weights_batch_first))
 
-        # Forward pass
-        outputs = model(X_train)
-        loss = criterion(outputs, y_train)
-
-        # Backward pass and optimization
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        # Store loss and print it every 100 epochs
-        losses.append(loss.item())
-        if (epoch + 1) % 100 == 0:
-            print(f'Epoch [{epoch + 1}/{epochs}], Loss: {loss.item():.4f}')
-
-    return losses
-
-
-# Test the model
-def test_model(model, X_test, y_test):
-    model.eval()
-    with torch.no_grad():
-        predictions = model(X_test)
-        mse = nn.MSELoss()(predictions, y_test)
-        print(f'Test Mean Squared Error: {mse.item():.4f}')
-    return predictions
-
-
-# Test model on out-of-domain inputs
-def test_out_of_domain(model, x1, x2):
-    model.eval()
-    with torch.no_grad():
-        input_tensor = torch.Tensor([[x1, x2]])
-        predicted_product = model(input_tensor).item()
-        actual_product = x1 * x2
-        print(f'Out-of-domain Test: {x1} * {x2} = {actual_product:.4f} (Predicted: {predicted_product:.4f})')
-
-
-# Main script to train and test the model
-def main():
-    # Generate training and test data
-    X_train, y_train = generate_data(1000)  # Training data
-    X_test, y_test = generate_data(100)  # Test data
-
-    # Initialize the model
-    model = CompositeMultiplicationModel()
-
-    # Train the model
-    print("Training the model...")
-    losses = train_model(model, X_train, y_train, epochs=2000, lr=0.001)
-
-    # Plot the training loss over time
-    plt.plot(losses)
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Training Loss')
-    plt.show()
-
-    # Test the model on in-domain data
-    print("Testing the model...")
-    predictions = test_model(model, X_test, y_test)
-
-    # Compare a few test cases
-    for i in range(5):
-        x1, x2 = X_test[i]
-        actual = y_test[i].item()
-        predicted = predictions[i].item()
-        print(f"Test {i + 1}: {x1.item()} * {x2.item()} = {actual:.4f} (Predicted: {predicted:.4f})")
-
-    # Test the model on out-of-domain data
-    print("\nTesting on out-of-domain inputs:")
-    test_out_of_domain(model, 100, -309)  # Test with 100 * -309
-
-
-if __name__ == "__main__":
-    main()
+print("\n=== Weights Comparison (average_attn_weights=False) ===")
+print(torch.allclose(attn_weights_no_batch_first_no_avg, attn_weights_batch_first_no_avg))

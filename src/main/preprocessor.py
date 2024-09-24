@@ -1,13 +1,13 @@
 """
 An implementation of the preprocessors and other needed
-mechanisms required to allow the model to work. Preprocessing operates
-in essentially two phases in this model.
+mechanisms required to allow the main to work. Preprocessing operates
+in essentially two phases in this main.
 
 1) One of them is tokenization/gridint conversion,
    in which raw blocks of data content are converted into flattened tensors
    with significant meaning. These blocks can then be concatenated together
 2) Then, there is the internal embedding processes that are used to convert content
-   into vectors the model can understand.
+   into vectors the main can understand.
 
 """
 

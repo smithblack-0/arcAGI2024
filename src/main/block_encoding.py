@@ -188,7 +188,7 @@ class IntGridBlockDataProcessor(AbstractBlockDataProcessor):
 class BlockProcessor:
     """
     Constructs the headers for blocks.
-    These are needed in order to ensure the model
+    These are needed in order to ensure the main
     has a way
     """
     def __init__(self,

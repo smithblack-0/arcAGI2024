@@ -78,14 +78,14 @@ class BatchStrategy(ABC):
 # Results processor
 #
 # The result processor system is designed to take the
-# info produced by the model and turn it into another
+# info produced by the main and turn it into another
 # action request the system can use.
 ###
 class ResultsProcessor(ABC):
     """
     The results processor is intended to
     take within it the results of executing
-    the core neural network model, and
+    the core neural network main, and
     several important factors, then return
     an ActionRequest letting us know what
     to do next.
@@ -186,7 +186,7 @@ class FuturesFactory:
                 msg = f"""
                 Issue was encountered while attempting to run the 
                 results processor. This prevented the return of a 
-                valid future, despite the model running correctly.
+                valid future, despite the main running correctly.
                 This occurred while running callback for {id}
                 """
                 msg = textwrap.dedent(msg)
@@ -226,9 +226,9 @@ class FuturesFactory:
 class RequestDataExtractor(ABC):
     """
     The request data extractor is one of the interfaces
-    that must be implemented for the model to function.
+    that must be implemented for the main to function.
     Simply put, it should extract from a request the
-    key tensors needed for batching and core model processing.
+    key tensors needed for batching and core main processing.
     """
 
     @abstractmethod
@@ -237,7 +237,7 @@ class RequestDataExtractor(ABC):
         The method the implementer must implement for the class to function
 
         It must take an action request and turn it into a dictionary of tensors.
-        These tensors will then be the only ones available downstream in the model.
+        These tensors will then be the only ones available downstream in the main.
 
         :param request: An action request
         :return: A dictionary of tensors, like {"shape" : tensor, "targets" : data}
@@ -422,9 +422,9 @@ class AsyncBatchProcessor(nn.Module):
             WARNING, not all batch strategies will consistently produce batches of this size
 
         :param batch_strategy: The BatchStrategy instance, which selects uuids to form into batches
-        :param result_processor: The processor for results from the model run
-        :param request_extractor: The processor that creates data to feed into the model run
-        :param batch_processor: The actual model and batching mechanism. It too has builders
+        :param result_processor: The processor for results from the main run
+        :param request_extractor: The processor that creates data to feed into the main run
+        :param batch_processor: The actual main and batching mechanism. It too has builders
         :param logging_callback: The logging callback. Self-explanatory.
         :param termination_callback: A callback that returns true when it is time to end the session
                                      and clean up resources.
@@ -468,7 +468,7 @@ class AsyncBatchProcessor(nn.Module):
 
         :param buffers: The primary data structures we keep informtio nin
         :param inserter: The primary mangement feature used to handle requests and insert into buffers
-        :param processor: The primary neural model processing and batching mechanism.
+        :param processor: The primary neural main processing and batching mechanism.
         :param logging_callback: A callback used for logging
         :param termination_callback: A callback. When it returns false, we kill off all
                infinite async loops.

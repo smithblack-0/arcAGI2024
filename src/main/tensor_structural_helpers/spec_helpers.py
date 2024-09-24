@@ -8,7 +8,7 @@ Basically
 
 """
 import torch
-from src.model.channel_bound_tensors import TensorChannelManager
+from src.main.channel_bound_tensors import TensorChannelManager
 from typing import List, Dict, Any
 
 
