@@ -3,7 +3,7 @@ from typing import Optional
 import torch
 from torch import nn
 from src.main.model.core.feedforward import Feedforward
-from src.main.model.core.multiheaded_attention_adapter import MutiheadedAttnAdapter
+from src.main.model.core.multiheaded_attention_adapter import MultiheadedAttention
 
 class LogicLayer(nn.Module):
     """
@@ -35,7 +35,7 @@ class LogicLayer(nn.Module):
         :return: A logic layer
         """
 
-        self_attn = MutiheadedAttnAdapter.create(d_latents, num_heads, dropout, device=device, dtype=dtype)
+        self_attn = MultiheadedAttention.create(d_latents, num_heads, dropout, device=device, dtype=dtype)
         feedforward = Feedforward.create(d_latents,d_feedforward_hidden, dropout=dropout, device=device, dtype=dtype)
         return cls(d_latents, num_repeats, self_attn, feedforward, causal)
 

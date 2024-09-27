@@ -4,7 +4,7 @@ import torch
 from torch import nn
 
 
-class MutiheadedAttnAdapter(nn.Module):
+class MultiheadedAttention(nn.Module):
     """
     An adapter layer. Allows us to use a torch multiheaded attention layer
     with batches that may have multiple batch elements. In particular, promises

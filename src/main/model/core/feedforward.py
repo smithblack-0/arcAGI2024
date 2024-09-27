@@ -33,7 +33,7 @@ class Feedforward(nn.Module):
         """
 
         x = self.ff1(x)
-        x = self.dropout(x)
         x = self.activation(x)
+        x = self.dropout(x)
         x = self.ff2(x)
         return x

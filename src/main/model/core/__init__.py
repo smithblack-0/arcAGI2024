@@ -1,3 +1,4 @@
 from .feedforward import Feedforward
-from .multiheaded_attention_adapter import MutiheadedAttnAdapter
+from .multiheaded_attention_adapter import MultiheadedAttention
 from .logical_process_layer import LogicLayer
+from .transfomer_layers import TransformerDecoderLayer, TransformerEncoderLayer

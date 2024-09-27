@@ -2,7 +2,7 @@ import torch
 
 from torch import nn
 from typing import List, Dict, Any, Optional
-from src.main.model.core import MutiheadedAttnAdapter, Feedforward
+from src.main.model.core import MultiheadedAttention, Feedforward
 
 class IncrementalDecoder:
     """
@@ -47,27 +47,27 @@ class IncrementalDecoder:
         :return: A Incremental output adapter.
         """
 
-        latent_attention = MutiheadedAttnAdapter.create(d_inputs,
-                                                             num_input_heads,
-                                                             dropout,
-                                                             kdim=d_latents,
-                                                             vdim=d_latents,
-                                                             device=device,
-                                                             dtype=dtype
-                                                             )
-        incremental_attention = MutiheadedAttnAdapter.create(d_inputs,
-                                                                  num_input_heads,
-                                                                  dropout,
-                                                                  device=device,
-                                                                  dtype=dtype)
+        latent_attention = MultiheadedAttention.create(d_inputs,
+                                                       num_input_heads,
+                                                       dropout,
+                                                       kdim=d_latents,
+                                                       vdim=d_latents,
+                                                       device=device,
+                                                       dtype=dtype
+                                                       )
+        incremental_attention = MultiheadedAttention.create(d_inputs,
+                                                            num_input_heads,
+                                                            dropout,
+                                                            device=device,
+                                                            dtype=dtype)
         feedfoward = Feedforward(d_inputs, d_feedforward, dropout, device=device, dtype=dtype)
         return cls(d_inputs, latent_attention, incremental_attention, feedfoward)
 
     def __init__(self,
                  d_inputs: int,
-                 latent_attention: MutiheadedAttnAdapter,
-                 incremental_attention: MutiheadedAttnAdapter,
-                 feedforward: MutiheadedAttnAdapter
+                 latent_attention: MultiheadedAttention,
+                 incremental_attention: MultiheadedAttention,
+                 feedforward: MultiheadedAttention
                  ):
 
         self.incremental_layernorm = nn.LayerNorm(d_inputs)
