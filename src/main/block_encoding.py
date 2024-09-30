@@ -5,11 +5,11 @@ integer-based token form.
 
 """
 import torch
-from torch import nn
 from torch.nn import functional as F
 from transformers import PreTrainedTokenizer
-from channel_bound_tensors import CBTensor, CBTensorSpec
-from typing import Dict, List, Any, Callable, Tuple
+from src.main.CBTensors.channel_bound_tensors import CBTensor
+from src.main.CBTensors.channel_bound_spec import CBTensorSpec
+from typing import Any, Tuple
 from abc import ABC, abstractmethod
 
 class AbstractBlockDataProcessor(ABC):

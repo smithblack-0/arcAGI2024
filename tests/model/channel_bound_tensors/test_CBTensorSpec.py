@@ -1,6 +1,6 @@
 import unittest
-from dataclasses import FrozenInstanceError
-from src.main.channel_bound_tensors import CBTensorSpec
+from src.main.CBTensors.channel_bound_spec import CBTensorSpec
+
 
 ### Behavioral test suite
 class TestCBTensorSpecBehavioral(unittest.TestCase):

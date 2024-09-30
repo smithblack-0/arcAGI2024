@@ -1,73 +1,11 @@
 import textwrap
-
 import torch
-from types import MappingProxyType
-from functools import cached_property
-from torch.nn import functional as F
-from typing import List, Dict, Optional, Tuple, TypeVar, Any, Union
-from abc import ABC, abstractmethod
+from typing import List, Dict, Optional, Tuple, TypeVar, Any, Union, Callable
+
+from src.main.CBTensors.channel_bound_spec import CBTensorSpec
+
 NestedList = TypeVar('NestedList')
 
-
-class CBTensorSpec:
-    """
-    The CB tensor spec is designed to hold channel binding (CB) data
-    for a channel bound tensor. This means tracking both the channels, and the
-    widths. We also provide a bunch of informative statistics.
-
-    ---- properties ----
-
-    channels: The channels that are being represented, and in what order.
-    channel_width: For each channel name, how many elements wide that channel is
-    total_width: The width of all the channels put together. The sum of the individual lengths
-    start_index: For each channel, what the start index for the channel is.
-    end_index: For each channel, what the end index for the channel is.
-    slices: For each channel, what the slice addressing that channel would be.
-    """
-
-    spec: Dict[str, int]
-
-    @property
-    def channels(self)->List[str]:
-        return list(self.spec.keys())
-
-    @property
-    def channel_widths(self)->Dict[str, int]:
-        return self.spec.copy()
-
-    @property
-    def total_width(self)->int:
-        return sum(self.spec.values())
-
-    @cached_property
-    def start_index(self)->Dict[str, int]:
-        position = 0
-        output = {}
-        for name, length in self.spec.items():
-            output[name] = position
-            position += length
-        return output
-
-    @cached_property
-    def end_index(self)->Dict[str, int]:
-        position = 0
-        output = {}
-        for name, length in self.spec.items():
-            position += length
-            output[name] = position
-        return output
-
-    @cached_property
-    def slices(self)->Dict[str, slice]:
-        output = {}
-        for name in self.channels:
-            output[name] = slice(self.start_index[name], self.end_index[name])
-        return output
-    def __init__(self, spec: Dict[str, int]):
-        self.spec = MappingProxyType(spec)
-
-    def __contains__(self, item: str)->bool:
-        return item in self.spec
 
 class CBTensor:
     """
@@ -90,7 +28,7 @@ class CBTensor:
     ---- Properties ----
 
     * `channels`: A list of channel names representing the available channels in the
-       tensor.
+      tensor.
 
     * `channel_widths`: A dictionary mapping channel names to their respective widths
       (i.e., the number of elements allocated to each channel in the final tensor
@@ -107,6 +45,30 @@ class CBTensor:
 
     * `channel_end_index`: The ending index (exclusive) of each channel in the tensor's
       final dimension.
+
+    * `shape`: A property that returns the shape of the tensor excluding the channel dimension.
+      The tensor behaves as though it does not have a final "channel" dimension when accessing
+      its shape, which is useful for many operations in neural networks.
+
+    ---- Shape Handling ----
+
+    The `CBTensor` object behaves as if the final dimension, which represents the channels,
+    is ignored when querying or slicing the tensor. When you access the `shape` of the
+    tensor, you only get the dimensions excluding the channel dimension. For example, if the
+    underlying tensor shape is `(batch_size, sequence_length, total_channel_width)`,
+    accessing the `.shape` property will return `(batch_size, sequence_length)`.
+
+    ---- Indexing Behavior ----
+
+    The `__getitem__` method is designed to allow you to index the tensor as though the channel
+    dimension does not exist. When you slice a `CBTensor`, the final channel dimension is
+    automatically handled and preserved, so you do not need to worry about it when performing
+    slicing operations on the non-channel dimensions. The tensor automatically adds a slice to
+    include all channel elements, behaving as if the tensor has no channel dimension for indexing
+    purposes.
+
+    For example, indexing `tensor[0, 0]` will return a `CBTensor` containing all the channels
+    for the first item of the batch, with the channels maintained in the final dimension.
 
     ---- Usage Scenarios ----
 
@@ -132,6 +94,10 @@ class CBTensor:
     * `rebind_to_spec`: Rebinds an existing `CBTensor` to a new channel specification,
       allowing you to expand the tensor to include new channels or reorder existing
       ones.
+
+    * `shape`: Returns the shape of the tensor excluding the final channel dimension.
+      This is useful when working with the tensor in multimodal networks where the channel
+      dimension is handled separately from the other dimensions.
     """
     ##
     # Define channel specific properties
@@ -161,6 +127,63 @@ class CBTensor:
     def slices(self) -> Dict[str, slice]:
         return self.spec.slices
 
+    @property
+    def shape(self) -> Tuple[int]:
+        """
+        Returns the shape of the tensor, excluding the channel dimension.
+
+        :return: Shape tuple excluding the final channel dimension.
+        """
+        return self.tensor.shape[:-1]
+
+
+    @property
+    def dtype(self)->torch.dtype:
+        return self.tensor.dtype
+
+    @property
+    def device(self)->torch.device:
+        return self.tensor.device
+
+
+    def dim(self)->int:
+        return self.tensor.dim()-1
+
+    ##
+    # Define magic methods
+    ##
+    IndexItems = Tuple[int, slice, type(Ellipsis)]
+    IndexTuple = Tuple[IndexItems,...]
+    def __getitem__(self,
+                    key: Union[IndexItems, IndexTuple]):
+
+        # Handle the ellipses trick, adding a slice
+        # at the end. This ensures ellipses are handled
+        # correctly. It also will result in errors being thrown
+        # if you try to overindex.
+
+        if not isinstance(key, tuple):
+            key = (key,)
+        key += (slice(None),)
+
+        # Perform the indexing
+        return CBTensor(self.spec, self.tensor[key])
+
+    def __setitem__(self,
+                    key: Union[IndexItems, IndexTuple],
+                    value: 'CBTensor'):
+        assert isinstance(value, CBTensor)
+        assert self.spec == value.spec, "Cannot set tensors with different specs"
+
+        # Handle the ellipses trick, adding a slice
+        # at the end. This ensures ellipses are handled
+        # correctly.
+        if not isinstance(key, tuple):
+            key = (key,)
+        key = key + (slice(None),)
+
+        # Perform the assignment, ensuring we operate over the proper slice
+        self.tensor[key] = value.tensor
 
     ##
     # Define validation and helper functions
@@ -213,7 +236,7 @@ class CBTensor:
         for channel_name in source_widths.keys():
             if source_widths[channel_name] != destination_widths[channel_name]:
                 msg = f"""
-                Channel widths are mismatched for channel of name{channel_name}
+                Channel widths are mismatched for channel of name '{channel_name}'
                 
                 The destination tensor has width of {destination_widths[channel_name]} 
                 However, the source has width of {source_widths[channel_name]} 
@@ -320,10 +343,13 @@ class CBTensor:
     # Cross CB tensor logic. We are given and get back CB tensors
     ##
 
-    def rebind_to_spec(self, spec: Union[CBTensorSpec, Dict[str, int]])->'CBTensor':
+    def rebind_to_spec(self,
+                       spec: Union[CBTensorSpec, Dict[str, int]],
+                       allow_channel_expansion: bool = False,
+                       allow_channel_pruning: bool = False)->'CBTensor':
         """
         Rebinds the current `CBTensor` to a new specification, which can add or reorder
-        channels.
+        channels based on the provided flags.
 
         This method expands the current tensor to include channels specified in the new
         spec, or reorders existing channels as needed. Any new channels in the new spec
@@ -332,36 +358,58 @@ class CBTensor:
         ---- Parameters ----
         :param spec:
             - The new `CBTensorSpec` or dictionary that defines the new channel structure.
-            - The new spec must include all channels from the original tensor, and may
-              include additional channels.
+            - The new spec must include all channels from the original tensor unless
+              `allow_channel_pruning` is set to True. Additional channels can be added if
+              `allow_channel_expansion` is set to True.
+
+        :param allow_channel_expansion:
+            - If True, new channels can be added to the new spec, and they will be initialized with zeros.
+            - If False, a ValueError is raised if the new spec includes extra channels.
+
+        :param allow_channel_pruning:
+            - If True, channels from the original tensor that are not in the new spec will be dropped.
+            - If False, a ValueError is raised if the new spec is missing channels from the original tensor.
 
         ---- Returns ----
         :return:
-            - A new `CBTensor` with the same data as the original tensor, but expanded or
-              reordered according to the new spec.
+            - A new `CBTensor` with the same data as the original tensor, expanded or reordered according
+              to the new spec.
 
         ---- Raises ----
-        - `ValueError`: Raised if the new spec is incompatible with the original tensor,
-          such as missing channels from the original tensor.
-
+        - `ValueError`: Raised if the new spec is incompatible with the original tensor, such as missing
+          channels or adding extra channels in violation of the expansion/pruning rules.
         """
 
         # Standardization
         if isinstance(spec, dict):
             spec = CBTensorSpec(spec)
 
-        # Validation
+        # Validation based on flags
         if __debug__:
-            self.validate_channels_exist(self.channels, spec.channels)
-            self.validate_common_channel_widths(self.channel_widths, spec.channel_widths)
+            if allow_channel_expansion:
+                self.validate_channels_exist(self.channels, spec.channels)
+                self.validate_common_channel_widths(self.channel_widths, spec.channel_widths)
+            elif allow_channel_pruning:
+                self.validate_channels_exist(spec.channels, self.channels)
+                self.validate_common_channel_widths(spec.channel_widths, self.channel_widths)
+            else:
+                self.validate_channels_exist(self.channels, spec.channels)
+                self.validate_channels_exist(spec.channels, self.channels)
+                self.validate_common_channel_widths(spec.channel_widths, self.channel_widths)
 
         # Create new CBTensor
         shape = list(self.tensor.shape[:-1]) + [spec.total_width]
         tensor = torch.zeros(shape, dtype =self.tensor.dtype, device=self.tensor.device)
         tensor = CBTensor(spec, tensor)
 
+        # Gather relevant channels (if pruning, gather only the channels in the new spec)
+        if allow_channel_pruning:
+            relevant = self.gather_channels(spec.channels)
+        else:
+            relevant = self
+
         # Insert and return
-        return tensor.set_channels(self)
+        return tensor.set_channels(relevant)
 
 
     def set_channels(self, tensor: 'CBTensor')->'CBTensor':
@@ -503,221 +551,66 @@ class CBTensor:
         """
         return {name : self.tensor[..., self.slices[name]] for name in self.channels}
 
-'''
+    def clone(self)->'CBTensor':
+        return CBTensor(self.spec, self.tensor.clone())
 
-class BatchMagic:
-    """
-    A special class responsible for knowing how to batch, unbatch,
-    and generally work with batches of MTC tensors.
-    """
-
-    def filter(self,
-               tensor: torch.Tensor,
-               nonpadding_mask: torch.Tensor,
-               channel: str,
-               filter: torch.Tensor
-               )->Tuple[torch.Tensor, torch.Tensor]:
+    ###
+    # Implement some necessary torch functions. We will likely implement more as we work
+    ##
+    supported_operators: Dict[Callable, Callable] = {}
+    @classmethod
+    def register_operator(cls, torch_functions: Callable | List[Callable])->Callable:
         """
-        Performs filtration pf the indicated MTC tensor by looking at the indicated channel,
-        and only retaining the item if it has an integer in it that matches something in filter.
+        A decorator to register an operator as associated with a torch function. For example,
+        you could registers torch.cat as associated with a custom CBTensor cat operation.
 
-        :param tensor:
-            - The MTC tensor to filter. Shape (..., items, channels)
-        :param nonpadding_mask:
-            - A nonpadding tensor.
-            - Filtration is usually most useful on batched entities
-            - Shape (..., items)
-        :param channel:
-            - The channel to select then manipulate.
-            - Must be within our selected channels
-        :param filter:
-            - The integer values to filter with
-            - Only integers that match are included
-            - Shape: (filters, L)
-            - L matches channel length
+        :param torch_functions: The torch function or functions to register as associated.
+        :return: A decorater designed to be applied to the function
+        """
+
+        # Standardize
+        if not isinstance(torch_functions, list):
+            torch_functions = [torch_functions]
+
+        # Provide decorator
+        def decorator(implementation: Callable)->Callable:
+            for torch_function in torch_functions:
+                cls.supported_operators[torch_function] = implementation
+            return implementation
+        return decorator
+
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None)->'CBTensor':
+        """
+        Implements a torch function handling passthrough. The primary thing we have
+        to do to make torch functions compatible with the CBTensor is ensure we successfully
+        hide away the channels dimension. This means intercepting any attempts to use a
+        dim feature, and modifying the index if needed.
+
+        One additional complication is that
+
+        :param func: The funciton being invoked. Important.
+        :param types: Unused
+        :param args: This may have dim info in it that needs to be modified
+        :param kwargs: This may have dim info in it that needs to be modified.
         :return:
-
         """
-        # Perform sanity checks and assertions
-        assert tensor.device == filter.device
-        assert tensor.device == nonpadding_mask.device
-        assert channel in self.channel_allocs
-        assert tensor.shape[:-1] == nonpadding_mask.shape
-        assert filter.dim() == 2
-        assert filter.shape[-1] == self.channel_spec[channel]
+        if kwargs is None:
+            kwargs = {}
 
-        # Construct a boolean mask that will associate each element in the channel with one of the
-        # active channels, or nothing
-
-        channel_tensors = self.extract(tensor, channel) # (..., items, L)
-        channel_tensors = channel_tensors.unsqueeze(dim=-2) #(..., items, 1, L)
-        channels_mask = (channel_tensors == filter) #(..., items, filter, L)
-        channels_mask = torch.all(channels_mask, dim=-1) #(..., items, filter)
-        channels_mask = torch.any(channels_mask, dim=-1) #(..., items)
-
-        # Figure out the maximum number of items to be included, and thus the
-        # needed padding size. Then create destination tensors
-
-        max_final_items = int(channels_mask.sum(dim=-1).max())
-        shape = list(tensor.shape)
-        shape[-2] = max_final_items
-
-        destination_tensor = torch.full(shape, 0, device=tensor.device, dtype=tensor.dtype)
-        destination_padding = torch.full(shape[:-1], False, device=tensor.device, dtype=nonpadding_mask.dtype)
-
-        # Adjust the modes mask to get a destination modes mask that will land the
-        # pieces in place. We do this by sorting to keep the true mask entries.
-        # This ensures that all active elements are in place starting at zero and
-        # getting higher.
-        #
-        # Then move everything into place using the masks.
-        destination_mask, _ = torch.sort(channels_mask, dim=-2, descending=True, stable=True)
-        destination_mask = destination_mask[..., :max_final_items]
-
-        destination_tensor[destination_mask.unsqueeze(-1)] = tensor[channels_mask.unsqueeze(-1)]
-        destination_padding[destination_mask] = nonpadding_mask[channels_mask]
-
-        # Return
-        return destination_tensor, destination_padding
-
-    def batch(self,
-              tensors: torch.Tensor | NestedList
-              )->Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Batches a collection of tensors, potentially organized in nested lists, by adding
-        necessary padding (with zeros) to align the dimensions. This method recursively processes
-        nested lists of tensors to ensure that all elements are padded to a uniform shape.
-
-        Returns a batched tensor and a corresponding non-padding mask that indicates which
-        elements in the resulting batched tensor are valid (i.e., not padding).
-
-        ---- Parameters ----
-        :param tensors:
-            A list or nested list of tensors that are to be batched.
-            Each tensor in the list must have the same number of dimensions, even if the size
-            of the dimensions (lengths) may vary. Tensors should all have the same last dimension
-            (the channels dimension).
-
-            Example:
-                If the tensors are of shape (items, channels), you may have:
-                    - A nested list like: [[tensor_a, tensor_b], [tensor_c]]
-                    - With tensor_a.shape == (10, 5), tensor_b.shape == (12, 5), tensor_c.shape == (8, 5)
-
-        ---- Returns ----
-        :return:
-            A tuple containing:
-            - batched_tensor: A tensor with shape `(..., max_items, channels)`,
-              where batch_size reflects the structure of the nested list and max_items is
-              the length after padding.
-
-            - nonpadding_mask: A mask with shape `(..., max_items)`, where `True`
-              indicates a valid (non-padded) entry and `False` indicates padding. This mask
-              can be used to track and later remove padded values.
-
-        ---- Example Workflow ----
-        If provided a nested list of tensors:
-            tensors = [[tensor_a, tensor_b], [tensor_c]]
-
-        Where:
-            - tensor_a.shape == (10, 5)
-            - tensor_b.shape == (12, 5)
-            - tensor_c.shape == (8, 5)
-
-        The result would be:
-            - batched_tensor.shape == (2, 2, 12, 5)  # Batch of 2, max items 12, and 5 channels
-            - nonpadding_mask.shape == (2, 2, 12)    # Same structure, marking valid vs. padded elements.
-        """
-
-        # Create the main processing arrays.
-        #
-        # We need to gather the tensors together that will end up in a batch,
-        # alongside gathering the width to pad to on each of the dimensions.
+        if func not in cls.supported_operators:
+            raise ValueError(f"Torch function was not supported: {func}")
+        return cls.supported_operators[func](*args, **kwargs)
 
 
-        tensors_requiring_padding: List[Tuple[torch.Tensor, torch.Tensor]] = []
-        max_dimension_length = None
-        for item in tensors:
-            if isinstance(item, torch.Tensor):
-                # Base case encountered. We store the tensor and make a padding
-                # mask that is filled entirely with true, indicating all elements
-                # active.
-                assert item.shape[-1] == self.channel_length
-                dimension_lengths = torch.tensor(item.shape[:-1], device=item.device)
 
-                # This logic gathers information on what to pad to for each dimensions
-                if max_dimension_length is None:
-                    max_dimension_length = dimension_lengths
-                else:
-                    # We detect when you are trying to combine tensors of differing number of dimensions.
-                    #
-                    # Since it then becomes ambiguous on how to pad and combine, we throw. Otherwise, we keep
-                    # the largest of the dimensions to pad to.
-                    assert max_dimension_length.shape[-1] == item.dim()
-                    max_dimension_length = torch.maximum(max_dimension_length, dimension_lengths)
 
-                entry = (item, torch.ones_like(item, dtype=torch.bool))
-                tensors_requiring_padding.append(entry)
-            else:
-                # Item is a list. It will need to be recursively processed
-                tensors_requiring_padding.append(self.batch(item))
-        assert max_dimension_length is not None
 
-        tensor_stack = []
-        paddings_stack = []
-        for tensor, padding in tensors_requiring_padding:
-            assert tensor.shape[:-1] == padding.shape
 
-            # Construct the padding operator. This will be based on
-            # padding the dimensions other than the channel dimension
-            # to the maximum length
 
-            padding_amount = [target - actual for target, actual in zip(max_dimension_length, tensor.shape)]
-            padding_operator = []
-            for pad_length in reversed(padding_amount):
-                padding_operator.extend([0, pad_length])
 
-            # Pad the padding tensor to match
-            padding = F.pad(padding, padding_operator, value=False)
 
-            # Pad the tensor to match. Do not pad the channels dimension
-            tensor = F.pad(tensor, [0, 0] + padding_operator)
 
-            # Append
-            tensor_stack.append(tensor)
-            paddings_stack.append(padding)
 
-        batched_tensor = torch.stack(tensor_stack, dim=0)
-        batched_padding = torch.stack(paddings_stack, dim=0)
 
-        return batched_tensor, batched_padding
 
-    def unbatch(self,
-                tensors: torch.Tensor,
-                nonpadding_mask: torch.Tensor
-                ) -> torch.Tensor | NestedList[torch.Tensor]:
-        """
-        Recursively unbatches a tensor into individual tensors or nested lists, removing padding along the way.
-
-        The recursion stops when the input tensor reaches 2D (items, channels), and at that
-        point, the padding is removed using the non-padding mask, and the valid entries
-        are returned. If the input is higher-dimensional, it will return a nested list.
-
-        :param tensors:
-            - A batched tensor of shape (..., items, channels).
-        :param nonpadding_mask:
-            - A mask of shape (..., items) indicating valid entries.
-        :return:
-            - A tensor with padding removed or a nested list, preserving the structure of the input.
-        """
-        # Recursive case: unbind until we reach the 2D base case
-        if tensors.ndim > 2:
-            return [self.unbatch(subtensor, submask) for subtensor, submask in
-                    zip(tensors.unbind(0), nonpadding_mask.unbind(0))]
-
-        # Base case: tensors of shape (items, channels)
-        # Unsqueeze the nonpadding_mask to match the dimensions of the tensor for indexing
-        valid_tensor = tensors[nonpadding_mask.bool().unsqueeze(-1)]
-
-        # Return the unpadded tensor
-        return valid_tensor
-'''

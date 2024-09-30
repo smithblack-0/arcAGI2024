@@ -1,8 +1,10 @@
 import torch
 from torch import nn
-from typing import List, Dict, Optional
+from typing import List
 from .core import TransformerEncoderLayer, TransformerDecoderLayer
-from ..channel_bound_tensors import CBTensor, CBTensorSpec
+from src.main.CBTensors.channel_bound_tensors import CBTensor
+
+
 class Encoder:
     """
     The primary encoder for the modeling process. Processes an input

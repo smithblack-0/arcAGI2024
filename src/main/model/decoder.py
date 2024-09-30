@@ -1,10 +1,8 @@
-import itertools
-import math
 import torch
 from torch import nn
-from typing import List, Generator, Any, Dict, Tuple, Callable
-from .cycle_layer import CycleLayer, ContextCore, LogicCore
-from ..channel_bound_tensors import CBTensor, CBTensorSpec
+from .cycle_layer import ContextCore, LogicCore
+
+
 class DecoderCore(nn.Module):
     """
     The code decoder class. Used to decode a particular
