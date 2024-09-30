@@ -8,43 +8,42 @@ from src.main.CBTensors import CBTensor, CBTensorSpec, CBIndirectionLookup
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-def compile_vocabulary_lookup_table(
-        modes: List[int],
-        shapes_vocab_lengths: List[List[int]],
-        vocab_sizes: List[int],
-        states: Dict[str, int],
-        ) -> CBIndirectionLookup:
+def create_voculary_length_fsm_lookup_table(
+    modes: List[int],
+    shapes_vocab_lengths: List[List[int]],
+    vocab_sizes: List[int],
+    states: Dict[str, int],
+    ) -> CBIndirectionLookup:
     """
-     Compiles a lookup table that defines the vocabulary size limits for different
-     states, modes, and submodes of the finite state machine during content generation.
+    Creates a vocabulary length finite state machine based lookup table. This will
+    be able to, conceptually, look at the state of the FSM across many batches and
+    items and answer the key question: What is the size of the vocabulary when performing
+    this prediction step?
 
-     This table will be queried to determine the number of active logits for each
-     decoding step, allowing the transformer model to restrict its predictions to
-     the appropriate range of logits depending on the current FSM state.
+    This is required due to the fact that different steps will require different
+    logit configuratios, since logits are shared. It lets one logit prediction
+    handle all bases for all different tasks. It is also required both to evaluate
+    loss while training and evaluate predictions when generating.
 
-     ---- Parameters ----
-     :param modes:
-         - A list of mode IDs, each representing a different content generation
-           modality (e.g., text, image).
+    ---- Parameters ----
+    :param modes:
+     - A list of mode IDs, each representing a different content generation
+       modality (e.g., text, image).
 
-     :param shapes_vocab_lengths:
-         - A list of lists where each entry corresponds to a mode. Each inner list
-           represents the maximum number of possible states for the shape dimensions
-           in that mode. For example, the image mode might have [512, 240], representing
-           the maximum width and height.
+    :param shapes_vocab_lengths:
+     - A list of to list int, with each being associated with a particular mode.
+       For instance, [30, 20] might mean any image up to a 30x20 image.
+    :param vocab_sizes:
+     - A list of vocabulary sizes for each mode during the actual block decoding process.
 
-     :param vocab_sizes:
-         - A list of vocabulary sizes for each mode. These define the total number
-           of possible states for each mode and submode during generation.
+    :param states:
+     - A dictionary that associates each state (e.g., "mode_select", "shape_select")
+       with a unique integer ID. These states help guide the FSM's transitions.
 
-     :param states:
-         - A dictionary that associates each state (e.g., "mode_select", "shape_select")
-           with a unique integer ID. These states help guide the FSM's transitions.
-
-     ---- Returns ----
-     :return:
-         - A `CBIndirectionLookup` object that maps from FSM state, mode, and submode
-           to the corresponding vocab size (logit restriction) used in that generation step.
+    ---- Returns ----
+    :return:
+     - A `CBIndirectionLookup` object that maps from FSM state, mode, and submode
+       to the corresponding vocab size (logit restriction) used in that generation step.
      """
 
 
@@ -87,7 +86,8 @@ def compile_vocabulary_lookup_table(
     return table
 
 
-def compile_write_lookup_table(num_shape_dims: int,
+
+def create_data_write_lookup_table(num_shape_dims: int,
                                states: Dict[str, int],
                                ) -> Tuple[CBIndirectionLookup, CBTensorSpec]:
     """
@@ -169,3 +169,6 @@ def compile_write_lookup_table(num_shape_dims: int,
     table.indirection_addresses.tensor.contigous()
 
     return table, channel_spec
+
+
+def create_state_transition_lookup_table()
