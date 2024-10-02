@@ -1,68 +1,4 @@
-"""
-FSM Steps:
-
-There are four primary steps to the FSM, found
-in an update and vocab fetch process.
-
-vocab:
-    - Vocab fetch step
-
-step:
-    DATA_WRITE_STEP
-    INDEX_WRITE_STEP
-    CONTEXT_STEP
-
-
-
-
-
-Lets go outline what needs to be tracked in order to convert everything to lookup tables
-
-- TRANSITIONS:
- - Mode_select: immediately after complet
-
-------------------------
-VOCABULARY_PERSPECTIVE:
-
-mode_select
-shape_select_1a
-shape_select_2a
-shape_select_1b
-shape_select_2b
-block_decode_1
-block_decode_2
-
-Requires: State, Mode
-
-WRITEPERSPECTIVE:
-
-mode_select
-shape_select_1
-shape_select_2
-block_decode
-
-Requires: State, Submode
-
-INDEXPERSPECTIVE:
-
-everything_else
-block_decode.
-
-Requires: Shape, Index
-
-TRANSITION_PERSPECTIVE
-
-mode_select
-shape_select_1
-shape_select_2
-block_select
-
-Requires: State, Index, Shape
-"""
-
-
 from typing import Dict, List, Optional
-
 from src.main.CBTensors.channel_bound_tensors import CBTensorSpec
 from dataclasses import dataclass
 
@@ -71,122 +7,145 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class OperandPrimitive:
-    """Basic structure of an operand"""
+    """Basic structure of an operand."""
     channel: str
+
 
 @dataclass(frozen=True)
 class TriggerOperand(OperandPrimitive):
     """
     The pattern operand type. Mixin. Tells downstream
-    components this can sanely be used to match a
-    FSM state pattern to trigger behavior on
+    components this can be used to match an FSM state pattern
+    to trigger behavior on.
     """
+
 
 @dataclass(frozen=True)
-class ChangeStateOperand(OperandPrimitive):
+class ActionOperand(OperandPrimitive):
     """
-    Mixin. Tells us that this will somehow change
-    the FSM state when used in a write manner.
+    Mixin. Tells us that this operand will somehow modify
+    the FSM state when used in an action (write) manner.
     """
 
-# Define the operands themselves, including if they
-# are trigger or state only.
+
+# Define the operands themselves, including whether
+# they are triggers or actions.
 @dataclass(frozen=True)
-class Int(TriggerOperand, ChangeStateOperand):
+class IntOperand(TriggerOperand, ActionOperand):
     """
-    Represents an integer.
-    Can be used to pattern match
-
+    Represents an integer operand.
+    Can be used to pattern match or as an action operand.
     """
     value: int
     position: int
 
+
 @dataclass(frozen=True)
-class Matching(TriggerOperand):
+class MatchingOperand(TriggerOperand):
     """
-    Triggers when the target channel matches this channel
+    Triggers when the target channel matches this channel.
     """
     target_channel: str
 
+
 @dataclass(frozen=True)
-class NotMatching(TriggerOperand):
+class NotMatchingOperand(TriggerOperand):
     """
-    Triggers when the target channels do NOT match this channel
+    Triggers when the target channels do NOT match this channel.
     """
     target_channel: str
 
-# Define FSM change operators
+
+# Define FSM action operators
 @dataclass(frozen=True)
-class WriteData(ChangeStateOperand):
-    """Indicates the need to write predictions to this"""
+class WriteData(ActionOperand):
+    """
+    Action that indicates the need to write predictions to this channel.
+    """
     vocab_size: int
     position: int
 
+
 @dataclass(frozen=True)
-class CountUpWithRegroup(ChangeStateOperand):
+class CountUpWithRegroup(ActionOperand):
     """
-    Used primarily with indexing. Advances the first element on each
-    invokation, until a regroup state is reached with respect to the
-    helper tensor, at which point a regroup and carry is performed onto
-    the next element.
+    Advances the first element on each invocation, until a regroup state is
+    reached with respect to the helper channel. At that point, a regroup and carry
+    operation is performed on the next element.
     """
     helper_channel: str
 
-# Define pattern. This is used to match if changes are needed,
-# or alternatively to make changes
-
-
-class TriggerPattern:
-    """
-    Contains an entire collection of trigger-valid patterns.
-    The operator will "be triggered" and go off when all operand
-    patterns are matched.
-    """
-    def register(self, trigger: TriggerOperand):
-        assert isinstance(trigger, TriggerOperand)
-        self.patterns.append(trigger)
-    def __init__(self, operand_primitives: Optional[List[TriggerOperand]]=None):
-        self.patterns: List[TriggerOperand] = []
-        if operand_primitives is not None:
-            for operand in operand_primitives:
-                self.register(operand)
-
-class ChangeStatePattern:
-    """
-    Contains a collect
-    """
-    def register(self, change: ChangeStateOperand):
-        assert isinstance(change, ChangeStateOperand)
-        self.patterns.append(change)
-    def __init__(self, operand_patterns: Optional[List[ChangeStateOperand]] = None):
-        self.patterns: List[ChangeStateOperand] = []
-        if operand_patterns is not None:
-            for operand in operand_patterns:
-                self.register(operand)
 
 class FSMOperator:
     """
-    The definition for a parallel FSM operator. Conceptually, on
-    pattern match a trigger is pulled that runs the indicated change
-    operators. This will later be compiled.
-    """
-    def __init__(self,
-                 trigger_pattern: TriggerPattern,
-                 change_pattern: ChangeStatePattern,
-                 ):
-        assert isinstance(trigger_pattern, TriggerPattern)
-        assert isinstance(change_pattern, ChangeStatePattern)
+    FSMOperator: A parallel FSM operator that manages both triggers and actions.
 
-        self.trigger_pattern = trigger_pattern
-        self.change_pattern = change_pattern
+    This class allows for the registration of triggers (conditions that need to be met)
+    and actions (modifications to the FSM state). Once triggers are satisfied, the associated
+    actions will be executed to update the FSM state.
+
+    Methods:
+    - `register_trigger()`: Register a condition for the FSM to check.
+    - `register_action()`: Register an action to perform if the trigger is met.
+    - `get_triggers()`: Returns the list of registered triggers.
+    - `get_actions()`: Returns the list of registered actions.
+
+    Example Usage:
+        fsm_operator = FSMOperator()
+        fsm_operator.register_trigger(MatchingOperand('channel_a', 'channel_b'))
+        fsm_operator.register_action(WriteData(10, 1))
+    """
+
+    def __init__(self):
+        """
+        Initializes an FSMOperator with empty trigger and action lists.
+        """
+        self.triggers: List[TriggerOperand] = []
+        self.actions: List[ActionOperand] = []
+
+    def register_trigger(self, trigger: TriggerOperand):
+        """
+        Registers a trigger condition for the FSM operator.
+
+        :param trigger: The trigger operand to register.
+        """
+        assert isinstance(trigger, TriggerOperand), "Trigger must be of type TriggerOperand."
+        self.triggers.append(trigger)
+
+    def register_action(self, action: ActionOperand):
+        """
+        Registers an action to be executed by the FSM operator.
+
+        :param action: The action operand to register.
+        """
+        assert isinstance(action, ActionOperand), "Action must be of type ActionOperand."
+        self.actions.append(action)
+
+    def get_triggers(self) -> List[TriggerOperand]:
+        """
+        Returns the list of registered triggers.
+
+        :return: List of triggers.
+        """
+        return self.triggers
+
+    def get_actions(self) -> List[ActionOperand]:
+        """
+        Returns the list of registered actions.
+
+        :return: List of actions.
+        """
+        return self.actions
+
 
 @dataclass(frozen=True)
 class ChannelNames:
+    """
+    Defines the channel names used in the FSM, including state, mode, shape, and data channels.
+    """
     state: str
     substate: str
     mode: str
     shape: str
     index: str
     data: str
-
-

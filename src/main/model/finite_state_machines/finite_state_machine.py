@@ -33,23 +33,25 @@ import torch
 from torch import nn
 from torch.nn import Parameter
 
-from .finite_state_operators import FSMOperator, Matching, NotMatching, Int, TriggerOperand, ChangeStateOperand
+from .finite_state_operators import (FSMOperator, MatchingOperand, NotMatchingOperand,
+                                     IntOperand, TriggerOperand, ActionOperand,
+                                     WriteData, CountUpWithRegroup)
 from src.main.CBTensors import CBTensor, CBTensorSpec
 from abc import ABC, abstractmethod
 from typing import List, Dict, Union, Tuple, Any, Optional
 
 class IntakeMachine(nn.Module):
     """
-    IntakeMachine: Processes FSM State to Select an Operator
+    The Intake State Machine is responsible for taking in a state tensor which can consist of
+    an extremely complex finite state machine state and converting it into one of N defined
+    finite states. We then return what the FSM state was associated with. This allows downstream
+    entities to process it.
 
-    The `IntakeMachine` is responsible for processing the current FSM state, evaluating triggers, and
-    selecting the next operator to execute. It combines multiple triggers (e.g., integer-based triggers,
-    channel matching triggers), evaluates them in parallel, and performs a logical AND on the results
-    to select a single operator.
-
-    Once the triggers are satisfied, the `IntakeMachine` returns an integer index representing the next
-    operation (operator) to be executed. This index is later passed to the `OutputMachine`, which will
-    apply the state changes.
+    To make this happen, from the backend perspective, we need to recognize when a finite state tensor
+    is associated with a state we need to trigger on. This is done by registering trigger handler classes
+    that are defined to accept a CBTensor of FSM state, then emits a tensor that quantifies by boolean
+    mask whether we are matching the conditions for this state. When all such states are matched on all
+    triggers for a particular n, that state enters a triggered condition which can be handled downstream.
 
     ---
 
@@ -63,63 +65,71 @@ class IntakeMachine(nn.Module):
         intake_machine.register_trigger(IntStateTrigger(input_spec))
         next_operator = intake_machine(fsm_state_tensor)  # Returns an index for the next operator
     """
-    _trigger_classes = []
-    @classmethod
-    def register(cls, trigger: 'IntakeTrigger')->'IntakeTrigger':
+    _trigger_handler_classes = []
+    def register_trigger(self, trigger_handler: 'IntakeMachine'):
         """
-        Registers various intake triggers that can exist. These will be
-        setup by feeding them the operator chain on initialization, and are responsible
-        for then compiling it into a trigger.
+        Registers a trigger handling class. This should be able to be
+        initialized with a spec and device, and has a register operator
+        method that can be used to add a handling behavior
 
-        :param trigger: The trigger to store, and build later.
+        :param trigger_handler: The trigger handler to register.
         """
-        cls._trigger_classes.append(trigger)
-        return trigger
+        assert isinstance(trigger_handler, IntakeTrigger)
+        self._trigger_handler_classes.append(trigger_handler)
+        return trigger_handler
+
     def __init__(self,
-                 spec: CBTensorSpec,
                  operators: List[FSMOperator],
-                 device: torch.device = None
-                ):
-        """
-        Build the operator trigger machine.
+                 spec: CBTensorSpec,
+                 device: torch.device):
+        super().__init__()
+        self._num_states = len(operators)
 
-        :param operators: The operators to build our triggers out of
+        # Define the trigger handlers and action handlers
+        self.trigger_handlers = nn.ModuleList(handler(spec, device)
+                                              for handler in self._trigger_handler_classes)
+        # Load all the operators into the handlers
+        for operator in operators:
+            for handler in self.trigger_handlers:
+                handler.register_operator(operator)
+    def forward(self, state_tensor: CBTensor)->torch.Tensor:
         """
-        self._num_operators = len(operators)
-        self._triggers = [trigger_class.create_trigger(operators, spec, device) for
-                          trigger_class in self._trigger_classes]
+        Runs the actual forward pass
 
-    def forward(self, tensor: CBTensor):
-        """
-        Performs the logical process which tells us what operator is active.
-        Basically, we test all strategies, only one should survive, and then
-        we get the index associated with that operator.
-        :param tensor:
+        :param state_tensor:
+            - The state tensor
+            - All trigger handlers will be tested against this, and
+              all must be vaild for a action to be selected.
+            - shape (...)
         :return:
+            - The action, for each shape in (...), that was identified as triggered
+            - Shape (..., actions)
+            - Boolean mask.
+            - One of actions MUST be triggered.
         """
         # Create a feature to perform logical and against with all the test cases
         # This forms an "index mask" that will tell us what operator we need to trigger
-        index_mask = torch.full([*tensor.shape, self._num_operators], True, device=tensor.device)
+        # All options start as true. As trigger checks fail, they are slowly set to false
 
-        # Test each case, and discard nonmatching
+        actions_mask = torch.full([*state_tensor.shape, self._num_operators],
+                                  True, device=state_tensor.device)
+
+        # Test each case, and discard nonmatching.
         for trigger in self._triggers:
-            trigger_mask = trigger(tensor)
-            index_mask = torch.logical_and(trigger_mask, index_mask)
+            trigger_mask = trigger(state_tensor)
+            actions_mask = torch.logical_and(trigger_mask, actions_mask)
 
-        # Extract the integer index associated with each active case
-        if torch.any(index_mask.sum(dim=-1) != 1):
+        # One, and only one, trigger must be active at each moment. Else we throw
+        if torch.any(actions_mask.sum(dim=-1) != 1):
             raise ValueError("Some values never had a triggered state, or had multiple")
 
+        # Turn into indexes
+        indexes = torch.arange(self._num_states, device =state_tensor.device)
+        indexes = indexes.expand_as(actions_mask)
+        indexes = indexes.masked_select(actions_mask)
+        indexes = indexes.view(state_tensor.shape)
 
-        # Get the actual operator indices.
-        operator_indexes = torch.arange(self._num_operators, device=tensor.device)
-        operator_indexes = operator_indexes.expand_as(index_mask)
-        operator_indexes = operator_indexes.masked_select(index_mask)
-        operator_indexes = operator_indexes.view(tensor.shape)
-
-        return operator_indexes
-
-
+        return indexes
 
 class IntakeTrigger(nn.Module, ABC):
     """
@@ -131,35 +141,20 @@ class IntakeTrigger(nn.Module, ABC):
     """
 
     @abstractmethod
-    @classmethod
-    def create_trigger(cls,
-                       spec: CBTensorSpec,
-                       operators: List[FSMOperator],
-                       device: torch.device)->'IntakeTrigger':
+    def register_operator(self, operator: FSMOperator):
         """
-        Creates a setup intake trigger bound to the operator collection.
-        :param spec: The spec to bind to
-        :param operators: The operator collection to bind to
-        :param device: The device to work with.
-        :return: The setup intake trigger.
+        Registers a single FSM operator onto the intake
+        trigger.
+
+        :param operator: The operator to register
         """
 
-    @abstractmethod
-    def register_noop(self):
-        """
-        Must register a noop that has no effect. Anything registered as a
-        no-op must return true when filtration is attempted in order to be valid
-        """
-
-
-    @abstractmethod
-    def register_trigger(self, *args, **kwargs):
-        """
-        Register the intake filter. Should
-        :param args:
-        :param kwargs:
-        :return:
-        """
+    def __init__(self,
+                 spec: CBTensorSpec,
+                 device: torch.device):
+        super().__init__()
+        self.spec = spec
+        self.device = device
 
     @abstractmethod
     def forward(self, tensor: CBTensor)->torch.Tensor:
@@ -172,100 +167,84 @@ class IntakeTrigger(nn.Module, ABC):
         :return:
         """
 
-    def __init__(self,
-                 spec: CBTensorSpec,
-                 device: torch.device):
-        super().__init__()
-        self.spec = spec
-        self.device = device
-
-@IntakeMachine.register
+@IntakeMachine.register_trigger
 class IntStateTrigger(IntakeTrigger):
     """
     An integer-based state trigger. It will keep track of certain integer
     patterns it wants to match, and return true if they match. It examines
     the FSM CBTensor to determine this
     """
-    def register_noop(self):
-        """Registers a noop"""
-
-        #No ops are handled by masking out all channels. This will automatically make that
-        # return true.
-
-        new_channel_mask =  torch.full([1, self.spec.total_width], True,
-                                                     device=self.no_ops.device,
-                                                      dtype = torch.bool)
-        new_match_targets = torch.zeros([1, self.spec.total_width],
-                                        dtype=torch.long,
-                                        device=self.no_ops.device)
-
-        self.channel_masks = torch.concat([self.channel_mask, new_channel_mask], 0)
-        self.match_values = torch.concat([self.match_targets, new_match_targets], 0)
-
-    def register_trigger(self, pattern: Dict[str, Union[int, List[int]]]):
+    def register_trigger(self,
+                         channels: List[str],
+                         positions: List[int],
+                         values: List[int]
+                         ):
         """
         Registers a particular pattern of integer content as triggering an
         int filtration. Any channels defined but not provided are assumed to be
         wildcards and masked away
 
-        :param pattern: The pattern to register. Must be a dict of string keys
-        that are in the spec, and then the values to look at for those keys
-        """
-        # Standardize
-        pattern = {key : [item] if isinstance(item, int) else item for key, item in pattern.items()}
-        pattern = {key : torch.tensor(item, device=self.no_ops.device) for key, item in pattern.items()}
+        All lists are syncronized:
 
-        # Create the new content
-        new_channel_mask = torch.full([1, self.spec.total_width], False,
+        :param channels: The channels to register to. Whatever they might be
+        :param positions: The position within the channel to register to
+        :param values: The values to match to.
+        """
+
+        # Create the new mask features. We will set individual elements of them.
+        #
+        # Note that since the channel mask starts out as true, everything
+        # is assumed to be masked until set otherwise.
+        new_channel_mask = torch.full([self.spec.total_width], True,
                                       device=self.no_ops.device,
                                       dtype=torch.bool)
-        new_match_targets = torch.zeros([1, self.spec.total_width],
+        new_match_targets = torch.zeros([self.spec.total_width],
                                         dtype=self.match_values.dtype,
                                         device=self.no_ops.device)
 
-        for key in self.spec.channels:
-            if key in pattern:
-                # We put the match target into the pattern
-                new_match_targets[self.spec.slices[key]] = pattern[key]
-            else:
-                # It is assumed to be wildcard. Mask it
-                new_channel_mask[self.spec.slices[key]] = True
+        # Load information from each trigger into the mask. All must be met to trigger
+        # We also need to remember to disable the wildcard masking so we have to care
+        # what the value is
+        for channel, position, value in zip(channels, positions, values):
+            # Basic validation
+            assert channel in self.spec.channels
+            assert position <= self.spec.channel_widths[channel]
+
+            # We are using pointer arithmetic to address so far since the start of the
+            # channel. We set the targets to the value, and the mask to false so we
+            # care about them
+            pointer = self.spec.start_index[channel] + position
+            new_match_targets[pointer] = value
+            new_channel_mask[pointer] = False
+
+
 
         # Store the new updates.
+
+        new_channel_mask = new_channel_mask.unsqueeze(0)
+        new_match_targets = new_match_targets.unsqueeze(0)
+
         self.channel_masks = torch.concat([self.channel_mask, new_channel_mask], 0)
         self.match_values = torch.concat([self.match_targets, new_match_targets], 0)
-
-    @classmethod
-    def create_trigger(cls,
-                       spec: CBTensorSpec,
-                       operators: List[FSMOperator],
-                       device: torch.device
-                       )->'IntStateTrigger':
+    def register_operator(self, operator: FSMOperator):
         """
-        Registers a collection of operators based on whether
-        they had Int trigger matches on them.
+        Registers the given operator onto the IntStateTrigger, if int
+        triggers exist. Otherwise, it becomes a noop
+
+        :param operator: The operator to register
         """
 
-        instance = cls(spec, device)
+        channels = []
+        positions = []
+        values = []
+        for trigger in operator.triggers:
+            if isinstance(trigger, IntOperand):
+                channels.append(trigger.channel)
+                positions.append(trigger.position)
+                values.append(trigger.value)
 
-        # Attach the operator details
-        for operator in operators:
+        self.register_trigger(channels, positions, values)
 
-            # Fetch out all the int operator details
-            channel_operators = {key : [None]*spec.channel_widths[key]
-                                 for key in spec.channels}
-            for trigger in operator.trigger_pattern.patterns:
-                if isinstance(trigger, Int):
-                    bucket = channel_operators[trigger.channel]
-                    bucket[trigger.position] = trigger.value
-            channel_operators = {key: item for key, item in channel_operators.items() if len(item) > 0}
-            if len(channel_operators) == 0:
-                # If nothing is left, we do a noop
-                instance.register_noop()
-            else:
-                # We register what we gathered
-                instance.register_trigger(channel_operators)
-        return instance
     def __init__(self,
                  spec: CBTensorSpec,
                  device: torch.device = None,
@@ -297,24 +276,13 @@ class IntStateTrigger(IntakeTrigger):
 
         return matches
 
-@IntakeMachine.register
+@IntakeMachine.register_trigger
 class MatchingCasesTrigger(IntakeTrigger):
     """
     Defines a trigger to go off when matching patterns occur, or alternatively
     when nonmatching patterns occur. The logic is ALMOST the same for both, so
     we go ahead and handle both cases in one class to save on vectorized lookups
     """
-    def register_noop(self):
-        """
-        Registers a noop. Everything ends up being masked to true.
-        """
-        relations_mask = torch.zeros([self.spec.total_width, self.spec.total_width],
-                                     dtype=torch.bool, device=self.relations_mask.device)
-        mode_mask = torch.zeros([self.spec.total_width, self.spec.total_width],
-                                     dtype=torch.bool, device=self.relations_mask.device)
-
-        self.relations_mask = torch.concat([self.relations_mask, relations_mask], 0)
-        self.mode_mask = torch.concat([self.mode_mask, mode_mask], 0)
     def register_trigger(self,
                          channel_a: List[str],
                          channel_b: List[str],
@@ -331,13 +299,18 @@ class MatchingCasesTrigger(IntakeTrigger):
         :param trigger_on_match: A list of indicators on whether to trigger on match, or
                on no match.
         """
-
+        # Create the blank masks. By default, we specify everything as
+        # not important, and the mode mask value then does not matter and
+        # is arbitrarily false.
         relations_mask = torch.full([self.spec.total_width, self.spec.total_width],
                                      False,
-                                     dtype=torch.bool, device=self.relations_mask.device
+                                     dtype=torch.bool, device=self.relations_required_mask.device
                                     )
-        mode_mask = relations_mask.clone()
-
+        mode_mask = torch.full([self.spec.total_width, self.spec.total_width],
+                                     False,
+                                     dtype=torch.bool, device=self.relations_required_mask.device
+                                    )
+        # Loop through
         for channel_a, channel_b, mode in zip(channel_a, channel_b, trigger_on_match):
             # Some simple validation
             assert channel_a in self.spec.channels
@@ -345,7 +318,8 @@ class MatchingCasesTrigger(IntakeTrigger):
             assert self.spec.channel_widths[channel_a] == self.spec.channel_widths[channel_b]
 
             # Fill a portion of the mask, that now specifies this region of cross multiplication
-            # matters.
+            # matters. In particular, we now specify in the relations mask that THIS region
+            # needs to be cross similar, and the associated mode.
             relations_mask[self.spec.slices[channel_a], self.spec.slices[channel_b]] = True
             mode_mask[self.spec.slices[channel_a], self.spec.slices[channel_b]] = mode
 
@@ -353,57 +327,37 @@ class MatchingCasesTrigger(IntakeTrigger):
         relations_mask = relations_mask.unsqueeze(0)
         mode_mask = mode_mask.unsqueeze(0)
 
-        self.relations_mask = torch.concat([self.relations_mask, relations_mask], 0)
+        self.relations_required_mask = torch.concat([self.relations_required_mask, relations_mask], 0)
         self.mode_mask = torch.concat([self.mode_mask, mode_mask], 0)
 
-    @classmethod
-    def create_trigger(cls,
-                       spec: CBTensorSpec,
-                       operators: List[FSMOperator],
-                       device: torch.device) ->'MatchingCasesTrigger':
+    def register_operator(self, operator: FSMOperator):
         """
-        Creates the entire class, and registers the matching cases.
+        Registers a particular operator and any match or notmatching
+        cases that it might possess to be part of this trigger.
 
-        :param spec: The spec
-        :param operators: The operators to register in it
-        :param device: The device
-        :return: The intake trigger
+        :param operator: A FSM operator to register
         """
+        # Create containers
+        channel_a = []
+        channel_b = []
+        trigger_on_match = []
 
-        # create instance
+        # Fetch information off operator
+        for trigger in operator.triggers:
 
-        instance = cls(spec, device)
+            # Handles situation in which matching operand appears
+            if isinstance(trigger, MatchingOperand):
+                channel_a.append(trigger.channel)
+                channel_b.append(trigger.target_channel)
+                trigger_on_match.append(True)
 
-        # Go over each operator
-        for operator in operators:
+            # Handles situation in which nonmatching operand appears
+            if isinstance(trigger, NotMatchingOperand):
+                channel_a.append(trigger.channel)
+                channel_b.append(trigger.target_channel)
+                trigger_on_match.append(False)
 
-            # Build the register parameters
-            channel_a = []
-            channel_b = []
-            trigger_on_match = []
-
-            # Build the actual features
-            for trigger in operator.trigger_pattern.patterns:
-                if isinstance(trigger, Matching):
-                    channel_a.append(trigger.channel)
-                    channel_b.append(trigger.target_channel)
-                    trigger_on_match.append(True)
-                elif isinstance(trigger, NotMatching):
-                    channel_a.append(trigger.channel)
-                    channel_b.append(trigger.target_channel)
-                    trigger_on_match.append(False)
-
-            # Store the operator, whatever is needed
-            if len(channel_a)  == 0:
-                instance.register_noop()
-            else:
-                instance.register_trigger(channel_a,
-                                          channel_b,
-                                          trigger_on_match)
-
-        # Return the instance
-        return instance
-
+        self.register_trigger(channel_a, channel_b, trigger_on_match)
 
     def __init__(self,
                  spec: CBTensorSpec,
@@ -411,7 +365,7 @@ class MatchingCasesTrigger(IntakeTrigger):
                  ):
         super().__init__(spec, device)
 
-        # The relations mask is used to do basically everything we need
+        # The relations_required_mask is used to do basically everything we need
         # It tells us what entries MUST be similar when comparing channels,
         # and has shape (operators, channels, channels)
         #
@@ -419,9 +373,8 @@ class MatchingCasesTrigger(IntakeTrigger):
         # a particular matching mode. True means trigger on match, false means
         # trigger on no match. We can then use boolean logic to behave properly.
 
-
-        self.relations_mask =torch.zeros([0, spec.total_width, spec.total_width],
-                                         dtype=torch.bool, device=device)
+        self.relations_required_mask =torch.zeros([0, spec.total_width, spec.total_width],
+                                                  dtype=torch.bool, device=device)
         self.mode_mask = torch.zeros([0, spec.total_width, spec.total_width],
                                      dtype=torch.bool, device=device)
 
@@ -448,8 +401,8 @@ class MatchingCasesTrigger(IntakeTrigger):
         # Then, we use the relations mask to set anything that will not be considered
         # to true. This ignores channel cross relationships that do not matter.
 
-        inner_product = ~torch.logical_xor(inner_product, self.mode_mask)
-        inner_product[..., ~self.relations_mask] = True
+        inner_product = ~torch.logical_xor(inner_product, self.mode_mask) #XAND
+        inner_product[..., ~self.relations_required_mask] = True # All masked entries are true
 
         # Flatten, and figure out whether we triggered.
         output = torch.flatten(inner_product, -2, -1).all(dim=-1)
@@ -498,7 +451,7 @@ class OutputMachine(nn.Module):
                  operators: List[FSMOperator],
                  device: torch.device = None
                  ):
-
+        super().__init__()
         self._num_operators = len(operators)
         self._output_operators = nn.ModuleList(output_action(operators) for output_action in self._output_classes)
 
@@ -525,9 +478,9 @@ class OutputMachine(nn.Module):
         :return: The new operator action
         """
         # Apply the machines in order
-        output = tensor
+        output = tensor.clone()
         for action in self._output_operators:
-             output = action(output, operation, prediction)
+            output = action(output, operation, prediction)
         assert output.shape == tensor.shape
         return tensor
 
@@ -539,17 +492,224 @@ class OperatorAction(nn.Module, ABC):
     thing, like writing
     """
     @abstractmethod
-    @classmethod
-    def create_action(cls,
-                      spec: CBTensorSpec,
-                      operators: List[FSMOperator],
-                      device: torch.device = None
-                      )->'OperatorAction':
+    def register_operator(self, operator: FSMOperator):
         """
-        Creates a operator action associated with this spec
-        :param spec:
-        :param operators:
-        :param device:
-        :return:
+        Registers a particular operator, and otherwise handles
+        the situation.
         """
+
+    def __init__(self,
+                 spec: CBTensorSpec,
+                 device: torch.device = None
+                 ):
+
+        super().__init__()
+        self.spec = spec
+        self.device = device
+
+    @abstractmethod
+    def forward(self,
+                state_tensor: CBTensor,
+                operation: torch.Tensor,
+                prediction: torch.Tensor) -> CBTensor:
+        """
+        Performs the actual action that may modify the
+        tensor. Whatever that might be.
+
+        :param state_tensor: The finite state tensor.
+            - Presumably, we need to fiddle with this
+            - Shape (...)
+        :param operation: The operation to perform.
+            - This is a tensor of integers
+            - Shape  (...)
+            - Each integer is an index, telling us what action to perform,
+              and of length channels.
+        :param prediction:
+            - The content that has been predicted by the model.
+            - An integer, not logits.
+            - Some actions may involve writing.
+        :return: The new state tensor
+        """
+
+class IntSetAction(OperatorAction):
+    """
+    The int set action is responsible for statically
+    setting integer values to be equal to certain other
+    values, when relevant
+    """
+    def register_operator(self, operator: FSMOperator):
+        """
+        Registers the given FSM operator to respond
+        to the current state index.
+
+        :param operator: The operator we are registering
+        """
+
+        # Create the new features that need to be stored
+        new_set_state = torch.zeros([self.spec.total_width],
+                                    device=self.device,
+                                    dtype=torch.long)
+        new_set_mask = torch.zeros([self.spec.total_width],
+                                   device=self.device,
+                                   dtype=torch.bool)
+
+        # Load in the int conditions in the operator
+        for action in operator.get_actions():
+            if isinstance(action, IntOperand):
+                assert action.channel in self.spec.channels
+                assert action.position <= self.spec.channel_widths[action.channel]
+
+                # Set the set state to contain a meaningful value, and the set mask
+                # to want to set that value
+                pointer = self.spec.start_index[action.channel] + action.position
+                new_set_state[pointer] = action.value
+                new_set_mask[pointer] = True
+
+        # Store
+        new_set_state = new_set_state.unsqueeze(0)
+        new_set_mask = new_set_mask.unsqueeze(0)
+
+        self.set_states = torch.concat([self.set_states, new_set_mask], dim=0)
+        self.set_masks = torch.concat([self.set_masks, new_set_mask], dim=0)
+    def __init__(self,
+                 spec: CBTensorSpec,
+                 device: torch.device = None
+                 ):
+        super().__init__(spec, device)
+
+        # To accomplish what we desire, we store a compressed representation
+        # of everything we want to set in terms of a channel, and then a mask
+        # that can ensure those things are actually set.
+
+        self.set_states = torch.zeros([0, spec.total_width],
+                                      dtype = torch.long,
+                                      device=device
+                                      )
+        self.set_masks = torch.zeros([0, spec.total_width],
+                                     dtype = torch.bool,
+                                     device=device)
+
+    def forward(self,
+                state_tensor: CBTensor,
+                operation: torch.Tensor,
+                prediction: torch.Tensor) -> CBTensor:
+        """
+        Performs the actual action of writing the static features into
+        the state tensor.
+
+        :param state_tensor: The finite state tensor.
+            - Presumably, we need to fiddle with this
+            - Shape (...)
+        :param operation: The operation to perform.
+            - This is a tensor of integers
+            - Shape  (...)
+            - Each integer is an index, telling us what action to perform,
+              and of length channels.
+        :param prediction:
+            - The content that has been predicted by the model.
+            - An integer, not logits.
+            - Some actions may involve writing.
+            - Shape (...)
+        :return: The new state tensor
+        """
+        # Rebind to my spec, then get the tensor
+        original = state_tensor
+        state_tensor = state_tensor.rebind_to_spec(self.spec, allow_channel_pruning=True)
+        tensor = state_tensor.get_tensor() #(..., channels)
+
+        # Get the set mask and set values, then set them
+        set_masks = self.set_masks[operation, :]
+        set_values = self.set_values[operation, :]
+
+        tensor[set_masks] = set_values[set_masks]
+
+        # Now put it back together and return
+        state_tensor = state_tensor.set_tensor(tensor)
+        output = original.set_channels(state_tensor)
+
+        return output
+
+
+
+class WriteAction(OperatorAction):
+    """
+    The write action is responsible for writing
+    to the state tensor something predicted by
+    the model.
+    """
+
+    def register_operator(self, operator: FSMOperator):
+        """
+        Register a particular operator and any write actions which
+        may be attached to it. If no write actions are attached,
+        :param operator: The operator to register. We will look at the
+                         action
+        """
+        # Create the action to perform index setting using
+        write_action = torch.full([self.spec.total_width],
+                                  False,
+                                  dtype=torch.bool,
+                                  device=self.write_mask.device
+                                  )
+        # Go over all the actions. Set based on what we find
+        for action in operator.get_actions():
+            if isinstance(action, WriteData):
+                assert action.channel in self.spec.channels
+                assert action.position <= self.spec.channel_widths[action.channel]
+
+                pointer = self.spec.start_index[action.channel] + action.position
+                write_action[pointer] = True
+
+        # Store
+        write_action = write_action.unsqueeze(0)
+        self.write_mask = torch.concat([self.write_mask, write_action], dim=0)
+
+
+    def __init__(self,
+                 spec: CBTensorSpec,
+                 device: torch.device
+                 ):
+        super().__init__(spec, device)
+
+        # Define the write pointers. These tell us what channel to insert
+        # into when we go to write our output.
+
+        self.write_mask = torch.zeros([0, spec.total_width], dtype=torch.bool, device=device)
+
+    def forward(self,
+                state_tensor: CBTensor,
+                operation: torch.Tensor,
+                prediction: torch.Tensor) -> CBTensor:
+        """
+        Performs the actual action of writing to the state tensor
+
+        :param state_tensor: The finite state tensor.
+            - Presumably, we need to fiddle with this
+            - Shape (...)
+        :param operation: The operation to perform.
+            - This is a tensor of integers
+            - Shape  (...)
+            - Each integer is an index, telling us what action to perform,
+              and of length channels.
+        :param prediction:
+            - The content that has been predicted by the model.
+            - An integer, not logits.
+            - Some actions may involve writing.
+            - Shape (...)
+        :return: The new state tensor
+        """
+        # Bind our tensor
+        ordered_tensor = state_tensor.rebind_to_spec(self.spec, allow_channel_pruning=True)
+        tensor = ordered_tensor.get_tensor()
+
+        # Get write mask and perform broadcast write
+        write_masks = self.write_masks[..., operation]
+        tensor[write_masks] = prediction.unsqueeze(-1)
+
+        # Return tensor of original shape.
+        ordered_tensor.set_tensor(tensor)
+        state_tensor.set_channels(ordered_tensor)
+
+        return state_tensor
+
 
