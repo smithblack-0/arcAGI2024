@@ -66,7 +66,9 @@ class IntakeMachine(nn.Module):
         next_operator = intake_machine(fsm_state_tensor)  # Returns an index for the next operator
     """
     _trigger_handler_classes = []
-    def register_trigger(self, trigger_handler: 'IntakeMachine'):
+
+    @classmethod
+    def register_trigger(cls, trigger_handler: 'IntakeTrigger')->'IntakeTrigger':
         """
         Registers a trigger handling class. This should be able to be
         initialized with a spec and device, and has a register operator
@@ -74,8 +76,9 @@ class IntakeMachine(nn.Module):
 
         :param trigger_handler: The trigger handler to register.
         """
-        assert isinstance(trigger_handler, IntakeTrigger)
-        self._trigger_handler_classes.append(trigger_handler)
+        if not issubclass(trigger_handler, IntakeTrigger):
+            raise ValueError("Trigger was not of intake trigger type")
+        cls._trigger_handler_classes.append(trigger_handler)
         return trigger_handler
 
     def __init__(self,
@@ -111,11 +114,11 @@ class IntakeMachine(nn.Module):
         # This forms an "index mask" that will tell us what operator we need to trigger
         # All options start as true. As trigger checks fail, they are slowly set to false
 
-        actions_mask = torch.full([*state_tensor.shape, self._num_operators],
+        actions_mask = torch.full([*state_tensor.shape, self._num_states],
                                   True, device=state_tensor.device)
 
         # Test each case, and discard nonmatching.
-        for trigger in self._triggers:
+        for trigger in self.trigger_handlers:
             trigger_mask = trigger(state_tensor)
             actions_mask = torch.logical_and(trigger_mask, actions_mask)
 
@@ -196,19 +199,21 @@ class IntStateTrigger(IntakeTrigger):
         # Note that since the channel mask starts out as true, everything
         # is assumed to be masked until set otherwise.
         new_channel_mask = torch.full([self.spec.total_width], True,
-                                      device=self.no_ops.device,
+                                      device=self.device,
                                       dtype=torch.bool)
         new_match_targets = torch.zeros([self.spec.total_width],
                                         dtype=self.match_values.dtype,
-                                        device=self.no_ops.device)
+                                        device=self.device)
 
         # Load information from each trigger into the mask. All must be met to trigger
         # We also need to remember to disable the wildcard masking so we have to care
         # what the value is
         for channel, position, value in zip(channels, positions, values):
             # Basic validation
-            assert channel in self.spec.channels
-            assert position <= self.spec.channel_widths[channel]
+            if channel not in self.spec.channels:
+                raise ValueError("Channel was missing")
+            if position >= self.spec.channel_widths[channel]:
+                raise ValueError("Position was greater than channel width")
 
             # We are using pointer arithmetic to address so far since the start of the
             # channel. We set the targets to the value, and the mask to false so we
@@ -224,8 +229,8 @@ class IntStateTrigger(IntakeTrigger):
         new_channel_mask = new_channel_mask.unsqueeze(0)
         new_match_targets = new_match_targets.unsqueeze(0)
 
-        self.channel_masks = torch.concat([self.channel_mask, new_channel_mask], 0)
-        self.match_values = torch.concat([self.match_targets, new_match_targets], 0)
+        self.channel_masks = torch.concat([self.channel_masks, new_channel_mask], 0)
+        self.match_values = torch.concat([self.match_values, new_match_targets], 0)
     def register_operator(self, operator: FSMOperator):
         """
         Registers the given operator onto the IntStateTrigger, if int
@@ -271,7 +276,7 @@ class IntStateTrigger(IntakeTrigger):
 
         # Handle masking of wildcards. Also, get actual mask tensor we could sanely return
         raw_matches = torch.eq(tensor, self.match_values) #(..., num_patterns). Bool
-        raw_matches = torch.logical_or(raw_matches, self.channel_mask)
+        raw_matches = torch.logical_or(raw_matches, self.channel_masks)
         matches = torch.all(raw_matches, dim=-1)
 
         return matches
@@ -444,17 +449,23 @@ class OutputMachine(nn.Module):
 
         :param output_class: The operator
         """
+        if not issubclass(output_class, OperatorAction):
+            raise ValueError("operator action was not of OperatorAction class")
         cls._output_classes.append(output_class)
         return output_class
+
     def __init__(self,
-                 spec: CBTensorSpec,
                  operators: List[FSMOperator],
+                 spec: CBTensorSpec,
                  device: torch.device = None
                  ):
         super().__init__()
         self._num_operators = len(operators)
-        self._output_operators = nn.ModuleList(output_action(operators) for output_action in self._output_classes)
+        self._output_action = nn.ModuleList(output_action(spec, device) for output_action in self._output_classes)
 
+        for operator in operators:
+            for action in self._output_action:
+                action.register_operator(operator)
     def forward(self,
                 tensor: CBTensor,
                 operation: torch.Tensor,
@@ -479,7 +490,7 @@ class OutputMachine(nn.Module):
         """
         # Apply the machines in order
         output = tensor.clone()
-        for action in self._output_operators:
+        for action in self._output_action:
             output = action(output, operation, prediction)
         assert output.shape == tensor.shape
         return tensor
@@ -531,6 +542,7 @@ class OperatorAction(nn.Module, ABC):
         :return: The new state tensor
         """
 
+@OutputMachine.register
 class IntSetAction(OperatorAction):
     """
     The int set action is responsible for statically
@@ -629,8 +641,7 @@ class IntSetAction(OperatorAction):
 
         return output
 
-
-
+@OutputMachine.register
 class WriteAction(OperatorAction):
     """
     The write action is responsible for writing
@@ -712,4 +723,273 @@ class WriteAction(OperatorAction):
 
         return state_tensor
 
+@OutputMachine.register
+class CountAdvanceRegroupAction(OperatorAction):
+    """
+    Handles the count up with regroup mechanism
+    we use to handle advancing the index. For now, you
+    can only have one count with advance per FSM
+    """
+    def register_operator(self, operator: FSMOperator):
+        """
+        Registers the operator by peeking into it and handling
+        any CountUpWithRegroup cases
+        :param operator: The operator to register
+        """
+        # Create the fresh state to store everything in
+        counter_indexes = torch.zeros([self.spec.total_width], dtype=torch.bool, device=self.device)
+        regroup_indexes = torch.zeros([self.spec.total_width], dtype=torch.bool, device=self.device)
+        counter_start = torch.zeros([self.spec.total_width], dtype=torch.bool, device=self.device)
 
+        # Fetch the counter, if it exists, out of the operator
+        counters = []
+        for action in operator.get_actions():
+            if isinstance(action, CountUpWithRegroup):
+                counters.append(action)
+        # The current storage protocol does not handle anything other than 0 or 1
+        # channels.
+        if len(counters) > 1:
+            raise ValueError("Cannot have more than one counter per operator for now")
+
+        if len(counters) == 1:
+            # insert counter into bool masks
+            counter = counters[0]
+
+            # Basic validation
+            assert counter.channel in self.spec.channels
+            assert counter.helper_channel in self.spec.channels
+            assert self.spec.channel_widths[counter.channel] == self.spec.channel_widths[counter.helper_channel]
+
+            # Use the spec to insert true where needed
+            counter_indexes[self.spec.slices[counter.channel]] = True
+            regroup_indexes[self.spec.slices[counter.helper_channel]] = True
+            counter_start[self.spec.start_index[counter.channel]] = True
+
+        #Store
+        counter_indexes = counter_indexes.unsqueeze(0)
+        regroup_indexes = regroup_indexes.unsqueeze(0)
+        counter_start = counter_start.unsqueeze(0)
+
+        self.counter_indexes = torch.concat([self.counter_indexes, counter_indexes], dim=0)
+        self.regroup_indexes = torch.concat([self.regroup_indexes, regroup_indexes], dim=0)
+        self.counter_start_indexes = torch.concat([self.counter_start_indexes, counter_start], dim=0)
+
+    def __init__(self,
+                 spec: CBTensorSpec,
+                 device: torch.device):
+
+        super().__init__(spec, device)
+
+        # Define the regroup storage and index storage tables. These will tend to tell us
+        # where the pieces associated with the counter and the regroup factor are.
+        # We also define the start of the counter here. It turns out that makes life a lot
+        # easier later on when regrouping.
+
+        self.counter_indexes = torch.zeros([0, spec.total_width], device=device, dtype=torch.bool)
+        self.regroup_indexes = torch.zeros([0, spec.total_width], device=device, dtype=torch.bool)
+        self.counter_start_indexes = torch.zeros([0, spec.total_width], device=device, dtype=torch.bool)
+    def forward(self,
+                state_tensor: CBTensor,
+                operation: torch.Tensor,
+                prediction: torch.Tensor) -> CBTensor:
+        """
+        Performs the action of advancing the state
+
+        :param state_tensor: The finite state tensor.
+            - Presumably, we need to fiddle with this
+            - Shape (...)
+        :param operation: The operation to perform.
+            - This is a tensor of integers
+            - Shape  (...)
+            - Each integer is an index, telling us what action to perform,
+              and of length channels.
+        :param prediction:
+            - The content that has been predicted by the model.
+            - An integer, not logits.
+            - Some actions may involve writing.
+            - Shape (...)
+        :return: The new state tensor
+        """
+
+        # Bind tensor to local spec
+        ordered_tensor = state_tensor.rebind_to_spec(self.spec, allow_channel_pruning=True)
+        tensor = ordered_tensor.get_tensor() #(..., channels)
+
+        # Use operator to get the operator specific varient for each of the three required tensors
+
+        counter_index_mask = self.counter_indexes[operation, :] #(..., channels)
+        regroup_index_mask = self.regroup_indexes[operation, :] #(..., channels)
+        counter_start_mask = self.counter_start_indexes[operation, :] #(..., channels)
+
+        # Get the proper counter and regroup data out of the tensor. Also, get the
+        # relevant subselection of counter start mask, as it will be important momentarily
+        #
+        # This is going to extract us into a flattened tensor where, nonethless, channel 2
+        # will be before channel 3 if they are all from the same tensor, which will allow
+        # some clever tricks in a moment
+
+        flat_counters = tensor[counter_index_mask] #(flattened_data)
+        flat_regroups = tensor[regroup_index_mask] #(flattened_data)
+        flat_start_mask = counter_start_mask[counter_index_mask] #(flattened_data)
+
+        # Increment the counter by one by targetting and increasing the start position.
+        # this will still work since we have the start mask. Then detect and isolate regroupings.
+        # Remove those regroupings from the accumulator in the adder
+
+        flat_counters[flat_start_mask] += 1 # Increment count
+        requires_regroup = torch.floor_divide(flat_counters, flat_regroups) # Detect regroup requirements
+        flat_counters -= flat_regroups*requires_regroup # Subtract off regroup from counter
+
+        # Perform regroup action. This consists of rolling everything to the right,
+        # setting to zero anything that is now cross contaminating a different counter,
+        # then adding the regrouped element
+
+        requires_regroup = torch.roll(requires_regroup, 1, dim=-1)
+        requires_regroup[flat_start_mask] = 0
+        flat_counters += requires_regroup
+
+        # The counter is finished being updated. Now we need to get it back into place
+        tensor[counter_index_mask] = flat_counters
+        ordered_tensor = ordered_tensor.set_tensor(tensor)
+        state_tensor = state_tensor.set_channels(ordered_tensor)
+        return state_tensor
+
+class VocabularySizeMachine(nn.Module):
+    """
+    The vocabulary size machine has a singular, but
+    very important, purpose. It is responsible for
+    ensuring there is an easy way to figure out how
+    big any prediction logits that will be made need
+    to be.
+    """
+    def register_operator(self, operator: FSMOperator):
+        """
+        Registers the given operator, and any FSM logic,
+        within the vocabulary size machine. This is done
+        by examining WriteData operators.
+
+        :param operator: The operator to register
+        """
+        # Define the vocabulary size default. By default, it is
+        # just 1, giving only one logit option
+
+        vocab_size = torch.tensor([1], device=self.device, dtype=torch.long)
+
+        # Go and transfer the vocab size if it exists
+        for action in operator.get_actions():
+            if isinstance(action, WriteData):
+                vocab_size[0] = action.vocab_size
+
+        # Store
+        self.vocabulary_size = torch.concat([self.vocabulary_size, vocab_size], dim=0)
+
+    def __init__(self, operators: List[FSMOperator], spec: CBTensorSpec, device: torch.device):
+        super().__init__()
+
+        # Setup
+        self.spec = spec
+        self.device = device
+
+        # Setup vocabulary tracker
+        self.vocabulary_size = torch.zeros([], dtype=torch.long, device=self.device)
+
+        # Register
+        for operator in operators:
+            self.register_operator(operator)
+
+    def forward(self, operation: torch.Tensor) -> torch.Tensor:
+        """
+        Fetch the vocabulary size given the operation
+
+        :param operation:
+            - The operations that are active
+            - Shape (...)
+        :return:
+            - The vocabulary size during each operation
+            - Shape (...)
+        """
+
+        return self.vocabulary_size[operation]
+
+class FiniteStateMachine(nn.Module):
+    """
+    The actual finite state machine itself.
+    """
+    @classmethod
+    def create(self,
+               operators: List[FSMOperator],
+               spec: CBTensorSpec,
+               device: torch.device
+               )->'FiniteStateMachine':
+        """
+        Creates a FSM from a list of operators
+        :param operators: Operaters to create from
+        :param spec: spec to be bound to when thinking about this.
+        :param device: The device to create on
+        :return: The finite state machine
+        """
+        intake_machine = IntakeMachine(operators,spec,device)
+        output_machine =  OutputMachine(operators, spec, device)
+        vocabulary_machine = VocabularySizeMachine(operators, spec, device)
+
+
+    def __init__(self,
+                 intake_machine: IntakeMachine,
+                 output_machine: OutputMachine,
+                 vocab_machine: VocabularySizeMachine
+                 ):
+
+        super().__init__()
+
+        self.input_machine = intake_machine
+        self.output_machine = output_machine
+        self.vocabulary_machine = vocab_machine
+
+    def compute_finite_state(self, state_tensor: CBTensor) -> torch.Tensor:
+        """
+        Computes which of a sequence of finite states the current state is
+        in
+        :param state_tensor: The state tensor
+            - Shape (...)
+            - The finite state in tensor form
+        :return:
+            - The finite state tensor tensor
+            - Which of the finite states the state tensor was associated with
+            - Shape (...)
+        """
+        return self.input_machine(state_tensor)
+
+    def get_logit_vocabulary(self, operator: torch.Tensor) -> torch.Tensor:
+        """
+        Gets the logit vocabulary size for each condition we are dealing with,
+        knowing what finite state we are in
+        :param finite_state:
+            - The finite state tensor
+            - Which of N choices we are in
+            - Shape (...)
+        :return: The vocabulary length
+            - An integer, per element
+            - Indicates how many logit elements need to be active when making
+              a prediction, or even taking loss
+            - Shape (...)
+        """
+        return self.vocabulary_machine(operator)
+
+    def encode_transition(self,
+                          state_tensor: CBTensor,
+                          finite_state_tensor: torch.Tensor,
+                          prediction: torch.Tensor
+                          )->CBTensor:
+        """
+        Updates the state tensor to include new information based on the prediction and
+        the decoded finite state.
+
+        :param state_tensor: The state tensor, containing the current state
+            - Shape (...)
+        :param finite_state_tensor: The finite state we were determined to be in
+            - Shape (...)
+        :param prediction: The prediction
+            - Shape (...)
+        :return: The new state tensor
+        """
+        return self.output_machine(state_tensor, finite_state_tensor, prediction)

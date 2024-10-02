@@ -3,7 +3,6 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 
-
 class MultiheadedAttention(nn.Module):
     """
     An adapter layer. Allows us to use a torch multiheaded attention layer
@@ -156,3 +155,10 @@ class MultiheadedAttention(nn.Module):
 
         # Finally, return results
         return attn_results, attn_weights
+
+class MultiHeadedAttention(nn.Module):
+    """
+    Implements a specialized kind of multiheaded attention that is
+    capable of accepting multidimensional batches, and that is
+    capable of
+    """

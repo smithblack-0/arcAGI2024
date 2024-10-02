@@ -62,6 +62,7 @@ class WriteData(ActionOperand):
     """
     Action that indicates the need to write predictions to this channel.
     """
+    requires_embeddings: bool
     vocab_size: int
     position: int
 
