@@ -225,18 +225,14 @@ class DifferentiableSubroutineStack:
 
         return probabilities
 
-    def compute_enstack(self,
-                        action_probability: torch.Tensor,
-                        ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def compute_enstack(self,) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Executes the enstack action, moving the probabilistic pointer deeper.
 
         This operation shifts the probabilistic pointer into a deeper stack level and modifies the
-        tensor states accordingly based on the enstack probability. The stack tensor values are
-        updated at each level in proportion to the enstack action's probability. It returns the new
-        state under these modifications, ready to be committed.
+        tensor states accordingly based on the enstack probability.  It returns the new
+        state under these modifications, ready to be weighted.
 
-        :param action_probability: The probability for performing the enstack action (depth, ...).
         :return: The new stack probabilities and the new stack state.
         """
 
@@ -247,21 +243,13 @@ class DifferentiableSubroutineStack:
         # Shift all probabilities over. Retain only based on the
         # strength of the action. We are effectively moving the stack pointer over
 
-        probabilities = probabilities * action_probability
         probabilities = torch.concat([zero_probs, probabilities[:-1]], dim=-1)
-
-        # Modify the stack parameters. Stack remains as is, in concept. But we do need to
-        # weight by enstack action probability
-
-        stack = stack * action_probability.unsqueeze(-1)
 
         # Return
 
         return probabilities, stack
 
-    def compute_destack(self,
-                        action_probabilities: torch.Tensor,
-                        ) -> Tuple[Tuple[torch.Tensor, torch.Tensor],
+    def compute_destack(self,) -> Tuple[torch.Tensor,
                                    Tuple[torch.Tensor, torch.Tensor]]:
         """
         Executes the destack action, retrieving and combining previous context.
@@ -270,37 +258,45 @@ class DifferentiableSubroutineStack:
         off the stack. The tensors that fall off are returned and can be processed further in
         the model.
 
-        :param action_probabilities: The probability of performing the destack action (depth, ...).
         :return:
-            - The destacked tensor (output_probabilities, output_state).
+            - The destacked (lost) probability
             - The updated stack (new probabilities, new stack).
         """
+
+        # The destack action is perhaps the most confusing action
+        # that can occur within this class. Three things need to happen.
+        #
+        # First, erasure. When finishing up the current subroutine, its
+        # context should be erased from the stack. This is a memory cleanup
+        # step
+        #
+        # Second, pointer shift. We shift the probabilistic pointers up the
+        # stack by one,
+        #
+        # Third, the probability at the beginning of the stack will be lost.
+        # It is actually corrolated with our return. We capture that for use
 
         probabilities = self.probabilities  # (depth, ...)
         stack = self.stack  # (depth, ..., d_model)
         zero_probs = torch.zeros_like(probabilities[0])
-        zero_stack = torch.zeros_like(stack[0])
 
-        # Weight outcomes
+        # Erase the stack subroutine context based on how active it is.
+        # This gets rid of the context used by the subroutine, freeing up that for
+        # future stack actions
 
-        probabilities = probabilities * action_probabilities
-        stack = stack * action_probabilities.unsqueeze(-1)
+        stack = stack*(1-probabilities.unsqueeze(-1)) + torch.zeros_like(stack)*probabilities.unsqueeze(-1)
 
-        # Shift everything over by one. Also, capture popped.
-        output_state = stack[0]
+        # Catch the lost probability
         output_probabilities = probabilities[0]
 
-        # Perform destack. Combine return context.
+        # Move probabilistic pointer up the stack by one
         probabilities = torch.concat([probabilities[1:], zero_probs], dim=0)
-        stack = torch.concat([stack[1:], zero_stack], dim=0)
 
         # Return results
 
-        return (output_probabilities, output_state), (probabilities, stack)
+        return output_probabilities, (probabilities, stack)
 
-    def compute_no_op(self,
-                      action_probabilities: torch.Tensor,
-                      ):
+    def compute_no_op(self):
         """
         Executes the no-op action, maintaining the current context.
 
@@ -312,10 +308,7 @@ class DifferentiableSubroutineStack:
         :return: The updated stack probabilities and the unchanged stack state.
         """
 
-        # Simple weighting
-        probabilities = self.probabilities * action_probabilities
-        stack = self.stack * action_probabilities.unsqueeze(-1)
-        return probabilities, stack
+        return self.probabilities, self.stack
 
     def commit_tensor(self, tensor: torch.Tensor):
         """
@@ -355,28 +348,48 @@ class DifferentiableSubroutineStack:
 
         # Get the action probabilities, and unbind it into each action
         action_probabilities = self.create_action_probabilities(action_logits)  # (depth, ..., 3)
-        enstack_action, no_op_action, destack_action = action_probabilities.unbind(-1)  # (depth, ...)
 
         # Run each action. Get revised state and probability tensors
 
-        enstack_probs, enstack_stack = self.compute_enstack(enstack_action)
-        no_op_probs, no_op_stack = self.compute_no_op(no_op_action)
-        (output_probs, output_state), (destack_probs, destack_stack) = self.compute_destack(destack_action)
+        enstack_probs, enstack_stack = self.compute_enstack()
+        no_op_probs, no_op_stack = self.compute_no_op()
+        output_probs, (destack_probs, destack_stack) = self.compute_destack()
 
-        # Updates! Combine them together, and store
+        # Weight each outcome by its action probability. We get the updated pointers and
+        # stack.
 
-        self.probabilities = enstack_probs + no_op_probs + destack_probs
-        self.stack = enstack_stack + no_op_stack + destack_stack + self.position_markers
+        probabilistic_pointers = torch.stack([enstack_probs, no_op_probs, destack_probs], dim=-1) #(depth, ..., 3)
+        stack = torch.stack([enstack_stack, no_op_stack, destack_stack], dim=-1) #(depth, ..., d_model, 3)
+
+        probabilistic_pointers = (probabilistic_pointers*action_probabilities).sum(dim=-1)
+        stack = (stack*action_probabilities.unsqueeze(-2)).sum(dim=-1)
+
+        # Finally, we are ready to integrate the tensor! We emplace it with a strength based
+        # on how strong each probabilistic pointer is. Also, we include the position markers
+        # while we are at it. Then we layernorm
+        #
+        # If the pointers are focused on one stack level, this acts just like a normal add+layernorm.
+        # Well, except for the position markers, of course.
+
+        update = tensor.unsqueeze(0)*probabilistic_pointers.unsqueeze(-1) + stack + self.position_markers
+        update = self.layernorm(update)
+        stack = stack*(1-probabilistic_pointers.unsqueeze(-1))+update*probabilistic_pointers.unsqueeze(-1)
+
+        # Updates! Store, and scatter the tensor into their positions based on the
+        # probabilistic pointers.
+
+        self.probabilities = probabilistic_pointers
+        self.stack = stack
         self.action_statistics += action_probabilities
         self.num_times_invoked += 1
-
-        # Commit the tensor into the stack. Perform layernorm
-
         self.commit_tensor(tensor)
 
-        # Return whatever came off the stack
+        # Some percentage of the tensor we are given is actually being lost!
+        # That happens in the destack action, when some pointer probability rolll off
+        # the top of the stack. This percentage is actually the return,
+        # We return the tensor with it's associated output probability.
 
-        return output_probs, output_state
+        return output_probs, tensor
 
 
 class SubroutineStackFactory(nn.Module):
