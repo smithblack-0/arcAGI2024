@@ -371,7 +371,7 @@ class DifferentiableSubroutineStack:
         # If the pointers are focused on one stack level, this acts just like a normal add+layernorm.
         # Well, except for the position markers, of course.
 
-        update = tensor.unsqueeze(0)*probabilistic_pointers.unsqueeze(-1) + stack + self.position_markers
+        update = tensor.unsqueeze(0) + stack + self.position_markers
         update = self.layernorm(update)
         stack = stack*(1-probabilistic_pointers.unsqueeze(-1))+update*probabilistic_pointers.unsqueeze(-1)
 
