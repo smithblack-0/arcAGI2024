@@ -1,8 +1,8 @@
 import torch
 import unittest
-from unittest.mock import MagicMock
-from src.main.model.core.subroutine_driver import (SubroutineDriver, SubroutineCore,
-                                                   DifferentiableSubroutineStack, TensorTree)
+from src.main.model.subroutine_driver import (SubroutineDriver, SubroutineCore,
+                                              DifferentiableSubroutineStack)
+from src.main.model.base import TensorTree
 from typing import Tuple
 
 class MockSubroutineCore(SubroutineCore):

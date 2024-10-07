@@ -2,8 +2,7 @@ from typing import Optional, Tuple
 
 import torch
 from torch import nn, device
-from torch.nn import functional as F
-from .base import BankedLinear, BankSelector
+from src.main.model.banks import BankedLinear, BankSelector
 
 
 

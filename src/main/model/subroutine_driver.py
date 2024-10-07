@@ -1,20 +1,15 @@
 import torch
 from torch import nn
-from typing import List, Dict, Tuple, Any, Protocol, TypeVar, Union, Optional, Callable
+from typing import List, Dict, Tuple, Any, Union, Optional, Callable
 from abc import ABC, abstractmethod
 
-TensorTree = Union[
-    torch.Tensor,  # Base case: Tensor
-    List['TensorTree'],  # Recursion for lists
-    Tuple['TensorTree', ...],  # Recursion for tuples
-    Dict[str, 'TensorTree']  # Recursion for dictionaries
-]
+from src.main.model.base import TensorTree,StatefulCore
 
 StackTree = Union['DifferentiableStack',
                  List['StackTree'],
                  Tuple['StackTree', ...],
                  Dict[str, 'StackTree']]
-class SubroutineCore(nn.Module, ABC):
+class SubroutineCore(StatefulCore):
     """
     The interface for the computational engine that can be
     put inside a subroutine driver. It provides the parameters
@@ -41,6 +36,7 @@ class SubroutineCore(nn.Module, ABC):
         :return:
         """
         pass
+
 
 
 class ActionsManagement:
@@ -225,34 +221,19 @@ class ProbabilisticPointers:
         # Return the lost probability that was discarded.
         return lost_probabilities
 
-
-class SubroutineStackTracker:
+class SubroutineStateTracker:
     """
-    Manages the context of virtual layers and performs residual bypass between layers
-    during subroutine execution in a neural network model. This class tracks the
-    subroutine calls as "virtual layers" within a computation, ensuring that the
-    previous contexts are preserved and managed across different layers.
+    Manages the context of state stacks allowing retrieval and
+    insertion of new state based on the probabilistic pointers
 
     **Core Responsibilities**:
-    1. **Context Management**:
-       The class is responsible for maintaining the stack context across subroutine
-       calls. Get can then be used to superimpose them together into something
-       that is differentiable, producing a differentiable call stack.
 
-    2. **Residual Bypass with Add + LayerNorm**:
-       After each subroutine call (handled by external computation), this class
-       manages the residual bypass operation, integrating the results of the
-       subroutine call into the original layer's context using an add + layernorm
-       operation. This normalization ensures stability and consistency between
-       layers.
+   The class is responsible for maintaining the stack context across subroutine
+   calls. Get can then be used to superimpose them together into something
+   that is differentiable, producing a differentiable call stack.
 
-    **Constructor Parameters**:
     - `stack`: The current stack setup, containing the context of subroutines and
                layers.
-    - `layernorm`: The layer normalization function applied after updating the stack
-                   with new results.
-    - `positions`: The positional embeddings that track the relative position within
-                   the stack.
 
     **Methods**:
     1. **get(pointer_probabilities: torch.Tensor) -> torch.Tensor**:
@@ -281,19 +262,14 @@ class SubroutineStackTracker:
        - **Param**: `tensor` (Tensor): The new output from the subroutine execution
                     to be integrated into the main stack.
     """
-
     def __init__(self,
                  stack: torch.Tensor,
-                 layernorm: nn.LayerNorm,
-                 positions: torch.Tensor,
                  ):
         """
         :param stack: The current stack setup
-        :param layernorm: The layernorm to use when updating
         """
-        self.layernorm = layernorm
         self.stack = stack
-        self.positions = positions
+
     def get(self, pointer_probabilities: torch.Tensor)->torch.Tensor:
         """
         Gets the stack, based on the provided pointer probabilities.
@@ -351,13 +327,74 @@ class SubroutineStackTracker:
         # Get the stack
 
         stack = self.stack
+
+        # Extrapolate the stack update by how much the pointer is active.
+        tensor = tensor.unsqueeze(0)*pointer_probabilities.unsqueeze(-1)
+        update = stack*(1-pointer_probabilities.unsqueeze(-1))
+        stack = tensor + update
+
+        # Store
+        self.stack = stack
+
+
+class SubroutineEmbeddingTracker(SubroutineStateTracker):
+    """
+    Manages the context of virtual layers and the embeddings flowing through them.
+    Extends the SubroutineStateTracker to ALSO handle the add plus layernorm responsibility
+    that embeddings need to be run through
+
+    **Additional Responsibilties**:
+
+       In addition to what is defined in subroutine state tracker,
+       After each subroutine call (handled by external computation), this class
+       manages the residual bypass operation, integrating the results of the
+       subroutine call into the original layer's context using an add + layernorm
+       operation. This normalization ensures stability and consistency between
+       layers.
+
+    **Constructor Parameters**:
+    - `stack`: The current stack setup, containing the context of subroutines and
+               layers.
+    - `layernorm`: The layer normalization function applied after updating the stack
+                   with new results.
+    - `positions`: The positional embeddings that track the relative position within
+                   the stack
+    """
+
+    def __init__(self,
+                 stack: torch.Tensor,
+                 layernorm: nn.LayerNorm,
+                 positions: torch.Tensor,
+                 ):
+        """
+        :param stack: The current stack setup
+        :param layernorm: The layernorm to use when updating
+        """
+        super().__init__(stack)
+        self.layernorm = layernorm
+        self.positions = positions
+
+    def update(self,
+               pointer_probabilities: torch.Tensor,
+               tensor: torch.Tensor):
+        """
+        Performs an update step, integrating the new tensor and performing
+        the add+layernorm. This will resolve the layer.
+        :param pointer_probabilities: The existing pointer probabilities. Shape (size, ...)
+        :param tensor: The tensor to integrate. Shape (..., d_model)
+        """
+        # Get the stack
+
+        stack = self.stack
+
         # Perform the process of actually computing an update, by integrating the existing
         # features then adding plus layernorming.
         update = tensor.unsqueeze(0) + stack + self.positions
         update = self.layernorm(update)
 
         # Extrapolate the stack update by how much the pointer is active.
-        stack = stack*(1-pointer_probabilities.unsqueeze(-1))+update*pointer_probabilities.unsqueeze(-1)
+        stack = stack*(1-pointer_probabilities.unsqueeze(-1)) \
+                +update*pointer_probabilities.unsqueeze(-1)
 
         # Store
         self.stack = stack
@@ -417,7 +454,7 @@ class DifferentiableSubroutineStack:
     def __init__(self,
                  action_manager: ActionsManagement,
                  pointers: ProbabilisticPointers,
-                 stack: SubroutineStackTracker
+                 stack: SubroutineStateTracker
                  ):
 
         self.action_manager = action_manager
@@ -520,7 +557,8 @@ class SubroutineStackFactory(nn.Module):
     def forward(self,
                 tensor: torch.Tensor,
                 min_iterations_before_destack: int,
-                computation_limit: int) -> DifferentiableSubroutineStack:
+                computation_limit: int,
+                is_embedding: bool) -> DifferentiableSubroutineStack:
         """
         Creates a differentiable subroutine stack.
 
@@ -534,6 +572,7 @@ class SubroutineStackFactory(nn.Module):
             - Ensures that the stack is not popped until some minimum number of operations have occurred.
         :param computation_limit: Maximum number of iterations allowed before the stack
             forces a flush (destack operation).
+        :param is_embedding: Whether this is embedding state, or just computational state.
         :return: An instance of DifferentiableSubroutineStack, initialized with probabilities,
                  stack tensors, and position markers.
         """
@@ -558,7 +597,10 @@ class SubroutineStackFactory(nn.Module):
         while stack_pos_markers.dim() < stack.dim():
             stack_pos_markers = stack_pos_markers.unsqueeze(1)
 
-        stack_data = SubroutineStackTracker(stack, self.layernorm, stack_pos_markers)
+        if is_embedding:
+            stack_data = SubroutineEmbeddingTracker(stack, self.layernorm, stack_pos_markers)
+        else:
+            stack_data = SubroutineStateTracker(stack)
 
         # Step 3: Configure the actions feature, that manages statistics
         # computing actions and masking.

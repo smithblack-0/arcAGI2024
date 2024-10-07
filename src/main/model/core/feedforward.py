@@ -1,7 +1,7 @@
 import torch
 from torch import nn
-from typing import Optional, Tuple
-from .base import BankedLinear, BankSelector
+from typing import Optional
+from src.main.model.banks import BankedLinear, BankSelector
 
 class Feedforward(nn.Module):
     """

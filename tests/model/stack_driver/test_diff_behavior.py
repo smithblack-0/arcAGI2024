@@ -3,7 +3,9 @@ import torch.nn as nn
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
+from src.main.model.subroutine_driver import SubroutineDriver, SubroutineCore
 import unittest
+
 
 # Load Titanic dataset
 titanic = pd.read_csv('titanic.csv')
@@ -35,43 +37,20 @@ y_train = torch.tensor(y_train.values, dtype=torch.float32).unsqueeze(1)
 y_test = torch.tensor(y_test.values, dtype=torch.float32).unsqueeze(1)
 
 
-class TitanicSubroutineCore(nn.Module):
+class TitanicSubroutineCore(SubroutineCore):
     """
     A simple feedforward core for decision making.
     """
     def __init__(self, d_model: int):
         super().__init__()
         self.ffn = nn.Sequential(
-            nn.Linear(d_model, 64),
+            nn.Linear(d_model, 256),
             nn.ReLU(),
-            nn.Linear(64, 1)
+            nn.Linear(256, d_model)
         )
 
     def setup_state(self, tensor: torch.Tensor):
-        # This model doesn't require a complex state, just return None
-        return {}
-
-    def forward(self, tensor: torch.Tensor, states: dict):
-        """
-        Perform forward pass for the model.
-        """
-        out = self.ffn(tensor)
-        return out, states
-
-class TitanicSubroutineCore(nn.Module):
-    """
-    A simple feedforward core for decision making.
-    """
-    def __init__(self, d_model: int):
-        super().__init__()
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1)
-        )
-
-    def setup_state(self, tensor: torch.Tensor):
-        # This model doesn't require a complex state, just return None
+        # This model doesn't require a complex state, just return empty
         return {}
 
     def forward(self, tensor: torch.Tensor, states: dict):

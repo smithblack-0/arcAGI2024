@@ -1,6 +1,6 @@
 import torch
 import unittest
-from src.main.model.core.subroutine_driver import ActionsManagement
+from src.main.model.subroutine_driver import ActionsManagement
 class TestActionsManagement(unittest.TestCase):
 
     def create_action_manager(self, num_times_before_pop, num_times_before_flush, stack_size, statistics):

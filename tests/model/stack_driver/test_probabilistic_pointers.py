@@ -1,6 +1,6 @@
 import torch
 import unittest
-from src.main.model.core.subroutine_driver import ProbabilisticPointers
+from src.main.model.subroutine_driver import ProbabilisticPointers
 class TestProbabilisticPointers(unittest.TestCase):
 
     def create_pointer_manager(self, initial_probabilities):

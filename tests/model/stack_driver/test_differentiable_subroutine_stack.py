@@ -1,6 +1,6 @@
 import torch
 import unittest
-from src.main.model.core.subroutine_driver import DifferentiableSubroutineStack, ActionsManagement, ProbabilisticPointers, \
+from src.main.model.subroutine_driver import DifferentiableSubroutineStack, ActionsManagement, ProbabilisticPointers, \
     SubroutineStackTracker
 
 
