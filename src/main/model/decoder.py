@@ -1,3 +1,9 @@
+"""
+Decoder parts:
+
+- Decode
+"""
+
 import torch
 from torch import nn
 from .cycle_layer import ContextCore, LogicCore
@@ -5,6 +11,9 @@ from .cycle_layer import ContextCore, LogicCore
 class DecodeCore(nn.Module):
     def __init__(self):
 
+
+class DecoderCore(nn.Module):
+    def forward(self):
 
 class DecoderCore(nn.Module):
     """
