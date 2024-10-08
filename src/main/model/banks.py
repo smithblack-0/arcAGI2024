@@ -2,7 +2,70 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from typing import Tuple, List, Dict
+from abc import abstractmethod
 from .base import StatefulCore, TensorTree
+
+"""
+The banks moduled is generally centered around selecting,
+managing, and using parallel collections of probabilities
+known as "banks".
+"""
+
+
+
+
+class DropoutLogits(nn.Module):
+    """
+    A dropout varient designed to operate on logits. It operates by
+    masking to large negative values. This ensures that the softmax
+    of these logits will be very small, as close to zero as is feasable.
+    """
+    def __init__(self,
+                 probability: float = 0.2,
+                 mask_value: float = -1e11
+                 ):
+        super().__init__()
+        self.probability = probability
+        self.mask_value = mask_value
+
+    def forward(self, logits: torch.Tensor) -> torch.Tensor:
+        """
+        Performs the dropout process, if in eval mode.
+        :param logits: The logits to dropout
+        :return: The logits with the mask applied
+        """
+        if self.training:
+            # Dropout happens only when training.
+            mask = torch.rand_like(logits) < self.probability
+            logits = logits.masked_fill(mask, self.mask_value)
+        return logits
+
+class GumbelLogits(nn.Module):
+    """
+    A gumbel permutation of the incoming logits.
+    """
+
+    def sample_gumbel(self,
+                      logits: torch.Tensor,
+                      ) -> torch.Tensor:
+        """
+        Samples Gumbel noise from Gumbel(0, 1)
+
+        :param logits: The logits to make noise as.
+        :return: The sampled gumbel noise.
+        """
+        U = torch.rand(logits.shape, device=logits.device)
+        return -torch.log(-torch.log(U + self.eps) + self.eps)
+
+    def __init__(self, eps: float = 1e-20):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, logits: torch.Tensor) -> torch.Tensor:
+        return logits + self.sample_gumbel(logits)
+
+
+
 
 
 class BankedLinear(nn.Module):
@@ -35,7 +98,10 @@ class BankedLinear(nn.Module):
     def extract_weights(self, bank_selection: torch.Tensor)->torch.Tensor:
         """
         Extracts the weights needed to run the process with the given bank
-        selections.
+        selections. In particular, extracts a batched dense matrix kernel.
+        Keep in mind, however, this kernel may have a multidimensional batch
+        shape.
+
         :param bank_selection:
             - The given bank selections.
             - Shape (..., banks_selected)
@@ -49,7 +115,9 @@ class BankedLinear(nn.Module):
     def extract_bias(self, bank_selection: torch.Tensor)->torch.Tensor:
         """
         Extracts the bias needed to run the process with the given bank
-        selections.
+        selections. In particular, extracts a batched dense bias kernel.
+        Keep in mind, however, this kernel may be attached to multidimensional
+        batches.
         :param bank_selection:
             - The given bank selections.
             - Shape (..., banks_selected)
@@ -110,160 +178,241 @@ class BankedLinear(nn.Module):
 
 class AbstractBankSelector(StatefulCore):
     """
-    Promises to select one of several banks.
-    """
-class BankSelector(nn.Module):
-    """
-    Selects one of N integers, where these integers
-    would generally be corrolated with a bank of
-    parameters of some kind.
+    Promises to consider the incoming embedding and select a subset
+    of the N banks to consider. We will end up returing the banks
+    selected, and the probabilities associated
     """
     def __init__(self,
                  d_model: int,
                  bank_size: int,
-                 statistic_weight: float = 0.001,
+                 top_k: int,
+                 dropout: float = 0.2,
+                 gumbel: bool = False,
+                 statistics_weight: float = 0.001,
                  device: torch.device = None,
                  dtype: torch.dtype = None
                  ):
-        """
-        Chooses the top k out of banks, and optionally normalizes
-        the selection to encourage even use of all parameter banks.
 
-        :param d_model: The size of the model that will be used to make projections
-        :param bank_size: The size of the bak that can be chosen from
-        :param statistic_weight: The weight to use when performing our statistical running average
-        """
+        assert top_k <= bank_size
 
-        super().__init__()
-        self.d_model = d_model
-        self.logit_projector = nn.Linear(self.d_model, bank_size, device=device, dtype=dtype)
-        self.bank_statistics = torch.zeros([bank_size], device=device, dtype=dtype)
-        self.statistics_weight = statistic_weight
-
-    def forward(self,
-                tensor: torch.Tensor,
-                top_k: int,
-                ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Select bank to use
-        :param tensor: The tensor. Shape (..., d_model)
-        :param top_k: The number of banks to choose from. int
-        :return:
-            - The chosen banks. (..., top_k)
-            - The probabilistic weights. (..., top_k)
-        """
-        # Compute the output
-        logits = self.logit_projector(tensor)
-        top_values, top_indices = torch.topk(logits, top_k)
-        top_probabilities = torch.softmax(top_values, dim=-1)
-
-        # Compute, cache the access statistics
-        bank_probabilities = torch.zeros_like(logits)
-        bank_probabilities.scatter_(-1, top_indices, top_probabilities)
-
-        access_statistics = bank_probabilities.flatten(0, -2).mean(dim=0)
-        self.bank_statistics = self.bank_statistics*(1-self.statistics_weight) \
-                               + access_statistics*self.statistics_weight
-
-        # Return
-        return top_probabilities, top_indices
-
-class PseudoMarkovBankSelector(StatefulCore):
-    """
-    A finite state machine version of the bank selector, it keeps track
-    of the probabilities which we last selected our banks with, and influenced
-    what we can become next using transition probabilities.
-    """
-    def setup_state(self, tensor: torch.Tensor) -> TensorTree:
-        """
-        Sets up the state based on the incoming tensors. We will end up with
-        a markov probability bank of similar shape, excluding data dims
-        :param tensor: The tensor to setup the probability bank over. Shape (..., embeddings)
-        :return: The setup states. Shape (num_banks, ....)
-        """
-        # Create banks
-        state_probabilities = torch.zeros([self.bank_size] +list(tensor.shape[:-1]),
-                                          device=tensor.device, dtype=tensor.dtype)
-
-        # Initialize in first state.
-        state_probabilities[0] = 1.0
-
-        return state_probabilities
-
-    def __init__(self,
-                 d_model: int,
-                 bank_size: int,
-                 statistic_weight: float = 0.001,
-                 top_k: int = 4,
-                 device: torch.device = None,
-                 dtype: torch.dtype = None
-                 ):
-        """
-        Chooses the top k out of banks, and optionally normalizes
-        the selection to encourage even use of all parameter banks.
-
-        :param d_model: The size of the model that will be used to make projections
-        :param bank_size: The size of the bak that can be chosen from
-        :param statistic_weight: The weight to use when performing our statistical running average
-        """
-
-        super().__init__()
+        # Store
         self.d_model = d_model
         self.bank_size = bank_size
+        self.statistics_weights = statistics_weight
+        self.device = device
+        self.dtype = dtype
+        self.gumbel = gumbel
         self.top_k = top_k
 
-        # Define the layers and parameters
-        self.logit_projector = nn.Linear(self.d_model, bank_size, device=device, dtype=dtype)
-        self.transitions = nn.Linear(self.bank_size, bank_size, device=device, dtype=dtype)
+        # Setup
 
-        # Define statistics behaviors
+        self.dropout_logits = DropoutLogits(dropout)
+        if gumbel:
+            self.gumbel_logits = GumbelLogits()
+
+        # Setup statistics bank.
         self.bank_statistics = torch.zeros([bank_size], device=device, dtype=dtype)
-        self.statistics_weight = statistic_weight
 
-    def get_transition_logits(self, state_probabilities: torch.Tensor)->torch.Tensor:
-        """
-        Creates the relevant transition logits out of the current transition probabilities.
-        These logits can then influence what can be transitioned to
 
-        :param state_probabilities: The current probabilities. Shape (banks, ...)
-        :return: The transition logits, for each transition. Shape (banks, ...)
+    @abstractmethod
+    def create_bank_logits(self,
+                           embeddings: torch.Tensor,
+                           state: TensorTree) -> torch.Tensor:
         """
-        return self.transitions(state_probabilities)
-    def forward(self,
-                tensor: torch.Tensor,
-                states: TensorTree) ->Tuple[
-                                                                  Tuple[torch.Tensor, TensorTree],
-                                                                  TensorTree]:
-        """
-        Performs the pseudo markov bank selection, returing the probabilities then the banks
-        :param tensor: The tensor of embeddings to use when making the decision
-        :param states: The last state. Tensor. Shape (banks, ...). Probabilities
+        Creates the bank logits that will be used in further selection processes.
+        An abstract method that must be implemented. You must return both the
+        logits and a state feature. The state feature may, however, be the same
+        as you passed in
+
+        :param embeddings: The embeddings. (..., d_model)
+        :param state: Any state you wish to use
         :return:
-            - The probabilities
-            - The banks
-            - The new state
+            - The logits. (..., bank_size)
+            - The state. Whatever you need
         """
 
-        # Compute bank probabilities
-        logits = self.logit_projector(tensor)
-        logits += self.get_transition_logits(states)
+    @abstractmethod
+    def update_state(self, bank_probabilities: torch.Tensor, state: TensorTree)->TensorTree:
+        """
+        Some classes may use the computed bank probabilities to update their state.
+        :param bank_probabilities: The probability of each bank being selected
+        :param state: The last state.
+        :return: The new state
+        """
 
-        # Compute probabilities and tops
-        top_values, top_indices = torch.topk(logits, self.top_k)
-        top_probabilities = torch.softmax(top_values, dim=-1)
+    def create_bank_probabilities(self,
+                                  sparse_probabiliities: torch.Tensor,
+                                  sparse_indices: torch.Tensor
+                                  )->torch.Tensor:
+        """
+        :param sparse_probabiliities: The weights. Should sum up to 1. Shape (..., sparse))
+        :param sparse_indices: The index of these weights in the banks. Shape (..,, sparse)
+        :return: The full bank. Shape (..., bank_size)
+        """
+        bank_probabilities = torch.zeros(list(sparse_probabiliities.shape[:-1]) + [self.bank_size],
+                                         device=sparse_probabiliities.device, dtype=sparse_probabiliities.dtype)
+        bank_probabilities.scatter_(-1, sparse_indices, sparse_probabiliities)
 
-        # Compute bank probabilities
-        bank_probabilities = torch.zeros_like(logits)
-        bank_probabilities.scatter_(-1, top_indices, top_probabilities)
+        return bank_probabilities
 
-        # Compute, cache the access statistics
-        access_statistics = bank_probabilities.flatten(0, -2).mean(dim=0)
-        self.bank_statistics = self.bank_statistics*(1-self.statistics_weight) \
-                               + access_statistics*self.statistics_weight
+    def update_bank_statistics(self, bank_probabilities):
+        """
+        Updates the bank statistics based on the provided bank probabilities
+        :param bank_probabilities: The probabilities. Per bank. Shape (..., bank_size)
+        """
+        bank_probabilities = bank_probabilities.flatten(0, -2) #flatten until only two dimensions are left
+        bank_probabilities = bank_probabilities.mean(dim=0) # Then take the mean over them all
+        self.bank_statistics = self.bank_statistics*(1 - self.statistics_weights) \
+                                + bank_probabilities*self.statistics_weights # And update the running average
 
-        # Return
-        return (top_probabilities, top_indices), bank_probabilities
+    @abstractmethod
+    def forward(self, embeddings: torch.Tensor, states: TensorTree
+                )->Tuple[Tuple[torch.Tensor, torch.Tensor], TensorTree]:
+        """
+        Performs the forward pass. Handles accumulating statistics for monitoring or
+        loss purposes.
 
+        :param embeddings: The embeddings we need to work with to make the selection
+        :param states: Any state we need to use
+        :return:
+            - Tuple
+                - The selection weight
+                - The selected bank indices
+            - State:
+                - Whatever you need to keep track of between selections. Can be minimal
+        """
+
+        # Get logits
+        logits = self.create_bank_logits(embeddings, states)
+        assert logits.shape[-1] == self.bank_size
+
+        # Inject gumbel noise, if desired. Also, can perform dropout, if desired
+
+        if self.gumbel:
+            logits = self.gumbel_logits(logits)
+        logits = self.dropout_logits(logits)
+
+        # Find top candidates. Form them into probabilities.
+
+        top_logits, top_index = logits.topk(self.top_k)
+        top_probabilities = torch.softmax(top_logits, dim=-1)
+
+        # Update statistics
+        bank_probabilities = self.create_bank_probabilities(top_probabilities, top_index)
+        self.update_bank_statistics(bank_probabilities)
+
+        # Update state
+        states = self.update_state(bank_probabilities, states)
+
+        # return
+
+        return (top_probabilities, top_index), states
+
+class NaiveBankSelector(AbstractBankSelector):
+    """
+    A basic bank selector, that uses no state
+    in it's decisions. Instead, it bases it's decision
+    entirely off of the embeddings it sees.
+    """
+    def setup_state(self, tensor: torch.Tensor) ->TensorTree:
+        # We just return a dictionary. This will result in no superposition.
+        return {}
+
+    def create_bank_logits(self,
+                           embeddings: torch.Tensor,
+                           state: TensorTree) -> torch.Tensor:
+        """
+        Computes the logits as a naive logit projection.
+
+        :param embeddings: The embeddings to use
+        :param state: The state.
+        :return: The logits
+        """
+
+        logits = self.logits_projector(embeddings)
+        return logits
+    def update_state(self, bank_probabilities: torch.Tensor, state: TensorTree) ->TensorTree:
+        """
+        Naive state. No need to change.
+        :param bank_probabilities:
+        :param state:
+        :return:
+        """
+        return state
+    def __init__(self,
+                 d_model: int,
+                 bank_size: int,
+                 top_k: int,
+                 statistics_weight: float = 0.001,
+                 dropout: float = 0.2,
+                 gumbel: bool = False,
+                 device: torch.device = None,
+                 dtype: torch.dtype = None,
+                 ):
+
+        super().__init__(d_model, bank_size, top_k, dropout, gumbel,
+                         statistics_weight, device, dtype)
+
+        self.logits_projector = nn.Linear(d_model, bank_size)
+
+class PseudoMarkovBankSelector(AbstractBankSelector):
+    """
+    The Pseudo Markov bank selector combines inputs based on the logits
+    of the embeddings with an overall transition probability due to the
+    markov state we are in.
+    """
+    def setup_state(self, tensor: torch.Tensor) ->TensorTree:
+        """
+        We setup a markov probability tensor tracking all the bank
+        states. We update this later on.
+
+        :param tensor: The tensor we are working with. Shape (..., embedding)
+        :return: A tensor of shape (..., bank_size)
+        """
+        state = torch.zeros(list(tensor.shape[:-1]) + [self.bank_size], device=tensor.device, dtype=tensor.dtype)
+        state[..., 0] = 1.0
+        return state
+
+    def create_bank_logits(self,
+                           embeddings: torch.Tensor,
+                           state: TensorTree) -> torch.Tensor:
+        """
+        Create the bank logits. We use the embeddings, and also
+        :param embeddings:
+        :param state:
+        :return:
+        """
+        bank_probabilities = state
+        logits = self.logits_projector(embeddings)
+        logits += self.transitions_projector(bank_probabilities)
+        return logits
+
+    def update_state(self, bank_probabilities: torch.Tensor, state: TensorTree) -> TensorTree:
+        """
+        The new state is just the new bank probabilities
+
+        :param bank_probabilities: The probabilities of each bank
+        :param state: Not used
+        :return: The new state
+        """
+        return bank_probabilities
+
+    def __init__(self,
+                 d_model: int,
+                 bank_size: int,
+                 top_k: int,
+                 statistics_weight: float = 0.001,
+                 dropout: float = 0.2,
+                 gumbel: bool = False,
+                 device: torch.device = None,
+                 dtype: torch.dtype = None,
+                 ):
+
+        super().__init__(d_model, bank_size, top_k, dropout, gumbel,
+                         statistics_weight, device, dtype)
+
+        self.logits_projector = nn.Linear(d_model, bank_size)
+        self.transitions_projector = nn.Linear(bank_size, bank_size)
 
 
 
