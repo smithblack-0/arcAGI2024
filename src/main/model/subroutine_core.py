@@ -9,6 +9,25 @@ from src.main.model.base import TensorTree, StatefulCore
 from src.main.model.banks import BankedLinear, AbstractBankSelector
 # Interface
 
+class MakeMemorySuperposition(StatefulCore):
+    """
+    Creates a memory superposition out of a memory
+    banks. This is done by examining the embeddings.
+
+    We make an assumption that memory banks are corrolated
+    """
+    def setup_state(self, tensor: torch.Tensor) ->TensorTree:
+
+
+
+
+class MemoryBankManager(StatefulCore):
+    """
+    A memory bank manager for a fast transformers memory colletion.
+    Promises to
+    """
+
+
 class TransformerMemoryCore(StatefulCore):
     """
     The abstract memory core implementation. It is assumed
@@ -37,6 +56,13 @@ class TransformerMemoryCore(StatefulCore):
             - The new embeddings
             - The new state
         """
+
+class BottleneckDriver(StatefulCore):
+    """
+    The bottleneck reduces us from a large latent space
+    to a smaller computational space. How this reduction is done,
+    however, can vary.
+    """
 class Subroutine(SubroutineCore):
     """
     The subroutine both contains the core bottleneck,
@@ -65,5 +91,12 @@ class Subroutine(SubroutineCore):
                  ):
         self.selector = bank_selector
         self.core = transformer_core
+
+    def forward(self,
+                tensor: torch.Tensor,
+                states: TensorTree,
+                **parameters) ->Tuple[torch.Tensor, TensorTree]:
+
+        selection, selector_state = self.selector(tensor, states)
 
 

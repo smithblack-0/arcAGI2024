@@ -27,12 +27,16 @@ class SubroutineCore(StatefulCore):
         :return: Whatever state we need. Can be none.
         """
     @abstractmethod
-    def forward(self, tensor: torch.Tensor, states: TensorTree)->Tuple[torch.Tensor, TensorTree]:
+    def forward(self,
+                tensor: torch.Tensor,
+                states: TensorTree,
+                **parameters)->Tuple[torch.Tensor, TensorTree]:
         """
         Performs the forward pass. Tensor is a tensor of embeddings, while states is any
         state information that needs to be tracked.
         :param tensor:
         :param states:
+        :param parameters: Any extra parameters
         :return:
         """
         pass

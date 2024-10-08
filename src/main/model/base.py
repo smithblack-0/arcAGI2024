@@ -1,4 +1,4 @@
-from typing import Union, List, Tuple, Dict
+from typing import Union, List, Tuple, Dict, Any
 from abc import ABC, abstractmethod
 
 import torch
@@ -30,13 +30,21 @@ class StatefulCore(nn.Module, ABC):
         :return: Whatever state we need. Can be none.
         """
     @abstractmethod
-    def forward(self, tensor: torch.Tensor, states: TensorTree)->Tuple[torch.Tensor, TensorTree]:
+    def forward(self,
+                embedding: torch.Tensor,
+                states: TensorTree,
+                *parameters: Any)->Tuple[torch.Tensor, TensorTree]:
         """
         Performs the forward pass. Tensor is a tensor of embeddings, while states is any
         state information that needs to be tracked.
-        :param tensor:
-        :param states:
+        :param tensor: The embedding we are processing
+        :param states: The states, if any, associated with the embedding
+        :param parameters: Any additional parameters we might need
         :return:
         """
         pass
 
+class RecurrentLinearAttention(nn.Module):
+    """
+
+    """

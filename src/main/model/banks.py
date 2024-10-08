@@ -1,8 +1,8 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from typing import Tuple, List, Dict
-from abc import abstractmethod
+from typing import Tuple, List, Dict, Any, Optional
+from abc import abstractmethod, ABC
 from .base import StatefulCore, TensorTree
 
 """
@@ -40,52 +40,48 @@ class DropoutLogits(nn.Module):
             logits = logits.masked_fill(mask, self.mask_value)
         return logits
 
-class GumbelLogits(nn.Module):
-    """
-    A gumbel permutation of the incoming logits.
-    """
-
-    def sample_gumbel(self,
-                      logits: torch.Tensor,
-                      ) -> torch.Tensor:
-        """
-        Samples Gumbel noise from Gumbel(0, 1)
-
-        :param logits: The logits to make noise as.
-        :return: The sampled gumbel noise.
-        """
-        U = torch.rand(logits.shape, device=logits.device)
-        return -torch.log(-torch.log(U + self.eps) + self.eps)
-
-    def __init__(self, eps: float = 1e-20):
-        super().__init__()
-        self.eps = eps
-
-    def forward(self, logits: torch.Tensor) -> torch.Tensor:
-        return logits + self.sample_gumbel(logits)
-
-
-
-
-
 class BankedLinear(nn.Module):
     """
-    A linear designed and expected to receive bank
-    selection information.
+    "Banks" are sets of parallel kernels that essencially
+    allow layers to be sideways, and dynamically selected
+    as a computation proceeds. They exist to allow the same
+    or similar layers to do many different processes.
+
+    Banks are sparsely specified in terms of the index of the
+    banks we want to use. We do, however, expect the bank
+    dimension to already exist.
     """
     def __init__(self,
                  in_features,
                  out_features,
                  num_banks: int,
+                 expand: bool = False,
+                 squeeze: bool = False,
                  dtype: torch.dtype = None,
                  device: torch.device = None
                  ):
+        """
+        Init.
+
+        :param in_features: Number of incoming features on the tensor
+        :param out_features: Number of outgoing features on the tensor
+        :param num_banks: The number of banks we will be dealing with.
+
+        :param expand: Whether the incoming tensor already has a bank dimension in place, or we should add it
+        :parem squeeze: Whether we want to get rid of the bank dimensions by the end of this.
+
+        :param dtype: The dtype
+        :param device: The device
+        """
 
         super(BankedLinear, self).__init__()
 
         self.in_features = in_features
         self.out_features = out_features
         self.num_banks = num_banks
+
+        self.expand = expand
+        self.contract = squeeze
 
         # Create weights banks
         self.weights = nn.Parameter(torch.zeros([num_banks, in_features, out_features],
@@ -130,32 +126,36 @@ class BankedLinear(nn.Module):
 
     def forward(self,
                 tensor: torch.Tensor,
-                bank_weights: torch.Tensor,
-                bank_selections: torch.Tensor) -> torch.Tensor:
+                selection: Tuple[torch.Tensor, torch.Tensor]
+                ) -> torch.Tensor:
         """
         Runs the given tensor using the selected parameter banks. Note that ...only indicates
         dimensions that can be present on the incoming tensor, but not the banks, in case you
         wish to get clever.
 
-        :param tensor: The tensor to process. Shape (..., ...only, in_features)
-        :param bank_selections: The banks that were selected.  Shape (...,  banks_selected). Integers
-        :param bank_weights: The weights to use when combining the banks. Shape (..., banks_selected)
+        :param tensor: The tensor to process.
+            - Shape (..., ...only, in_features), when expand is true
+            - Shape (..., ...only, bank_select, in_feature) when expand is false.
+        :param selection: Two things, in this order.
+            - sparse_bank_selections: The banks that were selected.  Shape (...,  banks_selected). Integers
+            - sparse_bank_probabilities: The weights to use when combining the banks. Shape (..., banks_selected)
         :return:
-            - Shape (..., ...only, out_features)
+            - Shape (..., ...only, out_features) when contract is true
+            - Shape (..., ...only, bank_select, out_feature) when contract is false
             - Result of dense plus add plus combine
         """
-        # Basic asserts
-        assert bank_selections.shape == bank_weights.shape
-        assert bank_selections.shape[:-1] == tensor.shape[:(bank_selections.dim() - 1)]
+        bank_selections, bank_probabilities = selection
 
-        # Add bank tensor position. Unsqueeze bank select to be ready to perform select
+        #Unsqueeze for extra dimension if dealing with expand condition
+        if self.expand:
+            tensor = tensor.unsqueeze(-2)  # (...,...only, 1, in_features)
 
-        tensor = tensor.unsqueeze(-2) #(...,...only, 1, in_features)
+        # Unsqueeze bank select to be ready to perform select
         while bank_selections.dim() < tensor.dim() - 1:
             bank_selections = bank_selections.unsqueeze(-2)
-            bank_weights = bank_weights.unsqueeze(-2)
+            bank_probabilities = bank_probabilities.unsqueeze(-2)
 
-        # Perform matmul
+        # Get kernels
 
         weights = self.extract_weights(bank_selections)  #(..., banks_selected, in_features, out_features)
         bias = self.extract_bias(bank_selections) #(..., banks_selected, out_features)
@@ -169,11 +169,48 @@ class BankedLinear(nn.Module):
 
         tensor = tensor + bias #(..., banks_selected, out_features)
 
-        # Combine banks
-        tensor = torch.sum(tensor*bank_weights.unsqueeze(-1), dim=-2)
+        # If contract, combine banks
+        if self.contract:
+            tensor = torch.sum(tensor * bank_probabilities.unsqueeze(-1), dim=-2)
 
         # Return
         return tensor
+
+class AbstractBankSelector(nn.Module, ABC):
+    """
+    The abstract bank selector class. Capable of sparsely
+    selecting banks of things to work with. Responsible for
+    using a provided embeddings tensor for making such a
+    determination.
+    """
+    @abstractmethod
+    def setup_state(self, embeddings: torch.Tensor):
+        """
+        Sets up the state we will be using, if any
+        :param embeddings: The example embeddings
+        :return: The state
+        """
+
+    @abstractmethod
+    def create_bank_probabilities(self,
+                                  embeddings: torch.Tensor,
+                                  state: TensorTree,
+                                  *parameters: Any
+                                  )->Tuple[torch.Tensor, TensorTree]:
+        """
+        Create and return bank probabilities, from the current situation.
+
+        :param embeddings: The embeddings we can generate from.
+        :param state: Any state that is needed
+        :param parameters: Any passed parameters
+        :return: The bank probabilities
+        """
+    def __init__(self,
+                 dropout_probability: float = 0.0,
+                 running_ave_weight: float = 0.001):
+
+        self.dropout = nn.Dropout(dropout_probability)
+        self.ave_weight = running_ave_weight
 
 
 class AbstractBankSelector(StatefulCore):
@@ -187,7 +224,6 @@ class AbstractBankSelector(StatefulCore):
                  bank_size: int,
                  top_k: int,
                  dropout: float = 0.2,
-                 gumbel: bool = False,
                  statistics_weight: float = 0.001,
                  device: torch.device = None,
                  dtype: torch.dtype = None
@@ -201,14 +237,11 @@ class AbstractBankSelector(StatefulCore):
         self.statistics_weights = statistics_weight
         self.device = device
         self.dtype = dtype
-        self.gumbel = gumbel
         self.top_k = top_k
 
         # Setup
 
         self.dropout_logits = DropoutLogits(dropout)
-        if gumbel:
-            self.gumbel_logits = GumbelLogits()
 
         # Setup statistics bank.
         self.bank_statistics = torch.zeros([bank_size], device=device, dtype=dtype)
@@ -286,10 +319,8 @@ class AbstractBankSelector(StatefulCore):
         logits = self.create_bank_logits(embeddings, states)
         assert logits.shape[-1] == self.bank_size
 
-        # Inject gumbel noise, if desired. Also, can perform dropout, if desired
+        # Perform logit dropout.
 
-        if self.gumbel:
-            logits = self.gumbel_logits(logits)
         logits = self.dropout_logits(logits)
 
         # Find top candidates. Form them into probabilities.
