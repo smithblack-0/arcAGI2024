@@ -176,6 +176,87 @@ class BankedLinear(nn.Module):
         # Return
         return tensor
 
+def banked_state_select(state: torch.Tensor,
+                      selection: Tuple[torch.Tensor, torch.Tensor],
+                      dim: int) -> torch.Tensor:
+    """
+    Performs a broadcasted banked select along the specified dimension.
+
+    :param state: The state to select from. Should have shape (...batch, ..., options, ...)
+    :param selection: The selection. Made up of:
+        - index: The index to select. Shape (...batch, selected)
+        - probabilities: Not used. Shape (...batch, selected)
+    :param dim: The dimension to perform the selection along.
+    :return: The selected features. Shape (...batch, ..., selected, ...)
+    """
+
+    # Unpack selection tuple
+    indices, _ = selection  # Ignore probabilities for now
+
+    # Move the selection dim to the end of the state tensor
+    state = state.swapdims(dim, -1)  # (...batch, ..., options)
+
+    # Ensure indices has the correct number of dimensions
+    while indices.dim() < state.dim():
+        indices = indices.unsqueeze(-2)
+
+    # Expand indices to match the state tensor, excluding the last dimension
+    indices = indices.expand(*state.shape[:-1], indices.shape[-1])  # (...batch, ..., selections)
+
+    # Perform gather on the last dimension (which used to be dim)
+    selected_state = state.gather(-1, indices)  # (...batch, ..., selections)
+
+    # Restore the original dimension order by swapping back
+    selected_state = selected_state.swapdims(-1, dim)
+
+    return selected_state
+def banked_state_scatter(state: torch.Tensor,
+                          substate: torch.Tensor,
+                          selection: Tuple[torch.Tensor, torch.Tensor],
+                          dim: int) -> torch.Tensor:
+    """
+    Inserts substate into the state based on the selection along the specified dimension,
+    using interpolation controlled by the selection probabilities.
+
+    :param state: The original state tensor. Shape (...batch, ..., options, ...)
+    :param substate: The substate tensor to insert. Shape (...batch, ..., selected, ...)
+    :param selection: A tuple consisting of:
+        - indices: The indices to select. Shape (...batch, selected)
+        - probabilities: The interpolation weights. Shape (...batch, selected)
+    :param dim: The dimension to perform the selection along.
+    :return: The updated state tensor with the substate inserted using interpolation.
+    """
+
+    indices, probabilities = selection
+
+    # Move the selection dim to the end of the state tensor for easier processing
+    state = state.swapdims(dim, -1)  # (...batch, ..., options)
+    substate = substate.swapdims(dim, -1) #(...batch, ..., selections
+
+    # Ensure indices has the correct number of dimensions for broadcasting
+    while indices.dim() < state.dim():
+        indices = indices.unsqueeze(-2)
+        probabilities = probabilities.unsqueeze(-2)
+
+    # Expand indices and probabilities to match the state tensor
+    indices = indices.expand(*state.shape[:-1], indices.shape[-1])  # (...batch, ..., selections)
+    probabilities = probabilities.expand(*state.shape[:-1], probabilities.shape[-1])  # (...batch, ..., selections)
+
+    # Gather the current state values at the specified indices
+    gathered_state = state.gather(-1, indices)  # (...batch, ..., selections)
+
+    # Perform interpolation between the gathered state and the substate using probabilities
+    interpolated = (1 - probabilities) * gathered_state + probabilities * substate  # (...batch, ..., selections)
+
+    # Scatter the interpolated values back into the original state tensor
+    state = state.scatter(-1, indices, interpolated)
+
+    # Restore the original dimension order by swapping back
+    state = state.swapdims(-1, dim)
+
+    return state
+
+
 class AbstractBankSelector(nn.Module, ABC):
     """
     The abstract bank selector class. Capable of sparsely

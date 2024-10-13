@@ -2,13 +2,17 @@ import torch
 from torch import nn
 from typing import List, Dict, Tuple, Any, Union, Optional, Callable
 from abc import ABC, abstractmethod
+from .subroutine_stubs import SubroutineManager
 
-from src.main.model.base import TensorTree,StatefulCore
+from src.main.model.base import TensorTree, StatefulCore
 
 StackTree = Union['DifferentiableStack',
                  List['StackTree'],
                  Tuple['StackTree', ...],
                  Dict[str, 'StackTree']]
+
+
+# Define user features.
 class SubroutineCore(StatefulCore):
     """
     The interface for the computational engine that can be
@@ -40,8 +44,6 @@ class SubroutineCore(StatefulCore):
         :return:
         """
         pass
-
-
 
 class ActionsManagement:
     """
@@ -267,6 +269,55 @@ class SubroutineStateTracker:
                     to be integrated into the main stack.
     """
     def __init__(self,
+                 stack: torch.Tensor
+                 ):
+        self.stack = stack
+
+    def
+
+
+class SubroutineStateTracker:
+    """
+    Manages the context of state stacks allowing retrieval and
+    insertion of new state based on the probabilistic pointers
+
+    **Core Responsibilities**:
+
+   The class is responsible for maintaining the stack context across subroutine
+   calls. Get can then be used to superimpose them together into something
+   that is differentiable, producing a differentiable call stack.
+
+    - `stack`: The current stack setup, containing the context of subroutines and
+               layers.
+
+    **Methods**:
+    1. **get(pointer_probabilities: torch.Tensor) -> torch.Tensor**:
+       Retrieves the superimposed stack state based on the probabilistic pointer
+       values. This method computes a weighted combination of the stack levels
+       (based on the probabilistic pointers) to return the current context.
+       - **Param**: `pointer_probabilities` (Tensor): The probabilistic pointers that
+                    distribute attention across stack levels.
+       - **Return**: The combined stack context, weighted by the pointer probabilities.
+
+    2. **change_superposition(pointer_probabilities: torch.Tensor, action_probabilities: torch.Tensor)**:
+       Modifies the stack based on the provided action probabilities. For the
+       destack action, the current subroutine context is erased from the stack,
+       cleaning up the virtual layer state.
+       - **Param**: `pointer_probabilities` (Tensor): The probabilistic pointers that
+                    represent the distribution across stack levels.
+       - **Param**: `action_probabilities` (Tensor): Probabilities indicating the
+                    action to take (enstack, no-op, or destack).
+
+    3. **update(pointer_probabilities: torch.Tensor, tensor: torch.Tensor)**:
+       Updates the stack by integrating the result of this level of subroutine execution with
+       the current stack context. The class performs an add + layernorm operation to
+       ensure smooth integration of the new tensor into the stack.
+       - **Param**: `pointer_probabilities` (Tensor): The probabilities representing
+                    the distribution across the stack levels.
+       - **Param**: `tensor` (Tensor): The new output from the subroutine execution
+                    to be integrated into the main stack.
+    """
+    def __init__(self,
                  stack: torch.Tensor,
                  ):
         """
@@ -339,6 +390,7 @@ class SubroutineStateTracker:
 
         # Store
         self.stack = stack
+
 
 
 class SubroutineEmbeddingTracker(SubroutineStateTracker):
