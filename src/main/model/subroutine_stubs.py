@@ -14,21 +14,27 @@ class CreateSubroutineStub(ABC):
     A subroutine is created while viewing the context
     from the superroutine. However, exactly how that
     is used might vary.
+
+    On an implementation level, you can imagine what we are
+    doing is providing possible initialization strategies. The
+    tensor we return has stack depth - each of the stack dimensions
+    tells us if you were to initialize a subroutine HERE with 100%
+    probability, what would the subroutine end up filled with.
     """
     @abstractmethod
     def create_subroutine(self,
-                          superroutine_context: torch.Tensor
+                          stack: torch.Tensor
                           ) -> torch.Tensor:
       """
       Create the subroutine context. This will be used to
       start running the subroutine.
 
-      :param superroutine_context: The context of the superroutine spawning
-             this subroutine.
-             - Shape (...)
-      :return: The context to run the subroutine in.
-            - Shape (...)
+      :param stack: The stack to manipulate. Shape (stack_depth, ...)
+      :return: The subroutine init content. NOT the new stack.
+        - If initialized per stack in stack depth
+        - Shape (stack_depth, ...)
       """
+
     def __call__(self, stack: torch.Tensor)->torch.Tensor:
         """
         Runs the create subroutine mechanism. Minimal error checking
@@ -45,54 +51,73 @@ class CreateSubroutineUsingDefaults(CreateSubroutineStub):
     to start in the same markov state. Presumably, other
     stack features are NOT set to the same default state
     each iteration.
-    """
 
-    #TODO: Consider engineering a mechanism that ensures the
-    # driver routine does not have to create a superposition
-    # it will not use.
+    In practice, we replicate the default state to fit
+    the stack shape. This can be chosen by downstream
+    differentiable probabilities, and incorporated
+    into updates under superposition.
+    """
     def __init__(self, default_state: torch.Tensor):
+        """
+        :param default_state: The default state to start in. can be broadcast later.
+        """
         super().__init__()
         self.default_state = default_state
 
-    def create_subroutine(self, super_routine_context: torch.Tensor) -> torch.Tensor:
+    def create_subroutine(self, stack: torch.Tensor) -> torch.Tensor:
         """
-        Creates subroutines with the default state as
-        their context.
+        Creates subroutines with the default state as their context
 
-        :param super_routine_context: The super routine context.
-            - Shape (...)
+        :param stack: The stack. Shape (stack_depth, ...)
         :return: The subroutine context.
+        - If initialized per stack in stack depth
+        - Shape (stack_depth, ...)
         """
+
         output = self.default_state
+        if stack.dim() > output.dim():
+            output = output.unsqueeze(0)
+        output = output.expand_as(stack)
         return output
 
 class CreateSubroutineUsingState(CreateSubroutineStub):
     """
     Creates a subroutine while copying the existing context.
+
+    In practice, we roll the stack one deeper, ensuring that
+    the new subroutine would have the old subroutine state if
+    initialized
     """
-    def create_subroutine(self, super_routine_state: torch.Tensor) -> torch.Tensor:
+    def create_subroutine(self, stack: torch.Tensor) -> torch.Tensor:
         """
         Creates a subroutine. The state will be based on the state of
         the super_routine.
-        :param super_routine_state: The super routine state. Shape (...)
-        :return: The new subroutine state. Shape ( ...)
+        :param stack: The subroutine stack. Shape (stack_depth, ...)
+        :return:
+        -  The proposed subroutine state
+        -  if we would make a subroutine at each stack location, we would fill it with this
+        - Shape (stack_depth, ...)
         """
-        # We literally just copy the super routine state
-        return super_routine_state
+        # Roll one deeper
+        stack = stack.roll(1, dims=0)
+
+        # The end of the stack rolled back into the beginning. Mask it
+        stack[0] = 0
+
+        return stack
 
 class CreateBlankSubroutine(CreateSubroutineStub):
     """
-    Creates a subroutine. The new subroutine is filled with zeros
+    Creates a subroutine. The new subroutine is filled with zeros.
     """
     def create_subroutine(self,
-                          super_routine_state: torch.Tensor
+                          stack: torch.Tensor
                           ) -> torch.Tensor:
         """
-        Creates a subroutine state. It is the superroutine state filled with zeros
-        :param super_routine_state: The super routine state. Shape (...)
-        :return: The new subroutine state. Shape ( ...)
+        :param stack: The stack state. Shape (stack_depth, ...)
+        :return: The proposed subroutine starting values. Shape (stack_depth, ...)
         """
-        return torch.zeros_like(super_routine_state)
+        return torch.zeros_like(stack)
 
 
 
@@ -101,35 +126,39 @@ class CreateBlankSubroutine(CreateSubroutineStub):
 class MaintainSubroutineStub(ABC):
     """
     Code responsible for maintaining the subroutine situation.
-    This will generally not change anything.
+
+    Usually, this should not do anything. Conceptually, though,
+    you can imagine it to indicate what the new subroutine stack
+    state should be if the one at the stack depth was x, and we had
+    the subroutine running there.
     """
 
     def __init__(self, **kwargs):
         super().__init__()
     @abstractmethod
-    def maintain_subroutine(self, state: torch.Tensor)->torch.Tensor:
+    def maintain_subroutine(self, stack: torch.Tensor)->torch.Tensor:
         """
         Maintains the subroutine
-        :param state: The state of the subroutine. Shape (...)
-        :return: The state of the  subroutine. Shape (...)
+        :param stack: The state of the subroutine. Shape (stack_depth, ...)
+        :return: The state of the  subroutine. Shape (stack_depth, ...)
         """
 
-    def __call__(self, state: torch.Tensor)->torch.Tensor:
+    def __call__(self, stack: torch.Tensor)->torch.Tensor:
         """
         Invokes the maintain subroute method
-        :param state: The state. Shape  (...)
-        :return: The state after the maintence action. Shape (...)
+        :param stack: The stack. Shape  (stack_depth, ...)
+        :return: The state after the maintence action. Shape (stack_depth, ...)
         """
-        output = self.maintain_subroutine(state)
-        assert output.shape == state.shape
+        output = self.maintain_subroutine(stack)
+        assert output.shape == stack.shape
         return output
 
 class MaintainSubroutine(MaintainSubroutineStub):
     """
     Maintains the existing subroutine without changes
     """
-    def maintain_subroutine(self, state: torch.Tensor) ->torch.Tensor:
-        return state
+    def maintain_subroutine(self, stack: torch.Tensor) ->torch.Tensor:
+        return stack
 
 
 # Return from subroutine
@@ -138,23 +167,29 @@ class ReturnFromSubroutineStub(ABC):
     """
     Responsible for performing the return from
     subroutine action. This can optionally mix the old
-    and new subroutine context.
+    and new subroutine context. Keep in mind that downstream
+    the update action will happen as well, which means you can
+    still integrate the "return" from a subroutine without needing
+    to integrate the process used to get there.
+
+    Implementation wise, we are returning a tensor that indicates
+    if we were to return from a subroutine to stack_depth location,
+    this is what the new content of the stack at that location would
+    be.
     """
-    def __init__(self, **kwargs):
+    def __init__(self):
         super().__init__()
 
     @abstractmethod
     def return_from_subroutine(self,
-                               caller_state: torch.Tensor,
-                               subroutine_state: torch.Tensor
+                               stack: torch.Tensor,
                                )->torch.Tensor:
         """
         Performs the return from subroutine action.
-        :param caller_state: The state that the subroutine was called from. Shape (...)
-        :param subroutine_state: The state of the current subroutine. Shape (...)
-        :return: The new caller state. Shape (...)
+        :param stack: The current stack. Shape (stack_depth, ...)
+        :return: The new proposed subroutine states. Shape (stack_depth, ...)
         """
-        
+
 
     def __call__(self, stack: torch.Tensor)->torch.Tensor:
         output = self.return_from_subroutine(stack)
@@ -165,68 +200,81 @@ class ReturnAndDiscardContext(ReturnFromSubroutineStub):
     """
     Performs a subroutine return without retaining
     any of the previous context. Instead, we simply
-    go back to the prior context. 
+    go back to the prior context.
+
+    This can be done by simply returning the provided stack, as
+    the downstream probability pointers will move us to point to
+    the right element.
     """
     def return_from_subroutine(self,
-                               caller_state: torch.Tensor,
-                               subroutine_state: torch.Tensor
+                               stack: torch.Tensor,
                                ) ->torch.Tensor:
         """
-        Return to the caller subroutine state. 
-        :param caller_state: The caller state
-        :param subroutine_state: The current state
-        :return: The new caller state
+        Return to the caller subroutine state.
+        :param stack: The current stack. Shape (stack_depth, ...)
+        :return: The new proposed subroutine states. Shape (stack_depth, ...)
         """
-        return caller_state
-    
+        return stack
+
 class ReturnAndMerge(ReturnFromSubroutineStub):
     """
-    Returns from the subroutine, and adds 
-    together the two contexts.
+    Returns from the subroutine, and adds
+    together the two contexts. This is done
+    with a roll.
+
+    We also mask out information that rolled off the
+    top of the stack.
     """
     def return_from_subroutine(self,
-                               caller_state: torch.Tensor,
-                               subroutine_state: torch.Tensor
+                               stack: torch.Tensor,
                                )->torch.Tensor:
         """
         Adds the two states together
-        :param caller_state: The caller state
-        :param subroutine_state: The subroutine state
-        :return: The combined state
+        :param stack: The current stack. Shape (stack_depth, ...)
+        :return: The new proposed subroutine states. Shape (stack_depth, ...)
+        :return: The combined state. Shape (stack_depth, ...)
         """
-        return caller_state + subroutine_state
-    
+        subroutine_context = stack.roll(-1, dims=0)
+        subroutine_context[-1] = 0
+        return stack + subroutine_context
+
 
 # Update mechanisms. Incorporates new information into the stack
 class UpdateStateStub(ABC):
     """
     Performs the state update mechanism, integrating
     new information from external locations into
-    this context level
+    this context level.
+
+    Implementationwise, we try all updates, then
+    return something which indicates if we integrated the
+    update into this stack depth, this is what the new
+    state would be.
     """
     @abstractmethod
     def update_state(self,
                      update: torch.Tensor,
-                     state: torch.Tensor
+                     options: torch.Tensor
                      )->torch.Tensor:
         """
         Will update the state. Merges somehow the
         update and state.
-        :param update: The update to make
-        :param state: The state to use.
-        :return: The new state
+        :param update: The update to integrate. Shape (...)
+        :param options: The options to use. Shape (stack_depth, ..., 3)
+        :return: The revised options. Shape (stack_depth, ..., 3)
         """
     def __call__(self,
                  update: torch.Tensor,
-                 state: torch.Tensor
+                 options: torch.Tensor
                  )->torch.Tensor:
         """
         Will update the existing state with new information.
         :param update: The update to incorporate into the stack.  Shape (...)
-        :param state: The state to update. Shape (...)
-        :return: The new stack. Shape (stack_depth, ...)"""
-        output = self.update_stack(update, state)
-        assert output.shape == state.shape
+        :param options: The options to use. Shape (stack_depth, ..., 3)
+        :return: The new options. Shape (stack_depth, ..., 3)
+        """
+        output = self.update_state(update, options)
+        assert output.shape == options.shape
         return output
 
 
@@ -240,17 +288,18 @@ class UpdateByAddLayernorm(UpdateStateStub):
         self.layernorm = layernorm
     def update_state(self,
                      update: torch.Tensor,
-                     state: torch.Tensor
+                     options: torch.Tensor
                      )->torch.Tensor:
         """
         Performs the actual update
         :param update: The update to apply. Shape (...)
-        :param state: The state to update. Shape (...)
+        :param options: The options to use. Shape (stack_depth, ..., 3)
         :return: The add plus layernorm based state.
         """
-        state = state + update
-        state = self.layernorm(state)
-        return state
+
+        options = options + update.unsqueeze(0).unsqueeze(-1)
+        stack = self.layernorm(options)
+        return stack
 
 class UpdateBySet(UpdateStateStub):
     """
@@ -260,36 +309,43 @@ class UpdateBySet(UpdateStateStub):
     """
     def update_state(self,
                      update: torch.Tensor,
-                     state: torch.Tensor
+                     options: torch.Tensor
                      )->torch.Tensor:
         """
         Performs the actual update
         :param update: The update to apply. Shape (...)
-        :param state: The state to update. Shape (...)
-        :return: The add plus layernorm based state.
+        :param options: The options to use. Shape (stack_depth, ..., 3)
+        :return: The update, as a direct set and replacement
         """
-        return update
+
+        update = update.unsqueeze(0).unsqueeze(-1)
+        return update.expand_as(options)
+
 
 
 # The actual subroutine interface itself
 
-class SubroutineManager:
+class SubroutineLogicStub:
     """
     Contains the four subroutine
-    actions we need in order to run the 
-    subroutine mechanism.
+    actions we need in order to run the
+    subroutine mechanism. Also contains
+    the seed state we will initially load the
+    subroutine with.
     """
     def __init__(self,
+                 seed_state: torch.Tensor,
                  create_subroutine: CreateSubroutineStub,
                  maintain_subroutine: MaintainSubroutineStub,
                  return_from_subroutine: ReturnFromSubroutineStub,
                  update_subroutine: UpdateStateStub
                  ):
+        self.seed_state = seed_state
         self.create_subroutine = create_subroutine
         self.maintain_subroutine = maintain_subroutine
         self.return_from_subroutine = return_from_subroutine
         self.update_subroutine = update_subroutine
-    
+
 # Factories
 
 
@@ -304,12 +360,12 @@ class SubroutineFactory(nn.Module, ABC):
         super().__init__()
 
     @abstractmethod
-    def forward(self, batch_shape: torch.Size)->SubroutineManager:
-        """
-        This needs to be implemented
-        :param batch_shape: The batch shape
-        :return: The working subroutine manager.
-        """
+    def forward(self,
+                *args,
+                **kwargs
+                )->SubroutineLogicStub:
+        pass
+
 # Create some of the presets
 
 class EmbeddingsManagerFactory(SubroutineFactory):
@@ -324,7 +380,9 @@ class EmbeddingsManagerFactory(SubroutineFactory):
                  ):
         super().__init__()
         self.layernorm = nn.LayerNorm(d_model)
-    def forward(self, batch_shape: torch.Size)->SubroutineManager:
+    def forward(self,
+                embedding: torch.Tensor,
+                batch_shape: torch.Size)->SubroutineLogicStub:
         """
         Sets up the subroutine manager.
         :param batch_shape: The shape of the batch portions of the incoming tensor
@@ -345,10 +403,11 @@ class EmbeddingsManagerFactory(SubroutineFactory):
 
         # Return the produced mechanism
 
-        return SubroutineManager(creation_routine,
-                                 maintenance_routine,
-                                 return_routine,
-                                 update_routine)
+        return SubroutineLogicStub(embedding,
+                                   creation_routine,
+                                   maintenance_routine,
+                                   return_routine,
+                                   update_routine)
 
 
 class SetStateManagerFactory(SubroutineFactory):
@@ -370,7 +429,7 @@ class SetStateManagerFactory(SubroutineFactory):
 
     def forward(self,
                 batch_shape: torch.Size
-                )->SubroutineManager:
+                )->SubroutineLogicStub:
         """
         Set up the state manager.
         :param batch_shape: The batch shape
@@ -407,11 +466,8 @@ class SetStateManagerFactory(SubroutineFactory):
 
         # Return
 
-        return SubroutineManager(creation_routine,
-                                 maintain_routine,
-                                 return_routine,
-                                 update_routine)
-
-
-        
+        return SubroutineLogicStub(creation_routine,
+                                   maintain_routine,
+                                   return_routine,
+                                   update_routine)
 
