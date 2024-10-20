@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from typing import List, Optional
 
-from src.main.model.core import LogicLayer
+from src.old.core import LogicLayer
 class LogicCore:
     """
     The logic core is a collection

@@ -1,12 +1,6 @@
 from typing import List, Dict
 
-from src.main.model.finite_state_machines.finite_state_operators import (ChannelNames,
-                                                                         FSMOperator,
-                                                                         TriggerPattern, Int,
-                                                                         ChangeStatePattern,
-                                                                         Matching, NotMatching,
-                                                                         CountUpWithRegroup,
-                                                                         WriteData)
+from src.old.finite_state_machines.finite_state_operators import (FSMOperator)
 
 
 def compile_vocabulary_lookup_table(operators: List[FSMOperator],

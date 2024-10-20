@@ -3,7 +3,7 @@ import torch
 from torch import nn
 from typing import Optional
 
-from src.main.model.core import Feedforward, LogicLayer, MultiheadedAttention
+from src.old.core import Feedforward, LogicLayer, MultiheadedAttention
 
 
 class CrossFetcherLayer(nn.Module):

@@ -1,8 +1,8 @@
 import torch
 from torch import nn
-from typing import List, Optional, Tuple
-from src.main.model.core import LogicLayer, MultiheadedAttention, Feedforward
-from src.main.model.cognitive_layers import ContextFetcher
+from typing import List, Optional
+from src.old.core import LogicLayer, MultiheadedAttention, Feedforward
+from src.old.cognitive_layers import ContextFetcher
 
 class DecoderLayer(nn.Module):
     """

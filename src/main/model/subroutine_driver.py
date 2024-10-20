@@ -83,14 +83,14 @@ SubroutineStubTree = Union[SubroutineLogicStub,
 # we can declare the type before we actually defined it in terms of line number.
 
 def make_stack_tree_type():
-    StackTree = Union[SubroutineStackTracker,
+    StackTree = Union['SubroutineStackTracker',
                      List['StackTree'],
                      Tuple['StackTree', ...],
                      Dict[str, 'StackTree']]
     return StackTree
 
 def make_accumulator_tree_type():
-    AccumulatorTree = Union[SubroutineAccumulator,
+    AccumulatorTree = Union['SubroutineAccumulator',
                             List['AccumulatorTree'],
                             Tuple['AccumulatorTree', ...],
                             Dict[str, 'AccumulatorTree']]
@@ -212,7 +212,7 @@ class ActionsProbabilities:
         self.gumbel_softmax = gumbel_softmax
     def __call__(self,
                  action_logits: torch.Tensor,
-                 gumbel_temperature: float,
+                 gumbel_temperature: float = 1.0
                  )->torch.Tensor:
         """
         :param action_logits: The action logits, used to make the action probabilities.
@@ -529,6 +529,8 @@ class SubroutineStatistics:
     def __init__(self,
 
                  ):
+        pass
+
 
 
 # Define important internal types

@@ -1,8 +1,8 @@
 import torch
 
 from torch import nn
-from typing import List, Dict, Any, Optional
-from src.main.model.core import MultiheadedAttention, Feedforward
+from typing import List, Optional
+from src.old.core import MultiheadedAttention, Feedforward
 
 class IncrementalDecoder:
     """

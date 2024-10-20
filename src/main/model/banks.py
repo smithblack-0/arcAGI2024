@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 from typing import Tuple, List, Dict, Any, Optional
 from abc import abstractmethod, ABC
-from .base import StatefulCore, TensorTree
+from src.main.model.base import StatefulCore, TensorTree
 
 """
 The banks moduled is generally centered around selecting,

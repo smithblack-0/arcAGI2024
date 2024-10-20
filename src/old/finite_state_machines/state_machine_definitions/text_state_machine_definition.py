@@ -1,12 +1,12 @@
-from typing import Dict, List, Union, Optional
+from typing import Dict, List
 
-from src.main.model.finite_state_machines.finite_state_operators import (ChannelNames,
-                                                                         FSMOperator,
-                                                                         TriggerPattern, Int,
-                                                                         ChangeStatePattern,
-                                                                         Matching, NotMatching,
-                                                                         CountUpWithRegroup,
-                                                                         WriteData)
+from src.old.finite_state_machines.finite_state_operators import (ChannelNames,
+                                                                  FSMOperator,
+                                                                  TriggerPattern, Int,
+                                                                  ChangeStatePattern,
+                                                                  Matching, NotMatching,
+                                                                  CountUpWithRegroup,
+                                                                  WriteData)
 
 
 def define_text_shape_select_operator(mode: int,

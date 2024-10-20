@@ -1,6 +1,7 @@
-import numpy as np
+import torch
 
 
-probabilities_1 = np.random.randn([10])
-probabilities_2 = np.random.randn([10])
-kernel = np.random.randn([10, 10, 10])
+
+insert = torch.randn([3, 5, ])
+embed = torch.diag_embed(insert, 0, -2, -1)
+print(embed.shape)

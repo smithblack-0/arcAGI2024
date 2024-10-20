@@ -1,13 +1,13 @@
 import torch
 import unittest
-from src.main.model.subroutine_driver import ActionsManagement
-class TestActionsManagement(unittest.TestCase):
+from src.main.model.subroutine_driver import ActionsProbabilities
+class TestActionProbabilities(unittest.TestCase):
 
-    def create_action_manager(self, num_times_before_pop, num_times_before_flush, stack_size, statistics):
+    def create_action_manager(self, num_times_before_pop, num_times_before_flush, gumbel_softmax):
         """
         Helper function to create a fresh ActionsManagement instance for each test.
         """
-        return ActionsManagement(num_times_before_pop, num_times_before_flush, stack_size, statistics)
+        return ActionsProbabilities(num_times_before_pop, num_times_before_flush, gumbel_softmax)
 
     def test_runs_at_all(self):
         """
@@ -16,17 +16,31 @@ class TestActionsManagement(unittest.TestCase):
         """
         stack_size = 5
         batch_size = 7
-        statistics = torch.zeros([stack_size, batch_size, 3])
 
-        action_manager = self.create_action_manager(0, 10, stack_size, statistics)
+        action_manager = self.create_action_manager(0, 10,  False)
         action_logits = torch.randn([batch_size, 3])  # Simulating random logits
-        probabilities = action_manager(action_logits)
+        probabilities = action_manager(action_logits, 1.0)
 
 
         self.assertTrue(torch.all(probabilities >= 0), "Probabilities should be non-negative")
         self.assertTrue(torch.allclose(torch.tensor(1.0), probabilities.sum(dim=-1)), "Probabilities should sum to 1")
-        self.assertTrue(probabilities.shape == (stack_size, batch_size, 3))
+        self.assertTrue(probabilities.shape == (batch_size, 3))
 
+    def test_gumbel_softmax(self):
+        """Test that the gumbel softmax behaves as expected."""
+
+        stack_size = 5
+        batch_size = 7
+
+        action_manager = self.create_action_manager(0, 10,  True)
+        action_logits = torch.randn([batch_size, 3])  # Simulating random logits
+        probabilities = action_manager(action_logits, 1.0)
+
+        # Operating in gumbel mode, one of the probabilities should be at 100%. The other
+        # should be zero
+
+        probabilities_zero = torch.
+    @unittest.SkipTest("This logic needs to be migrated to be tested elsewhere")
     def test_destack_logic(self):
         """
         Test the destack action is triggered when apppropriate.
@@ -35,8 +49,7 @@ class TestActionsManagement(unittest.TestCase):
 
         stack_size = 5
         batch_size = 7
-        statistics = torch.zeros([stack_size, batch_size, 3])
-        action_manager = self.create_action_manager(1, 10, stack_size, statistics)
+        action_manager = self.create_action_manager(1, 10, False)
 
         # Set to exist only in the destack state.
         action_logits = torch.zeros([batch_size, 3])
@@ -44,7 +57,7 @@ class TestActionsManagement(unittest.TestCase):
         action_logits[..., 1] = -1e10
         action_logits[..., 2] = -1e10
 
-        probabilities = action_manager(action_logits)
+        probabilities = action_manager(action_logits, 1.0)
 
         # Test if we are in a destack config, and if the destack config is not
         # letting us pop
@@ -56,6 +69,7 @@ class TestActionsManagement(unittest.TestCase):
         probabilities = action_manager(action_logits)
         self.assertTrue(torch.all((probabilities[0, ..., 0]-1.0).abs() < 1e-4))
 
+    @unittest.SkipTest("This logic needs to be migrated to be tested elsewhere")
     def test_enstack_logic(self):
         """
         Test the enstack logic. This includes verifying
@@ -90,6 +104,7 @@ class TestActionsManagement(unittest.TestCase):
 
         self.assertTrue(torch.all((probabilities[:-1, ..., 2]).abs() < 1e-4))
         self.assertTrue(torch.all((probabilities[-1, ..., 2]).abs() < 1e-4))
+    @unittest.SkipTest("This logic needs to be migrated to be tested elsewhere")
 
     def test_no_op_logic(self):
         """

@@ -1,10 +1,10 @@
 import unittest
 import torch
-from src.main.model.finite_state_machines.finite_state_operators import (IntOperand, NotMatchingOperand,
-                                                                         MatchingOperand, FSMOperator)
+from src.old.finite_state_machines import (IntOperand, NotMatchingOperand,
+                                           MatchingOperand, FSMOperator)
 from src.main.CBTensors.channel_bound_tensors import CBTensor, CBTensorSpec
-from src.main.model.finite_state_machines.finite_state_machine import (IntStateTrigger, MatchingCasesTrigger,
-                                                                       IntakeMachine)
+from src.old.finite_state_machines import (IntStateTrigger, MatchingCasesTrigger,
+                                           IntakeMachine)
 
 
 class TestIntStateTrigger(unittest.TestCase):
