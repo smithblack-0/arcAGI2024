@@ -5,8 +5,7 @@ from fast_transformers import builders
 from torch import nn
 from src.main.model.base import DropoutLogits, TensorTree
 from src.main.model import banks
-from .base import RecurrentAttention
-
+from .base import RecurrentAttention, recurrent_self_attention_registry
 class MakeHeads(nn.Module):
     """
     Exactly what it says on the tin. Designed to make
@@ -71,7 +70,7 @@ class MergeHeads(nn.Module):
         embeddings = self.projector(embedding, selection)
         return embeddings
 
-
+@recurrent_self_attention_registry.register("LinearRoutingAttention")
 class LinearRoutingAttention(RecurrentAttention):
     """
     Recurrent linear routing attention, with head
@@ -169,7 +168,7 @@ class LinearRoutingAttention(RecurrentAttention):
                   batch_shape: torch.Size,
                   )->Tuple[torch.Tensor, torch.Tensor]:
         """
-        Sets up a defaul state with the indicated batch shape
+        Sets up a default state with the indicated batch shape
 
         :param batch_shape: The shape of the batch
         :return: The state.
