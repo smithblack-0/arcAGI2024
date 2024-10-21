@@ -152,7 +152,31 @@ class TestRegistryBuilder(unittest.TestCase):
         # Try to setup a class that would work, but with insane registry
         # indirection
 
+        class MyClass:
+            def __init__(self, a: int, b: Optional[str]):
+                self.a = a
+                self.b = b
 
+            def forward(self, x: torch.Tensor)-> torch.Tensor:
+                pass
+
+        with self.assertRaises(TypeError):
+            registry = TorchLayerRegistry[MyClass]("test_registry", MyClass, a="apple")
+
+        # Try to setup a class that would work, but with a registry redirection that it cannot
+        # consume
+
+        class MyClass:
+            def __init__(self, a: int, b: Optional[str]):
+                self.a = a
+                self.b = b
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                pass
+
+        with self.assertRaises(TypeError):
+            irrelevant_registry = TorchLayerRegistry[MyClass]("test_registry", MyClass)
+            registry = TorchLayerRegistry[MyClass]("test_registry", MyClass, c=irrelevant_registry)
 
     def test_register_validation(self):
         """Test we catch when you are attempting to register something insane or nonmatching"""

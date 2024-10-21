@@ -440,7 +440,7 @@ class TorchLayerRegistry(Generic[RegisteredType]):
     def __init__(self,
                  registry_name: str,
                  abstract_layer: nn.Module,
-                 registry_indirections: Optional[Dict[str, 'TorchLayerRegistry']] = None
+                 **registry_indirections: Dict[str, 'TorchLayerRegistry']
                  ):
         """
         Initialize the registry builder. If desired, the user
@@ -455,9 +455,6 @@ class TorchLayerRegistry(Generic[RegisteredType]):
                                      here that collide with constructor keywords from the interface,
                                      it is possible to build that parameter by indirection.
         """
-        # standardize
-        if registry_indirections is None:
-            registry_indirections = {}
 
         # Get the interfaces for the constructor and for forward
 
