@@ -108,7 +108,7 @@ def virtual_state_select(state: torch.Tensor,
     probabilities = selection.selection_probabilities
 
     # Move the selection dim to the end of the state tensor
-    state = state.swapdims(dim, -1)  # (...batch, ..., options)
+    state = state.movedim(dim, -1)  # (...batch, ..., options)
 
     # Ensure indices has the correct number of dimensions
     while indices.dim() < state.dim():
@@ -116,7 +116,7 @@ def virtual_state_select(state: torch.Tensor,
         probabilities = probabilities.unsqueeze(-2)
 
     # Expand indices to match the state tensor, excluding the last dimension
-    indices = indices.expand(*state.shape[:-1], indices.shape[-1])  # (...batch, ..., selections)
+    indices = indices.broadcast_to(*state.shape[:-1], indices.shape[-1])  # (...batch, ..., selections)
 
     # Perform gather on the last dimension (which used to be dim)
     selected_state = state.gather(-1, indices)  # (...batch, ..., selections)
@@ -126,7 +126,7 @@ def virtual_state_select(state: torch.Tensor,
     if superposition:
         selected_state = torch.sum(selected_state * probabilities, dim=-1)
     else:
-        selected_state = selected_state.swapdims(-1, dim)
+        selected_state = selected_state.movedim(-1, dim)
 
     return selected_state
 
@@ -200,30 +200,44 @@ def virtual_state_scatter(state: torch.Tensor,
       (from `selection.selection_index`) using the interpolation weights (from `selection.selection_probabilities`).
 
     """
+    # Data standardization.
+    if superposition:
+        substate = substate.unsqueeze(dim)
+
+    # Run basic error checking to check sanity of state and substate
+
+    if state.dim() != substate.dim():
+        raise ValueError("State and substate must have the same dimensionality. Broadcasted scatters not allowed")
+
+    state_shape = list(state.shape)
+    substate_shape = list(substate.shape)
+
+    state_shape.pop(dim)
+    substate_shape.pop(dim)
+
+    if state_shape != substate_shape:
+        raise ValueError("State and subshape must be the same shape except for dim.")
+
+    # Unpack
 
     indices = selection.selection_index
     probabilities = selection.selection_probabilities
 
     # If in a superposition, the indicated dimension was actually squeeze away
     # earlier. Restore it. This is essentially data standardization.
-    if superposition:
-        expansion = [-1] * substate.dim()
-        expansion.insert(dim, state.shape[dim])
-        substate = substate.unsqueeze(dim)
-        substate = substate.expand(*expansion)
+
 
     # Move the selection dim to the end of the state tensor for easier processing
-    state = state.swapdims(dim, -1)  # (...batch, ..., options)
-    substate = substate.swapdims(dim, -1)  #(...batch, ..., selections
+    state = state.movedim(dim, -1)  # (...batch, ..., options)
+    substate = substate.movedim(dim, -1)  #(...batch, ..., selections
 
     # Ensure indices has the correct number of dimensions for broadcasting
     while indices.dim() < state.dim():
         indices = indices.unsqueeze(-2)
         probabilities = probabilities.unsqueeze(-2)
 
-    # Expand indices and probabilities to match the state tensor
-    indices = indices.expand(*state.shape[:-1], indices.shape[-1])  # (...batch, ..., selections)
-    probabilities = probabilities.expand(*state.shape[:-1], probabilities.shape[-1])  # (...batch, ..., selections)
+    # Expand indices  to match the state tensor
+    indices = indices.broadcast_to(*state.shape[:-1], indices.shape[-1])  # (...batch, ..., selections)
 
     # Gather the current state values at the specified indices
     gathered_state = state.gather(-1, indices)  # (...batch, ..., selections)
@@ -235,7 +249,7 @@ def virtual_state_scatter(state: torch.Tensor,
     state = state.scatter(-1, indices, interpolated)
 
     # Restore the original dimension order by swapping back
-    state = state.swapdims(-1, dim)
+    state = state.movedim(-1, dim)
 
     return state
 
@@ -253,7 +267,7 @@ class VirtualParameter(nn.Module):
     the upcoming wrapper class.
 
     It can either be initialized directly with a parameter — in which case
-    the first dimension becomes the bank dimension — or one can use the
+    the last dimension becomes the bank dimension — or one can use the
     `.create` method to make a parameter according to a given specification.
     """
 
@@ -280,8 +294,8 @@ class VirtualParameter(nn.Module):
                      `torch.Tensor` and initializes the parameter in place.
         :return: An instance of the `VirtualParameter` class.
         """
-        parameter = nn.Parameter(torch.zeros([bank_size, *shape], device=device,
-                                             dtype=dtype), requires_grad=True)
+        parameter = torch.zeros([*shape, bank_size,], device=device,
+                                             dtype=dtype)
         if init is not None:
             init(parameter)
         return cls(parameter)
@@ -297,11 +311,11 @@ class VirtualParameter(nn.Module):
         assert parameter.dim() > 0, "No bank dimension was specified."
 
         super().__init__()
-        self.bank_size = parameter.shape[0]
-        self.shape = parameter.shape[1:]
+        self.bank_size = parameter.shape[-1]
+        self.shape = parameter.shape[:-1]
         self.device = parameter.device
         self.dtype = parameter.dtype
-        self.parameter = parameter
+        self.parameter = nn.Parameter(parameter)
 
     def forward(self, bank_spec: SelectionSpec) -> torch.Tensor:
         """
@@ -313,15 +327,27 @@ class VirtualParameter(nn.Module):
         according to these probabilities to form a final output.
 
         :param bank_spec: A `SelectionSpec` dataclass containing:
-            - `selection_index`: The indices of the selected banks.
+            - `selection_index`: The indices of the selected banks. (..., selected)
             - `selection_probabilities`: The probabilities for weighting
-                                         the selected banks.
+                                         the selected banks. (..., selected)
+
         :return: A tensor containing the weighted combination of selected
                  parameters. Shape: (..., *shape)
         """
-        parameter = self.parameter[bank_spec.selection_index, ...]  # (..., *shape, selected_banks)
-        parameter = torch.sum(parameter * bank_spec.selection_probabilities,
-                              dim=-1)  # (..., *shape)
+        # Set aside the bank dimension, measured from the end of the tensor with negative
+        # style indexing. Extract the selected banks using advanced indexing
+        parameter = self.parameter.movedim(-1, 0)  # (*shape, bank, )
+        parameter = parameter[bank_spec.selection_index]  # (..., *shape,  bank_selected,)
+        parameter = parameter.movedim(-self.parameter.dim(),-1)
+        # Setup the probabilities. The probability tensor need to have
+        # enough elements added to it to broadcast across the shape portions
+        # of the parameter tensor. We add those.
+        probabilities = bank_spec.selection_probabilities  # (..., bank_selected)
+        for _ in self.shape:
+            probabilities = probabilities.unsqueeze(-2)
+
+        # Perform the kernel superposition, and return the result.
+        parameter = torch.sum(parameter * probabilities, dim=-1)  # (..., *shape)
         return parameter
 
 
@@ -330,9 +356,13 @@ class VirtualBuffer(nn.Module):
     This is an instance of a "virtual buffer",
     which is a collapsable feature using the
     virtual selection mechanism. A buffer is internally
-    maintained acrss a "banks" dimension, and one can
+    maintained across a "banks" dimension, and one can
     ask to instance a version of the buffer, or update
     the buffer again based on the instance.
+
+    The bank dimension is internally maintained as the
+    last dimension, which influences how the selection
+    mechanism operates.
     """
     buffer: torch.Tensor
 
@@ -357,10 +387,10 @@ class VirtualBuffer(nn.Module):
                       which means the default dtype is used.
         :param init: An optional initialization function that takes a
                      `torch.Tensor` and initializes the parameter in place.
-        :return: An instance of the `VirtualParameter` class.
+        :return: An instance of the `VirtualBuffer` class.
         """
-        buffer = torch.zeros([bank_size, *shape],
-                             device=device, dtype=dtype)
+        # Bank dimension is now the last dimension of the buffer tensor
+        buffer = torch.zeros([*shape, bank_size], device=device, dtype=dtype)
         if init is not None:
             init(buffer)
         return cls(buffer)
@@ -368,17 +398,17 @@ class VirtualBuffer(nn.Module):
     def __init__(self, buffer: torch.Tensor):
         """
         Initialize a virtual buffer class. The buffer passed
-        in has it's first dimension declared as the bank dimension.
+        in has its last dimension declared as the bank dimension.
         Keep that in mind.
         :param buffer:
             - The buffer to initialize with
-            - Keep in mind the shape (buffer_banks, ...)
+            - Keep in mind the shape (..., buffer_banks)
         """
         assert buffer.dim() > 0, "No bank dimension was specified."
 
         super().__init__()
-        self.bank_size = buffer.shape[0]
-        self.shape = buffer.shape[1:]
+        self.shape = buffer.shape[:-1]  # All dimensions except the last are the shape
+        self.bank_size = buffer.shape[-1]  # Last dimension is the bank dimension
         self.device = buffer.device
         self.dtype = buffer.dtype
         self.register_buffer("buffer", buffer)
@@ -390,38 +420,141 @@ class VirtualBuffer(nn.Module):
         """
         Expresses the buffer in a way that it becomes nonvirtual.
 
-        If `superposition=True`, the output will be a weighted combination (superposition) of selected buffer values, collapsing the virtual banks into a single buffer based on the selection probabilities.
+        If `superposition=True`, the output will be a weighted combination (superposition)
+        of selected buffer values, collapsing the virtual banks into a single buffer
+        based on the selection probabilities.
 
-        If `superposition=False`, the buffer values will remain separated, with each buffer indexed by the selection indices.
+        If `superposition=False`, the buffer values will remain separated, with each
+        buffer indexed by the selection indices.
 
-        :param selection: The selection for the buffer to operate under.
+        :param selection: A `SelectionSpec` dataclass containing:
+            - `selection_index`: The indices of the selected banks. (..., selected)
+            - `selection_probabilities`: The probabilities for weighting
+                                         the selected banks. (..., selected)
         :param superposition: Whether or not to superimpose the buffer. Defaults to True.
             - If True, returns a weighted combination of buffer states based on probabilities.
             - If False, returns the selected individual buffer states.
         :return:
             - If `superposition=True`: Returns the combined buffer of shape (...).
-            - If `superposition=False`: Returns the selected buffers of shape (buffers_selected, ...).
+            - If `superposition=False`: Returns the selected buffers of shape (..., selected).
         """
-        return virtual_state_select(self.buffer, selection, dim=0, superposition=superposition)
+        # Basic sanity checking. The buffer shape and selection shape
+        return virtual_state_select(self.buffer, selection, dim=-1, superposition=superposition)
 
     def update_buffer(self,
                       expression: torch.Tensor,
                       selection: SelectionSpec,
-                      superposition: bool = True
-                      ):
+                      superposition: bool = True):
         """
         Updates the currently contained buffer based on the given
         buffer expression, and the selection. Superposition allows
-        handling certain scenarios
+        handling certain scenarios.
 
-        :param expression: The expression to update it with.
-            - Shape (buffers_selected, ...) if expressed using superposition off
-            - Shape (...) if expressed using superposition on
-        :param selection: The selections for the virtual buffer
-        :param superposition: Whether or not it was expressed with the superposition on
+        :param expression: The expression to update the buffer with.
+            - Shape (buffers_selected, ...) if expressed using superposition off.
+            - Shape (...) if expressed using superposition on.
+        :param selection: The selections for the virtual buffer.
+        :param superposition: Whether or not it was expressed with the superposition on.
         """
+        # Scatter the updated expression into the last dimension (bank dimension)
         self.buffer = virtual_state_scatter(self.buffer, expression, selection,
-                                            dim=0, superposition=superposition)
+                                            dim=-1, superposition=superposition)
+
+
+
+class VirtualState:
+    """
+    This is an instance of a "virtual state", which is a collapsable feature
+    using the virtual selection mechanism. Similar to a virtual buffer, a state
+    is internally maintained across a "banks" dimension. One can instance a
+    version of the state or update the state based on the instance.
+
+    Unlike `VirtualBuffer`, `VirtualState` does not register as an `nn.Module`,
+    and stores the state directly as a `torch.Tensor` without being part of the
+    model's module hierarchy.
+    """
+
+    @classmethod
+    def create(cls,
+               bank_size: int,
+               shape: Tuple[int, ...],
+               device: Optional[torch.device] = None,
+               dtype: Optional[torch.dtype] = None,
+               init: Optional[Callable[[torch.Tensor], None]] = None
+               ) -> 'VirtualState':
+        """
+        Creates and initializes a `VirtualState` with a bank of states according
+        to the given specification.
+
+        :param bank_size: The number of different state configurations in the bank.
+        :param shape: The shape of each individual state in the bank.
+        :param device: The device to store the state on. Defaults to the current device.
+        :param dtype: The data type of the state. Defaults to `None`, which means the default dtype is used.
+        :param init: An optional initialization function that takes a `torch.Tensor` and
+                     initializes the state in place.
+        :return: An instance of the `VirtualState` class.
+        """
+        state = torch.zeros([bank_size, *shape], device=device, dtype=dtype)
+        if init is not None:
+            init(state)
+        return cls(state)
+
+    def __init__(self, state: torch.Tensor):
+        """
+        Initializes a `VirtualState`. The `state` passed in has its first dimension
+        declared as the bank dimension.
+
+        :param state: The tensor representing the virtual state, with the shape
+                      (bank_size, ...), where the first dimension is the bank dimension.
+        """
+        assert state.dim() > 0, "No bank dimension was specified."
+
+        self.bank_size = state.shape[0]
+        self.shape = state.shape[1:]
+        self.device = state.device
+        self.dtype = state.dtype
+        self.state = state
+
+    def express_state(self,
+                      selection: SelectionSpec,
+                      superposition: bool = True
+                      ) -> torch.Tensor:
+        """
+        Expresses the state in a way that it becomes nonvirtual.
+
+        If `superposition=True`, the output will be a weighted combination (superposition)
+        of selected state values, collapsing the virtual banks into a single state based on
+        the selection probabilities.
+
+        If `superposition=False`, the state values will remain separated, with each state
+        indexed by the selection indices.
+
+        :param selection: The selection for the state to operate under.
+        :param superposition: Whether or not to superimpose the state. Defaults to True.
+            - If True, returns a weighted combination of state values based on probabilities.
+            - If False, returns the selected individual state values.
+        :return:
+            - If `superposition=True`: Returns the combined state of shape (...).
+            - If `superposition=False`: Returns the selected states of shape (states_selected, ...).
+        """
+        return virtual_state_select(self.state, selection, dim=0, superposition=superposition)
+
+    def update_state(self,
+                     expression: torch.Tensor,
+                     selection: SelectionSpec,
+                     superposition: bool = True
+                     ):
+        """
+        Updates the current state based on the given expression and selection.
+        The superposition flag allows handling different scenarios.
+
+        :param expression: The expression to update the state with.
+            - Shape (states_selected, ...) if expressed using superposition=False.
+            - Shape (...) if expressed using superposition=True.
+        :param selection: The selections for the virtual state.
+        :param superposition: Whether or not it was expressed with the superposition on.
+        """
+        self.state = virtual_state_scatter(self.state, expression, selection, dim=0, superposition=superposition)
 
 
 class _VirtualModule(nn.Module):
@@ -787,7 +920,8 @@ def make_top_p_selection_mask(logits: torch.Tensor, top_p: float) -> torch.Tenso
 
     return selection_mask
 
-def make_top_k_selection_mask(logits: torch.Tensor, top_k: int)->torch.Tensor:
+
+def make_top_k_selection_mask(logits: torch.Tensor, top_k: int) -> torch.Tensor:
     """
     Selection mechanism to make a top k mask. Selects the
     top k elements, and returns a mask indicating what
@@ -812,7 +946,8 @@ def make_top_k_selection_mask(logits: torch.Tensor, top_k: int)->torch.Tensor:
         selection_mask[index] = True
     return selection_mask
 
-def make_random_selection_mask(logits: torch.Tensor, num: int)->torch.Tensor:
+
+def make_random_selection_mask(logits: torch.Tensor, num: int) -> torch.Tensor:
     """
     Creates a selection mask with num elements selected randomly.
 
@@ -845,57 +980,50 @@ def make_random_selection_mask(logits: torch.Tensor, num: int)->torch.Tensor:
 
     # Return the selection
     return selection_mask
+
+
 class AbstractBankSelector(nn.Module, ABC):
     """
-    The `AbstractBankSelector` class is an abstract base class that defines the interface for selecting
-    parameter banks and their associated probabilities. These selections are used to construct virtual layers.
-    The selection object is generally sparse.
-
-    Conceptually, the `AbstractBankSelector` consumes embeddings or other inputs and produces a
-    `SelectionSpec` feature that downstream virtual layers use to retrieve parameters from their respective
-    banks. In recurrent scenarios, it also passes along state information.
-
-    Subclasses of `AbstractBankSelector` should implement the `forward` method, which returns a `SelectionSpec`
-    and a recurrent state (if applicable).
+    The `AbstractBankSelector` provides a framework for selecting parameter banks (virtual layers)
+    from logits and dynamically building a `SelectionSpec`. It supports sparse selection mechanisms
+    such as top-k, top-p (nucleus), and random sampling. This class serves as a base for subclasses
+    that implement custom logic for generating logits used for bank selection.
 
     ---- Key Concepts ----
-    - 'select_logits' method: Each implementation conceptually is responsible for making logits for
-                             each bank location, then invoking this. It will turn those logits into
-                             a selection spec.
-    - `SelectionSpec`: A data structure representing the indices and probabilities for selecting virtual
-      parameters from a bank.
-    - `state`: Optional recurrent state passed between layers to maintain context or other temporal information.
-    - sparse_mode: A mode of sparsely selecting a certain number of logits, like topk, or rand
+    - `select_logits`: This method generates the final `SelectionSpec`, combining any sparse selections
+      such as top-k, top-p, or random sampling. It processes logits into selected indices and their associated
+      probabilities. **Subclasses must call this method with their generated logits** to create the selection.
+    - `SelectionSpec`: Defines the indices and probabilities for selecting virtual parameters from a bank.
+    - `sparse_mode`: Controls how sparse selection is performed, using `top_k`, `top_p`, or `rand`. If none are
+      specified, dense mode is used, where **all logits are included, but weighted by their probabilities**.
 
-    ---- select_logits ----
+    ---- Usage ----
+    - Subclasses **must implement the `forward` method** to generate logits that represent potential selections.
+    - The `select_logits` method should be called within `forward` to convert generated logits into a `SelectionSpec`.
+    - `top_k`, `top_p`, and `rand` are mutable fields and can be modified dynamically to adjust selection behavior
+      at any point, without reinitializing the selector.
 
-    Conceptually, how this works is that the subclass calls into this, which
-    then returns the actual SelectionSpec. Lets see how it works
+    ---- Initialization ----
+    - `top_k`, `top_p`, and `rand` control how many logits are included in the selection:
+        * `top_k`: Selects the highest k logits.
+        * `top_p`: Uses nucleus sampling to select logits until the cumulative probability reaches p.
+        * `rand`: Selects a random subset of logits.
+      If all are inactive (set to zero), dense mode is used, where all logits contribute based on their probabilities.
+    - `dropout_rate` is applied to the logits before selection, allowing for stochastic behavior during training.
 
-    * 1) Normalization: Normalization of various kinds, like logit dropout, can be applied
-    * 2) IndexSelections: Each active sparse selection mode independently computes what indexes it wants
-    * 3) IndexUnion: The index sets are combined together from each selection mode.
-    * 4) Probabilities: The associated logits are fetched, then have their probabilities computed.
-
-    A special note - not defining any sparse mode will result in a dense selection, in
-    which NOTHING is excluded.
-
-    ---- Parameters ----
-
-    These parameters will be type-narrowed in concrete implementations:
-
-    :param args: Positional arguments for the concrete implementation to handle.
-    :param kwargs: Keyword arguments for the concrete implementation to handle.
-    :param state: Optional recurrent state passed between invocations. If the layer doesn't use state,
-                  `None` should be passed. Layers that utilize recurrent mechanisms must maintain state
-                  across calls.
-
-    :return: A tuple consisting of:
-        - `SelectionSpec`: Defines the selected bank indices and their probabilities.
-        - `state`: The recurrent state to be passed to the next invocation.
+    :param top_k: The number of top logits to select (optional, defaults to 0).
+    :param top_p: The cumulative probability threshold for top-p selection (optional, defaults to 0.0).
+    :param rand: The number of random logits to select (optional, defaults to 0).
+    :param dropout_rate: Dropout rate to apply to the logits during selection (optional, defaults to 0.0).
     """
+
+    #TODO: Add bank selector metrics and, optionally, bank balancing.
     @property
-    def is_dense(self)->bool:
+    def is_dense(self) -> bool:
+        """
+        Tells us whether selection is operating in dense mode. It is dynamically
+        computed in case someone changes the fields.
+        """
         if not self.top_k == 0:
             return False
         if not self.top_p == 0.0:
@@ -903,7 +1031,6 @@ class AbstractBankSelector(nn.Module, ABC):
         if not self.rand == 0:
             return False
         return True
-
 
     def select_logits(self, logits: torch.Tensor) -> SelectionSpec:
         """
@@ -1008,15 +1135,6 @@ class AbstractBankSelector(nn.Module, ABC):
         if dropout_rate is None:
             dropout_rate = 0.0
 
-        # Sanity checking
-
-        if top_k is not None:
-            assert top_k >= 0
-        if top_p is not None:
-            assert 1 >= top_p >= 0
-        if rand is not None:
-            assert rand >= 0
-
         # Setup
         self.top_k = top_k
         self.top_p = top_p
@@ -1024,7 +1142,7 @@ class AbstractBankSelector(nn.Module, ABC):
         self.dropout = DropoutLogits(dropout_rate)
 
     @abstractmethod
-    def forward(self, *args: Any, state: Optional[Any], **kwargs: Any) -> Tuple[SelectionSpec, Any]:
+    def forward(self, *args: Any, **kwargs: Any) -> Tuple[SelectionSpec, Any]:
         """
         Abstract definition of the forward mechanism. This method accepts arbitrary content
         (args and kwargs) and returns a `SelectionSpec` along with any updated recurrent state.
@@ -1033,252 +1151,161 @@ class AbstractBankSelector(nn.Module, ABC):
 
         :param args: Positional arguments to be used in the concrete implementation.
         :param kwargs: Keyword arguments to be used in the concrete implementation.
-        :param state: Optional recurrent state passed between calls. If no state is used, this can be `None`.
-
         :return: A tuple containing:
             - `SelectionSpec`: A structure that defines the selected bank indices and the associated probabilities.
-            - `state`: The recurrent state, passed along for future calls.
+            - `state`: The recurrent state, passed along for future calls. Will be invoked as kwargs
         """
         pass
 
 
-class DenseBankSelector(AbstractBankSelector):
+class LinearBankSelector(AbstractBankSelector):
     """
-    The dense bank selector selects every bank, with
-    """
+    The `LinearBankSelector` is a simple bank selector that uses a single linear
+    layer to generate logits for selecting parameter banks (virtual layers).
 
+    This selector applies the given embedding to the linear layer, processes
+    the logits using selection mechanisms (top-k, top-p, or random sampling),
+    and returns a `SelectionSpec` for the selected virtual layers.
 
-class AbstractBankSelector(StatefulCore):
-    """
-    Promises to consider the incoming embedding and select a subset
-    of the N banks to consider. We will end up returing the banks
-    selected, and the probabilities associated
+    ---- Key Features ----
+    - Embedding-based selection: Uses the provided embedding to create logits in
+      the bank space.
+    - Sparse Selection: Applies top-k, top-p, or random sampling to select a subset
+      of banks.
+    - Simplest form of bank selection: One linear layer and no recurrent state.
+    - Providing no sparse selection input places us in dense mode. This is computationally intense.
     """
 
     def __init__(self,
                  d_model: int,
                  bank_size: int,
-                 top_k: int,
-                 dropout: float = 0.2,
-                 statistics_weight: float = 0.001,
-                 device: torch.device = None,
-                 dtype: torch.dtype = None
+                 top_k: Optional[int] = None,
+                 top_p: Optional[float] = None,
+                 rand: Optional[int] = None,
+                 dropout_rate: Optional[float] = None
                  ):
-        assert top_k <= bank_size
-
-        # Store
-        self.d_model = d_model
-        self.bank_size = bank_size
-        self.statistics_weights = statistics_weight
-        self.device = device
-        self.dtype = dtype
-        self.top_k = top_k
-
-        # Setup
-
-        self.dropout_logits = DropoutLogits(dropout)
-
-        # Setup statistics bank.
-        self.bank_statistics = torch.zeros([bank_size], device=device, dtype=dtype)
-
-    @abstractmethod
-    def create_bank_logits(self,
-                           embeddings: torch.Tensor,
-                           state: TensorTree) -> torch.Tensor:
         """
-        Creates the bank logits that will be used in further selection processes.
-        An abstract method that must be implemented. You must return both the
-        logits and a state feature. The state feature may, however, be the same
-        as you passed in
+        Initializes the `LinearBankSelector` with the given embedding size, bank size,
+        and selection configuration.
 
-        :param embeddings: The embeddings. (..., d_model)
-        :param state: Any state you wish to use
+        :param d_model: The size of the embeddings that will be provided.
+        :param bank_size: The size of the bank selection to create.
+        :param top_k: The number of top logits selected (optional, defaults to 0).
+        :param top_p: The probability mass to select by (optional, defaults to 0.0).
+        :param rand: The number of random logits to include (optional, defaults to 0).
+        :param dropout_rate: Logit dropout rate (optional, defaults to 0.0).
+        """
+        super().__init__(top_k, top_p, rand, dropout_rate)
+        self.projector = nn.Linear(d_model, bank_size)
+
+    def forward(self, embedding: torch.Tensor) -> Tuple[SelectionSpec, None]:
+        """
+        Generates logits for selecting parameter banks based on the provided embedding
+        and processes them into a `SelectionSpec` using the configured sparse selection
+        mechanisms (top-k, top-p, or random sampling).
+
+        :param embedding: The embedding to process for selecting banks.
         :return:
-            - The logits. (..., bank_size)
-            - The state. Whatever you need
+            - The `SelectionSpec` containing the selected indices and probabilities.
+            - `None` as there is no recurrent state in this implementation.
         """
-
-    @abstractmethod
-    def update_state(self, bank_probabilities: torch.Tensor, state: TensorTree) -> TensorTree:
-        """
-        Some classes may use the computed bank probabilities to update their state.
-        :param bank_probabilities: The probability of each bank being selected
-        :param state: The last state.
-        :return: The new state
-        """
-
-    def create_bank_probabilities(self,
-                                  sparse_probabiliities: torch.Tensor,
-                                  sparse_indices: torch.Tensor
-                                  ) -> torch.Tensor:
-        """
-        :param sparse_probabiliities: The weights. Should sum up to 1. Shape (..., sparse))
-        :param sparse_indices: The index of these weights in the banks. Shape (..,, sparse)
-        :return: The full bank. Shape (..., bank_size)
-        """
-        bank_probabilities = torch.zeros(list(sparse_probabiliities.shape[:-1]) + [self.bank_size],
-                                         device=sparse_probabiliities.device, dtype=sparse_probabiliities.dtype)
-        bank_probabilities.scatter_(-1, sparse_indices, sparse_probabiliities)
-
-        return bank_probabilities
-
-    def update_bank_statistics(self, bank_probabilities):
-        """
-        Updates the bank statistics based on the provided bank probabilities
-        :param bank_probabilities: The probabilities. Per bank. Shape (..., bank_size)
-        """
-        bank_probabilities = bank_probabilities.flatten(0, -2)  #flatten until only two dimensions are left
-        bank_probabilities = bank_probabilities.mean(dim=0)  # Then take the mean over them all
-        self.bank_statistics = self.bank_statistics * (1 - self.statistics_weights) \
-                               + bank_probabilities * self.statistics_weights  # And update the running average
-
-    @abstractmethod
-    def forward(self, embeddings: torch.Tensor, states: TensorTree
-                ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], TensorTree]:
-        """
-        Performs the forward pass. Handles accumulating statistics for monitoring or
-        loss purposes.
-
-        :param embeddings: The embeddings we need to work with to make the selection
-        :param states: Any state we need to use
-        :return:
-            - Tuple
-                - The selection weight
-                - The selected bank indices
-            - State:
-                - Whatever you need to keep track of between selections. Can be minimal
-        """
-
-        # Get logits
-        logits = self.create_bank_logits(embeddings, states)
-        assert logits.shape[-1] == self.bank_size
-
-        # Perform logit dropout.
-
-        logits = self.dropout_logits(logits)
-
-        # Find top candidates. Form them into probabilities.
-
-        top_logits, top_index = logits.topk(self.top_k)
-        top_probabilities = torch.softmax(top_logits, dim=-1)
-
-        # Update statistics
-        bank_probabilities = self.create_bank_probabilities(top_probabilities, top_index)
-        self.update_bank_statistics(bank_probabilities)
-
-        # Update state
-        states = self.update_state(bank_probabilities, states)
-
-        # return
-
-        return (top_probabilities, top_index), states
-
-
-class NaiveBankSelector(AbstractBankSelector):
-    """
-    A basic bank selector, that uses no state
-    in it's decisions. Instead, it bases it's decision
-    entirely off of the embeddings it sees.
-    """
-
-    def setup_state(self, tensor: torch.Tensor) -> TensorTree:
-        # We just return a dictionary. This will result in no superposition.
-        return {}
-
-    def create_bank_logits(self,
-                           embeddings: torch.Tensor,
-                           state: TensorTree) -> torch.Tensor:
-        """
-        Computes the logits as a naive logit projection.
-
-        :param embeddings: The embeddings to use
-        :param state: The state.
-        :return: The logits
-        """
-
-        logits = self.logits_projector(embeddings)
-        return logits
-
-    def update_state(self, bank_probabilities: torch.Tensor, state: TensorTree) -> TensorTree:
-        """
-        Naive state. No need to change.
-        :param bank_probabilities:
-        :param state:
-        :return:
-        """
-        return state
-
-    def __init__(self,
-                 d_model: int,
-                 bank_size: int,
-                 top_k: int,
-                 statistics_weight: float = 0.001,
-                 dropout: float = 0.2,
-                 gumbel: bool = False,
-                 device: torch.device = None,
-                 dtype: torch.dtype = None,
-                 ):
-        super().__init__(d_model, bank_size, top_k, dropout, gumbel,
-                         statistics_weight, device, dtype)
-
-        self.logits_projector = nn.Linear(d_model, bank_size)
+        logits = self.projector(embedding)
+        return self.select_logits(logits), None
 
 
 class PseudoMarkovBankSelector(AbstractBankSelector):
     """
-    The Pseudo Markov bank selector combines inputs based on the logits
-    of the embeddings with an overall transition probability due to the
-    markov state we are in.
+    The Pseudo Markov Bank Selector is a more sophisticated bank selector that
+    utilizes persistent state and combines transition-based biases with immediate
+    computational results to influence virtual layer selection.
+
+    This class assumes that related virtual layers should be closely linked,
+    and it aims to model this through a Markov-like process. The Markov biases,
+    or logits, act as transition preferences between virtual layers. These biases
+    are dynamically updated and applied to the selection process, promoting or
+    demoting certain layers based on the last expressed selection - basically the last
+    markov state.
+
+    However, this is a "pseudo" Markov process because, while these biases exist,
+    the immediate computation results (from embeddings or other inputs) also play
+    a significant role. This means the model can adapt and override the Markov
+    biases on-the-fly based on the current task, emphasizing or demoting specific
+    virtual layers as needed. This combination of transition biases and current
+    computations results in a more flexible and context-sensitive virtual layer
+    selection process.
+
+    ---- Fields ----
+    - `markov_biases`: A set of trainable biases representing transition preferences
+      between virtual layers. These are dynamically updated and applied in combination
+      with the embedding-based logits to influence the selection of virtual layers.
+    - `state`: The recurrent state passed between iterations, which tracks the current
+      transition probabilities across virtual layers.
     """
-
-    def setup_state(self, tensor: torch.Tensor) -> TensorTree:
-        """
-        We setup a markov probability tensor tracking all the bank
-        states. We update this later on.
-
-        :param tensor: The tensor we are working with. Shape (..., embedding)
-        :return: A tensor of shape (..., bank_size)
-        """
-        state = torch.zeros(list(tensor.shape[:-1]) + [self.bank_size], device=tensor.device, dtype=tensor.dtype)
-        state[..., 0] = 1.0
-        return state
-
-    def create_bank_logits(self,
-                           embeddings: torch.Tensor,
-                           state: TensorTree) -> torch.Tensor:
-        """
-        Create the bank logits. We use the embeddings, and also
-        :param embeddings:
-        :param state:
-        :return:
-        """
-        bank_probabilities = state
-        logits = self.logits_projector(embeddings)
-        logits += self.transitions_projector(bank_probabilities)
-        return logits
-
-    def update_state(self, bank_probabilities: torch.Tensor, state: TensorTree) -> TensorTree:
-        """
-        The new state is just the new bank probabilities
-
-        :param bank_probabilities: The probabilities of each bank
-        :param state: Not used
-        :return: The new state
-        """
-        return bank_probabilities
 
     def __init__(self,
                  d_model: int,
                  bank_size: int,
-                 top_k: int,
-                 statistics_weight: float = 0.001,
-                 dropout: float = 0.2,
-                 gumbel: bool = False,
-                 device: torch.device = None,
-                 dtype: torch.dtype = None,
+                 top_k: Optional[int] = None,
+                 top_p: Optional[float] = None,
+                 rand: Optional[int] = None,
+                 dropout_rate: Optional[float] = None
                  ):
-        super().__init__(d_model, bank_size, top_k, dropout, gumbel,
-                         statistics_weight, device, dtype)
+        """
+        Initializes the layer with the given embedding size, bank size,
+        and selection configuration.
 
-        self.logits_projector = nn.Linear(d_model, bank_size)
-        self.transitions_projector = nn.Linear(bank_size, bank_size)
+        :param d_model: The size of the embeddings that will be provided.
+        :param bank_size: The size of the bank selection to create.
+        :param top_k: The number of top logits selected (optional, defaults to 0).
+        :param top_p: The probability mass to select by (optional, defaults to 0.0).
+        :param rand: The number of random logits to include (optional, defaults to 0).
+        :param dropout_rate: Logit dropout rate (optional, defaults to 0.0).
+        """
+        super().__init__(top_k, top_p, rand, dropout_rate)
+        self.d_model = d_model
+        self.bank_size = bank_size
+
+        # This bears a little explanation. It turns out
+        # running a probability distribution through a linear
+        # layer is basically equivalent to weighting a bunch of
+        # markov biases by how active that state was. So we
+        # can just use a linear projection for that.
+        #
+        # The embedding projector just works like normal, though.
+        self.projector = nn.Linear(d_model, bank_size)
+        self.markov_biases = nn.Linear(bank_size, bank_size)
+
+    def forward(self,
+                tensor: torch.Tensor,
+                state: Optional[torch.Tensor] = None
+                ) -> Tuple[SelectionSpec, Dict[str, torch.Tensor]]:
+        """
+        Runs the forward method for the pseudo markov process
+        :param tensor: The tensor to build local influences from. Shape (..., d_model)
+        :param state: A tensor representing the probabilities associated with each virtual layer (bank).
+              This state is initialized as a softmax distribution over the banks, with the first
+              bank receiving full probability (set to 1) on the first pass. The state biases
+              the current selection towards related virtual layers based on past transitions.
+              Shape (..., bank_size).
+        :return:
+            - The SelectionSpec
+            - The dict with state in it
+        """
+
+        # Standardize data. If state was never setup,
+        # it becomes a probability distribution set to
+        # 1 at the first element
+        if state is None:
+            state = torch.zeros([*tensor.shape[:-1], self.bank_size], device=tensor.device, dtype=tensor.dtype)
+            state[..., 0] = 1.0
+
+        # Compute the logits. Then combine them with the transition biases.
+        # Some options will likely become impossible due to the transition
+        # biases
+
+        logits = self.projector(tensor)
+        logits = logits + self.markov_biases(state)
+
+        # Activate and store the state. Get the selection. Return results
+        state = {"state": torch.softmax(logits, dim=-1)}
+        return self.select_logits(logits), state
