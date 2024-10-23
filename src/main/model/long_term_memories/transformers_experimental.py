@@ -8,7 +8,7 @@ from fast_transformers import builders
 
 class MakeHead(nn.Module):
     """
-    Exactly what it says on the tin. Makes attention heads
+    Exactly what it says on the tin. Makes long_term_memories heads
     out of the provided. Nothing more to it.
     """
     def __init__(self,
@@ -37,7 +37,7 @@ class MakeHead(nn.Module):
 class MergeHeads(nn.Module):
     """
     Exactly what it says on the tin. Merges
-    headed attention back to d_model
+    headed long_term_memories back to d_model
     """
     def __init__(self, d_model: int, d_head: int, num_heads: int):
         super().__init__()
@@ -114,7 +114,7 @@ class MemoryConnectiveLogits(nn.Module):
     generating on demand memory expression logits
     that will relate memories to the queries
     from the heads. You can think of it as partially
-    completing dot product attention.
+    completing dot product long_term_memories.
     """
     def __init__(self,
                  d_head: int,
@@ -133,7 +133,7 @@ class MemoryConnectiveLogits(nn.Module):
                 addresses: torch.Tensor
                 )->torch.Tensor:
         """
-        Create the access logits using an attention focus mechanism without
+        Create the access logits using an long_term_memories focus mechanism without
         activation.
 
         :param query: Shape is usually (..., heads, d_heads)
@@ -172,14 +172,14 @@ class MemoryExpressionAttention(nn.Module):
         # on a particular head during computation.
         expression_probabilities = torch.softmax(connective_logits, dim=-1)
 
-        # Prepare everything for attention, by flattening the matrix. We will restore the
+        # Prepare everything for long_term_memories, by flattening the matrix. We will restore the
         # shape later
 
         final_shape = list(matrix.shape) #(..., memories, d_head, d_head)
         final_shape[-3] = connective_logits.shape[-2] #(..., head, d_head, d_head)
         matrix = matrix.flatten(-2, -1) # (..., heads, d_head*d_head)
 
-        # Finish attention
+        # Finish long_term_memories
 
         matrix = torch.matmul(expression_probabilities, matrix)
         normalizer = torch.matmul(expression_probabilities, normalizer)
@@ -193,7 +193,7 @@ class MemoryExpressionAttention(nn.Module):
 class UpdateMemories(nn.Module):
     """
     Pledges to update the memories based on the update
-    that was returned during linear attention process. This means
+    that was returned during linear long_term_memories process. This means
     expressing that update in terms of the memories space, then
     integrating it and performing any memory decay.
     """
@@ -227,7 +227,7 @@ class UpdateMemories(nn.Module):
                          )->Tuple[torch.Tensor, torch.Tensor]:
         """
         One of the two memory elements has an extra dimension to it.
-        This makes many processes, such as attention or decay, quite
+        This makes many processes, such as long_term_memories or decay, quite
         inconvenient. We flatten it away, with intention to restore it later
 
         :param memory: The memory tuple. Consists of
@@ -271,7 +271,7 @@ class UpdateMemories(nn.Module):
         will be updated based on the connection strength, and decay only is
         applied when a memory is being written to.
 
-        :param connection_logits: The connection logits to use during attention
+        :param connection_logits: The connection logits to use during long_term_memories
         :param update: The memory update. It is expressed in the head subspace rather than the memories
             - Matrix: (..., heads, d_head, d_head)
             - Normalizer: (..., head, d_head)
@@ -316,7 +316,7 @@ class UpdateMemories(nn.Module):
             # memory_case: (..., memories, $something)
             # update_case: (..., heads, $something)
 
-            # Perform attention to express the update case in the native dimensionality.
+            # Perform long_term_memories to express the update case in the native dimensionality.
             update_case = torch.matmul(update_probability, update_case) #(..., memories, $something)
 
             # The memory case is going to decay according to the product of the activated decay
@@ -342,8 +342,8 @@ class UpdateMemories(nn.Module):
 
 class LinearMemoriesAttention:
     """
-    A special version of linear recurrent attention that draws content from
-    a large bank of memories to produce a head specific focus. Linear attention
+    A special version of linear recurrent long_term_memories that draws content from
+    a large bank of memories to produce a head specific focus. Linear long_term_memories
     is performed, and the update is then propogated back into the memories.
     A decay factor lets us capture short vs long term dependencies.
     """
@@ -358,7 +358,7 @@ class LinearMemoriesAttention:
 
         super().__init__()
 
-        # Head creation and collapse mechanisms, and primary attention.
+        # Head creation and collapse mechanisms, and primary long_term_memories.
 
         self.make_query_heads = MakeHead(d_model, d_heads, num_heads)
         self.make_key_heads = MakeHead(d_model, d_heads, num_heads)
@@ -370,7 +370,7 @@ class LinearMemoriesAttention:
         self.create_expression_logits = MemoryConnectiveLogits(d_heads, num_memories)
         self.create_update_logits = MemoryConnectiveLogits(d_heads, num_memories)
 
-        # Linear attention
+        # Linear long_term_memories
         self.rla = builders.RecurrentAttentionBuilder.from_kwargs(query_dimensions = d_heads)
 
         # memory mapping. In and out.
@@ -385,7 +385,7 @@ class LinearMemoriesAttention:
                 memories: TensorTree
                 ):
         """
-        Forward pass of recurrent memories attention.
+        Forward pass of recurrent memories long_term_memories.
         :param embeddings: The embeddings to process. Shape (..., d_model). No items dimension
         :param memories: The memory banks we have to work with.
             - MatrixBank: (..., memory_banks, k_dim_head, v_dim_head)
@@ -401,11 +401,11 @@ class LinearMemoriesAttention:
         value = self.make_value_heads(value)
 
         # Create the expression logits, and express the memories in terms of the
-        # heads. Then perform the linear attention.
+        # heads. Then perform the linear long_term_memories.
         expression_logits = self.create_expression_logits(query, address_memories)
         expressed_memories = self.express_memories_at_heads(expression_logits, memories)
 
-        # Perform linear attention
+        # Perform linear long_term_memories
         # Extract memory update. Fast transformers only returns the new memory state, not
         # the memory update. A quick difference retrieves it.
         embeddings, memory_updates = self.rla(query, key, value, state=expressed_memories)

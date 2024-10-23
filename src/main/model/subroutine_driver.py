@@ -32,7 +32,7 @@ SubroutineDriver, which manages subroutine execution based on action probabiliti
 
 1. **Probabilistic Pointers**:
    - Each stack level is weighted by probabilistic pointers. These pointers represent the "focus" or
-     "attention" at each depth, meaning that stack element 1 might be active with 30% probability
+     "long_term_memories" at each depth, meaning that stack element 1 might be active with 30% probability
       and element 2 with 70%. This allows for smooth transitions between subroutines during
       differentiable training.
 
@@ -62,12 +62,11 @@ SubroutineDriver, which manages subroutine execution based on action probabiliti
 import torch
 from torch import nn
 from torch.nn import functional as F
-from typing import List, Dict, Tuple, Any, Union, Optional, Callable
-from abc import ABC, abstractmethod
+from typing import List, Dict, Tuple, Union, Optional
+from abc import abstractmethod
 from .subroutine_stubs import SubroutineLogicStub
 
-from src.main.model.base import TensorTree, StatefulCore
-
+from src.main.model.base import TensorTree, parallel_pytree_map
 
 # Define important external types
 SubroutineStubTree = Union[SubroutineLogicStub,
@@ -105,35 +104,6 @@ AccumulatorTree = make_accumulator_tree_type()
 
 # Define a very important utility function. This allows the user to specify
 # their state tensorflow style however they wish.
-from typing import Callable, Any
-
-def parallel_pytree_map(func: Callable[..., Any], *pytrees: Any) -> Any:
-    """
-    Recursively applies a function to corresponding leaves of multiple pytrees with the same structure.
-    Nodes where the function returns None are dropped.
-
-    Args:
-        func (Callable[..., Any]): A function to apply to corresponding leaves of the pytrees.
-        *pytrees (NestedTensor): Multiple pytrees with the same structure.
-
-    Returns:
-        NestedTensor: A new pytree with the function applied to corresponding leaves,
-                      excluding those where the function returns None.
-    """
-    # Check if all pytrees are lists, tuples, or dicts
-    if all(isinstance(pytree, list) for pytree in pytrees):
-        result = [parallel_pytree_map(func, *elems) for elems in zip(*pytrees)]
-        return [elem for elem in result if elem is not None]  # Remove none results
-    elif all(isinstance(pytree, tuple) for pytree in pytrees):
-        result = tuple(parallel_pytree_map(func, *elems) for elems in zip(*pytrees))
-        return tuple(elem for elem in result if elem is not None)  # Remove none results
-    elif all(isinstance(pytree, dict) for pytree in pytrees):
-        result = {key: parallel_pytree_map(func, *(pytree[key] for pytree in pytrees))
-                  for key in pytrees[0]}
-        return {key: value for key, value in result.items() if value is not None}  # Remove none results.
-    else:
-        # These are leaves, apply the function to them
-        return func(*pytrees)
 
 # Define user features.
 class SubroutineCore(nn.Module):
@@ -244,7 +214,7 @@ class ProbabilisticPointers:
     the probabilistic pointers.
 
     Probabilistic pointers distribute the focus across stack levels, allowing
-    actions like `enstack`, `no-op`, and `destack` to adjust how attention is
+    actions like `enstack`, `no-op`, and `destack` to adjust how long_term_memories is
     split across the levels of the stack.
 
     It handles rolling of the pointers based on the action probabilities and
@@ -727,7 +697,7 @@ class SubroutineStubFactory(nn.Module):
         # Apply the map to the pytree. We now should have cached dtype, device
         # information, and the leaves are now state trackers.
 
-        stack_tree =parallel_pytree_map(setup_stack_tracker, stub_trees)
+        stack_tree = parallel_pytree_map(setup_stack_tracker, stub_trees)
 
         # Return
 

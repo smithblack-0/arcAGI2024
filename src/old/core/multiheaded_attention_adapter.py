@@ -2,16 +2,16 @@ from typing import Optional, Tuple
 
 import torch
 from torch import nn, device
-from src.main.model.banks import BankedLinear, BankSelector
+from src.main.model.virtual_layers import BankedLinear, BankSelector
 
 
 
 class RecurrentLinearAttention(nn.Module):
-    """Implement fast_transformers.attention.causal_linear_attention as a
+    """Implement fast_transformers.long_term_memories.causal_linear_attention as a
     fixed-dimensional state recurrent model.
 
-    See fast_transformers.attention.linear_attention and
-    fast_transformers.attention.causal_linear_attention for the general concept
+    See fast_transformers.long_term_memories.linear_attention and
+    fast_transformers.long_term_memories.causal_linear_attention for the general concept
     of replacing the softmax with feature maps.
 
     Arguments
@@ -85,7 +85,7 @@ class BankedMakeHead(nn.Module):
     """
     A small module that is responsible for
     making the heads we may need when performing
-    the attention process. It can handle banking.
+    the long_term_memories process. It can handle banking.
     """
     def __init__(self,
                  d_in: int,
@@ -103,14 +103,14 @@ class BankedMakeHead(nn.Module):
                 tensor: torch.Tensor,
                 bank_selections: torch.Tensor)->torch.Tensor:
         """
-        Creates attention heads, in a banked manner. Can broadcast
-        :param tensor: The thing to create attention heads using
+        Creates long_term_memories heads, in a banked manner. Can broadcast
+        :param tensor: The thing to create long_term_memories heads using
             - Shape (..., d_model)
         :param bank_selections:
             - The selections that will actually be banked
             - Shape (..., banks)
             - Integers selecting banks.
-        :return: The banked attention tensors.
+        :return: The banked long_term_memories tensors.
             - Shape (..., banks, heads, d_heads)
         """
         tensor = tensor.unsqueeze(-2) # Add bank dimension (..., 1, d_model)
@@ -128,13 +128,13 @@ class BankedMergeHeads(nn.Module):
 
 class RecurrentLinearMHA(nn.Module):
     """
-    A form of multiheaded attention
+    A form of multiheaded long_term_memories
 
     """
 
 class MultiheadedAttention(nn.Module):
     """
-    An adapter layer. Allows us to use a torch multiheaded attention layer
+    An adapter layer. Allows us to use a torch multiheaded long_term_memories layer
     with batches that may have multiple batch elements. In particular, promises
     to correctly handle anything with shape
 
@@ -157,7 +157,7 @@ class MultiheadedAttention(nn.Module):
                dtype: Optional[torch.dtype] = None,
                ):
         """
-        Creates and wraps up a multiheaded attention adapter, capable
+        Creates and wraps up a multiheaded long_term_memories adapter, capable
         of processing batched data. All parameters have the same effects
         as their torch equivalent
 
@@ -168,7 +168,7 @@ class MultiheadedAttention(nn.Module):
         :param add_bias_kv: If specified, add bias to kv projection layers
         :param kdim: The dimensionalities of the keys
         :param vdim: The dimensionalities of the values
-        :return: A multibatch multiheaded attention layer
+        :return: A multibatch multiheaded long_term_memories layer
         """
         attn_layer = nn.MultiheadAttention(embed_dim, num_heads,
                                            dropout=dropout,
@@ -229,7 +229,7 @@ class MultiheadedAttention(nn.Module):
         key = key.flatten(0, -3)
         value = value.flatten(0, -3)
 
-        # Flatten the attention mask, if needed.
+        # Flatten the long_term_memories mask, if needed.
         if attn_mask is not None and attn_mask.dim() > 2:
             if attn_mask.shape[-3] == 1:
                 # Handles expanding in case we are broadcasting the heads.
@@ -247,7 +247,7 @@ class MultiheadedAttention(nn.Module):
             key = key.movedim(0, 1)
             value = value.movedim(0, 1)
 
-        # Run attention
+        # Run long_term_memories
 
         results = self.attention_layer(query,
                                        key,
@@ -288,7 +288,7 @@ class MultiheadedAttention(nn.Module):
 
 class BankedMakeHead(nn.Module):
     """
-    A make head mechanism designed to handle banked attention.
+    A make head mechanism designed to handle banked long_term_memories.
     """
     def __init__(self,
                  d_model: int,
@@ -374,7 +374,7 @@ class ManageMemories:
                               head_select: torch.Tensor,
                               ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Extract a memory subset to do attention with, in a sparse
+        Extract a memory subset to do long_term_memories with, in a sparse
         manner.
 
         :param memories: The collection of all our memories to work with
@@ -431,7 +431,7 @@ class ManageMemories:
 
 class RecurrentMemoryAttention(nn.Module):
     """
-    Implements fast recurrent linear attention as
+    Implements fast recurrent linear long_term_memories as
     a bank of heads that can and will be selected between on the
     fly. Only these heads will be processed, sparsely.
     Each "head" then becomes a memory slot the model can remember
@@ -458,7 +458,7 @@ class RecurrentMemoryAttention(nn.Module):
 
     def forward(self, queries, memory: Optional[Tuple[torch.Tensor, torch.Tensor]] = None):
         """
-        Runs the memory attention mechanism.
+        Runs the memory long_term_memories mechanism.
         :param queries:
         :param memory:
         :return:
@@ -470,7 +470,7 @@ class RecurrentMemoryAttention(nn.Module):
 
 class MultiHeadedAttention(nn.Module):
     """
-    Implements a specialized kind of multiheaded attention that is
+    Implements a specialized kind of multiheaded long_term_memories that is
     capable of accepting multidimensional batches, and that is
     capable of
     """

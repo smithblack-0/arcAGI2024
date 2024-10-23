@@ -3,7 +3,7 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 
-from src.main.model import banks
+from src.main.model import virtual_layers
 
 
 class RoutingFeedforward(nn.Module):

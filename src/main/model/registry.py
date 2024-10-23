@@ -12,73 +12,6 @@ from typing import (Type, Dict, Any, Optional, Generic, TypeVar, Union, Tuple,
 RegisteredType = TypeVar('RegisteredType')
 
 
-def get_method_type_hints(cls: Type[Any],
-                          method_name: str,
-                          expect_return: bool) -> Tuple[Dict[str, Any], Any]:
-    """
-    Gets the type hints for the parameters and return type of a provided method
-    from the given class, excluding the first parameter (usually 'self').
-
-    :param cls: The provided class whose method type hints are to be extracted.
-    :param method_name: The name of the method whose type hints are being fetched.
-    :param expect_return: Whether to throw an error if this does not have a return
-    :return: A tuple containing:
-        - A dictionary mapping method parameter names to their type hints.
-        - The return type hint of the method.
-    :raises ValueError: If the method does not have a return type annotation
-                        or if any parameter is missing a type annotation.
-    """
-    # Get the method from the class
-    method = getattr(cls, method_name, None)
-    if method is None:
-        raise ValueError(f"Class {cls.__name__} does not have a method named '{method_name}'.")
-
-    # Get the method signature
-    method_signature = inspect.signature(method)
-    method_params = method_signature.parameters
-    param_names = list(method_params.keys())
-
-    # Exclude the first parameter (usually 'self')
-    param_names = param_names[1:]
-
-    # Build a dictionary of parameter names to their type hints
-    parameter_types = {}
-    for name in param_names:
-        if method_params[name].annotation == inspect.Parameter.empty:
-            raise TypeError(f"Parameter '{name}' in method '{method_name}' of class '{cls.__name__}' does not have a type annotation.")
-        parameter_types[name] = method_params[name].annotation
-
-    # Get the return type hint and raise an error if it is missing
-    return_type = method_signature.return_annotation
-    if return_type == inspect.Signature.empty:
-        if expect_return:
-            raise TypeError(f"Method '{method_name}' in class '{cls.__name__}' does not have a return type annotation.")
-        else:
-            return_type = None
-    return parameter_types, return_type
-
-def get_constructor_type_hints(cls: Type[Any]) -> Dict[str, Any]:
-    """
-    Gets the type hints from the constructor (__init__) of a provided class,
-    excluding the first parameter (usually 'self').
-
-    :param cls: The layer to get the type hints from
-    :return: The type hint params, and return.
-    """
-    # Get the constructor type hint by fetching off init
-    output, _ = get_method_type_hints(cls, '__init__', expect_return=False)
-    return output
-
-def get_forward_type_hints(cls: Type[Any]) -> Tuple[Dict[str, Any], Any]:
-    """
-    Gets the type hints from the forward method of a provided torch layer
-
-    :param cls: The provided torch layer
-    :return: The parameters and their type hints, then the return type hint.
-    """
-    # Get the forward type hint by fetching off forward
-    return get_method_type_hints(cls, 'forward', expect_return=True)
-
 def is_type_hint(obj: Any) -> bool:
     """
     Checks if the passed object is a valid type hint.
@@ -224,6 +157,315 @@ def is_sub_type_hint(origin_hint: Any,
             return False
     return True
 
+def get_signature_type_hints(method_name: str,
+                             class_name: str,
+                            signature: inspect.Signature,
+                            expect_return: bool
+                            ) -> Tuple[Dict[str, Any], Any]:
+    """
+    Gets the type hints for the parameters and return type of a provided method
+    from the given class, excluding the first parameter (usually 'self'). Notably,
+    it does not distinguish between varidacs and normal typing parameters, but can
+    still fetch types off varidacs.
+
+    :param signature: The provided signature.
+    :return: A tuple containing:
+        - A dictionary mapping method parameter names to their type hints.
+        - The return type hint of the method.
+    :raises ValueError: If the method does not have a return type annotation
+                        or if any parameter is missing a type annotation.
+    """
+    # Get the method signature
+    method_params = signature.parameters
+    param_names = list(method_params.keys())
+
+    # Exclude the first parameter (usually 'self')
+    param_names = param_names[1:]
+
+    # Build a dictionary of parameter names to their type hints
+    parameter_types = {}
+    for name in param_names:
+        if method_params[name].annotation == inspect.Parameter.empty:
+            raise TypeError(f"Parameter '{name}' in method '{method_name}' of class '{class_name}' does not have a type annotation.")
+        parameter_types[name] = method_params[name].annotation
+
+    # Get the return type hint and raise an error if it is missing
+    return_type = signature.return_annotation
+    if return_type == inspect.Signature.empty:
+        if expect_return:
+            raise TypeError(f"Method '{method_name}' in class '{cls.__name__}' does not have a return type annotation.")
+        else:
+            return_type = None
+    return parameter_types, return_type
+
+def get_constructor_spec(abstract_cls: Type[nn.Module]
+                         )->Tuple[inspect.Signature, Dict[str, Any]]:
+    """
+    Gets constructor data. This includes the signature, and the typing on each parameter
+    :return:
+        - Signature
+        - Typing for each parameter
+    """
+    signature = inspect.signature(abstract_cls.__init__)
+    params, _ = get_signature_type_hints("__init__", abstract_cls.__name__,
+                                         signature, expect_return=False)
+    return signature, params
+
+def get_forward_spec(abstract_cls: Type[nn.Module]
+                     )->Tuple[inspect.Signature, Dict[str, Any], Any]:
+    """
+    Get the forward spec, including the return
+    :param abstract_cls: The class to work with
+    :return:
+        - Signature
+        - Typing for each parameter
+        - Return typing
+    """
+    if abstract_cls.forward.__name__ != "forward":
+        raise TypeError(f"Class '{abstract_cls.__name__}' still has default forward method.")
+
+    signature = inspect.signature(abstract_cls.forward)
+    params, return_type = get_signature_type_hints("forward", abstract_cls.__name__,
+                                         signature, expect_return=True)
+    return signature, params, return_type
+class AbstractClassSchemaEnforcer:
+    """
+    `AbstractClassSchemaEnforcer` ensures that any implementation of an abstract
+    class continues to match its interface. This class is used to verify that the
+    constructor and forward method of an implementation match the expected typing
+    from the abstract class.
+
+    This ensures compatibility when swapping different layers into the same registry.
+    """
+    @property
+    def constructor_schema(self)->Dict[str, Any]:
+        return self.constructor_spec[1]
+
+    @property
+    def forward_schema(self)->Dict[str, Any]:
+        return self.forward_spec[1]
+
+    @property
+    def return_schema(self)->Any:
+        return self.forward_spec[2]
+    def __init__(self,
+                 cls_abstract: Type[nn.Module],
+                 ):
+
+        # Inspect it.
+        self.name = cls_abstract.__name__
+        self.cls_interface = cls_abstract
+        self.constructor_spec = get_constructor_spec(cls_abstract)
+        self.forward_spec = get_forward_spec(cls_abstract)
+
+    def validate_constructor_specification(self, cls_implementation: Type[nn.Module]):
+        """
+        Validates that the class constructor specification is sane. We throw if not
+        :param cls_implementation: The implementation to validate
+        :raises TypeError: If various issues happen
+        """
+        # Fetch the data to compare.
+        constructor_signature, constructor_params = get_constructor_spec(cls_implementation)
+        expected_signature, expected_params = self.constructor_spec
+
+        # Constructors are considered compatible if and only if they
+        # implement the entire expected signature, however there can be
+        # more required features in the implementation constructor than the
+        # interface one
+
+        for name, type in expected_params.items():
+            if name not in constructor_params:
+                raise TypeError(f"Implementation constructor missing parameter {name}")
+            if not is_sub_type_hint(type, constructor_params[name]):
+                msg = f"""
+                Types did not match for parameter '{name}'
+                AbstractInterface: '{type}'
+                Implementation: {constructor_params[name]}
+                """
+                msg = textwrap.dedent(msg)
+                raise TypeError(msg)
+
+    def validate_forward_specification(self, cls_implementation: Type[nn.Module]):
+        """
+        Validates the forward implementation is sane.
+        :param cls_implementation:
+        :return:
+        """
+        # Get data to compare
+        signature, param_types, return_type = get_forward_spec(cls_implementation)
+        expected_signature, expected_params, expected_return = self.forward_spec
+
+        # If the implementation differs, throw.
+        if param_types.keys() != expected_params.keys():
+            msg = f"""
+            The forward interface expected to see, in order, features: 
+
+            {expected_params.keys()}
+
+            However, actually implemented was:
+
+            {param_types.keys()}
+            """
+            msg = textwrap.dedent(msg)
+            raise TypeError(msg)
+
+        # Check the actual types match
+        for name in param_types.keys():
+            if not is_sub_type_hint(expected_params[name], param_types[name]):
+                msg = f"""
+                Issue found at parameter {name}
+                The forward interface expected to see a type of: {expected_params[name]}.
+                However, actual implementation was: {param_types[name]}.
+                These are not compatible.
+                """
+                msg = textwrap.dedent(msg)
+                raise TypeError(msg)
+
+        # Check the types of the return match
+        if not is_sub_type_hint(expected_return, return_type):
+            msg = f"""
+            Forward interface's return different from implementation.
+
+            The forward interface was expected to match type {expected_return}.
+            However, actually observed: {return_type}.
+            """
+            msg = textwrap.dedent(msg)
+            raise TypeError(msg)
+
+    def __call__(self, cls_implentation: Type[nn.Module]):
+        """
+        Perform validation. Includes inspection actions
+        :param cls_implentation: The class to verify matches the schema
+        :raises TypeError: If they do not match. Various error messages
+        """
+
+        if not issubclass(cls_implentation, self.cls_interface):
+            msg = f"""
+            Issue encountered. Attempted to register a class that was not a 
+            subclass of the interface. 
+            Class: {cls_implentation}
+            Interface: {self.cls_interface}
+            """
+            msg = textwrap.dedent(msg)
+            raise TypeError(msg)
+
+        self.validate_constructor_specification(cls_implentation)
+        self.validate_forward_specification(cls_implentation)
+
+class ImplementationBuilder:
+    """
+    A helper class responsible for validating constructor arguments against an implementation's
+    expected type hints and for building instances of torch layers.
+
+    The `ImplementationBuilder` ensures that any parameters provided for initializing a class
+    match the expected types as specified by the class's constructor. It validates arguments,
+    handles variable-length arguments (varargs and kwargs), and checks compatibility with
+    expected type hints using `typeguard`. Upon successful validation, it builds and returns
+    an instance of the class.
+
+    ---- Purpose ----
+
+    This class provides a mechanism for:
+    * Ensuring that arguments passed for constructing a layer match the type hints provided
+      in the implementation.
+    * Handling complex cases, such as variable-length arguments or keyword arguments.
+    * Providing a unified interface for validating and instantiating torch layer implementations.
+
+    ---- Properties ----
+
+    * `constructor_types`: A dictionary mapping constructor parameter names to their expected types.
+    * `constructor_signature`: The `inspect.Signature` of the constructor, used to bind arguments and validate them.
+
+    ---- Methods ----
+
+    * `__call__`: Attempts to validate and instantiate the implementation with the provided arguments.
+    * `check_spec_matches`: Ensures that the provided parameter matches the expected type, raising a `TypeError` if not.
+    * `is_varidac_keywords`: Determines if the given parameter name is a `**kwargs` argument in the constructor.
+    * `is_varidac_args`: Determines if the given parameter name is a `*args` argument in the constructor.
+    """
+    @property
+    def constructor_types(self)->Dict[str, Any]:
+        return self.constructor_spec[1]
+
+    @property
+    def constructor_signature(self)->inspect.Signature:
+        return self.constructor_spec[0]
+
+    def is_varidac_keywords(self, parameter: str)->bool:
+        return self.constructor_signature.parameters[parameter].kind == inspect.Parameter.VAR_KEYWORD
+
+    def is_varidac_args(self, parameter: str)->bool:
+        return self.constructor_signature.parameters[parameter].kind == inspect.Parameter.VAR_POSITIONAL
+
+    def __init__(self,
+                 implementation: Type[nn.Module],
+                 ):
+
+        # Store away the spec
+        self.constructor_spec = get_constructor_spec(implementation)
+        self.implementation = implementation
+        self.indirections = {}
+
+    def check_spec_matches(self, parameter: Any, type: Type):
+        """
+        Checks if the spec typing matches
+        :param parameter: The thing we are trying to use as a parameter
+        :param type: The type it must match
+        :raises TypeError: If they do not match
+        """
+        try:
+            typeguard.check_type(parameter, type)
+        except typeguard.TypeCheckError as e:
+            raise TypeError(f"Parameter '{parameter}' has an invalid type: {e}") from e
+    def __call__(self, *args, **kwargs):
+        """
+        Runs the validation.
+        :param args: The args to attempt initialization with
+        :param kwargs: The kwargs to attempt initialization with
+        :raises TypeError: If a variety of issues occur
+        """
+        # Get data to use
+
+        signature, param_types = self.constructor_spec
+
+        # Try to bind the arguments to the signature. This now
+        # ensures we can associate them downstream with the correct type
+        bindings = signature.bind("self",*args, **kwargs)
+
+        # Go over each binding slot. Ensure all in each slot has correct type
+        # Note that the bindings feature can now have direct feature, and arg,
+        # kwargs dictionaries
+
+        for bound_name, bound_value in bindings.arguments.items():
+            if bound_name == "self":
+                continue
+
+            # Get the type we must match
+            bound_type = param_types[bound_name]
+
+            # the varidac args case requires special handling. In particular,
+            # we need to figure out the type, then assert is is applied across
+            # all the matches
+            if self.is_varidac_args(bound_name):
+                for arg in bound_value:
+                    self.check_spec_matches(arg, bound_type)
+
+            # The varidac keywords has a similar requirement
+            if self.is_varidac_keywords(bound_name):
+                for arg in bound_value._values():
+                    self.check_spec_matches(arg, bound_type)
+
+            # And if neither, it is just normal binding
+            self.check_spec_matches(bound_value, bound_type)
+
+        # We succeeded in validation. Init
+
+        return self.implementation(*args, **kwargs)
+
+
+
+
+
 class TorchLayerRegistry(Generic[RegisteredType]):
     """
     A specialized registry mechanism designed specifically to provide an
@@ -280,7 +522,7 @@ class TorchLayerRegistry(Generic[RegisteredType]):
     by allowing a registry to include other builders as part of its constructor.
 
     Example: Consider building a transformer model that consists of multiple components
-    such as feedforward layers, self-attention layers, and cross-attention layers.
+    such as feedforward layers, self-long_term_memories layers, and cross-long_term_memories layers.
     Instead of manually creating each layer, you can nest builders into the transformer
     registry.
 
@@ -317,13 +559,13 @@ class TorchLayerRegistry(Generic[RegisteredType]):
         def forward(self, tensor: torch.Tensor)->torch.Tensor:
             ....
 
-    linear = TorchLayerRegistry[AbstractLinear]("Linear", AbstractLinear)
+    linear_registry = TorchLayerRegistry[AbstractLinear](AbstractLinear)
 
     # Stores torch's linear
-    linear.register_class("normal",nn.Linear)
+    linear_registry.register_class("normal",nn.Linear)
 
     # Builds a copy
-    instance = linear.build("normal", in_features=3, out_features=4, bias=False)
+    instance = linear_registry.build("normal", in_features=3, out_features=4, bias=False)
     ```
 
     It should also be noted that keywords must match exactly. For instance, the following
@@ -355,7 +597,7 @@ class TorchLayerRegistry(Generic[RegisteredType]):
     ```python
 
     # Creates a registry
-    linear = TorchLayerRegistry[AbstractLinear]("Linear", AbstractLinear)
+    linear = TorchLayerRegistry[AbstractLinear](AbstractLinear)
 
     # Stores torch's linear
     linear.register_class("normal",nn.Linear)
@@ -385,7 +627,7 @@ class TorchLayerRegistry(Generic[RegisteredType]):
     class abstract_feedforward(nn.Module):
         ...
 
-    # Define a builder for an attention layer and for feedforward
+    # Define a builder for an long_term_memories layer and for feedforward
     attention_builder = TorchLayerRegistry[abstract_attention]("Attention", abstract_attention)
     feedforward_builder = TorchLayerRegistry[abstract_feedforward]("Feedforward", abstract_feedforward)
 
@@ -411,7 +653,7 @@ class TorchLayerRegistry(Generic[RegisteredType]):
 
     # Construct a transformer. Notice the use of the names of the registries,
     # that is of 'Attention' and 'Feedforward',
-    # in order to specify what kind of attention and feedforward to use
+    # in order to specify what kind of long_term_memories and feedforward to use
 
     transformer = transformer_builder.build("transformer",
                                              d_model=128,
@@ -423,7 +665,7 @@ class TorchLayerRegistry(Generic[RegisteredType]):
     """
     @property
     def layer_abstract_type(self)->Type[Any]:
-        return self.__orig_class__
+        return self.layer_type
 
     @property
     def forward_parameter_schema(self)->Dict[str, Any]:
@@ -440,7 +682,7 @@ class TorchLayerRegistry(Generic[RegisteredType]):
     def __init__(self,
                  registry_name: str,
                  abstract_layer: nn.Module,
-                 **registry_indirections: Dict[str, 'TorchLayerRegistry']
+                 **registry_indirections: 'TorchLayerRegistry'
                  ):
         """
         Initialize the registry builder. If desired, the user
@@ -455,11 +697,18 @@ class TorchLayerRegistry(Generic[RegisteredType]):
                                      here that collide with constructor keywords from the interface,
                                      it is possible to build that parameter by indirection.
         """
+        # Basic type checking
+        if not isinstance(registry_name, str):
+            raise TypeError("Registry name must be a string.")
+        if not isinstance(abstract_layer, type):
+            raise TypeError("abstract_layer must be a class, not an instance.")
+        if not issubclass(abstract_layer, nn.Module):
+            raise TypeError("abstract_layer must be a flavor of nn.Module")
 
-        # Get the interfaces for the constructor and for forward
+        # Build the schema enforce
 
-        constructor_interface = get_constructor_type_hints(abstract_layer)
-        forward_params, forward_returns = get_forward_type_hints(abstract_layer)
+        schema_enforcer = AbstractClassSchemaEnforcer(abstract_layer)
+
 
         # Now, go over the registry indirections and make sure they make sense
         for name, registry in registry_indirections.items():
@@ -471,14 +720,14 @@ class TorchLayerRegistry(Generic[RegisteredType]):
                 msg = textwrap.dedent(msg)
                 raise TypeError(msg)
 
-            if name not in constructor_interface:
+            if name not in schema_enforcer.constructor_schema:
                 msg = f"""
                 Indirection registry of name '{name}' was not found among
                 constructor arguments
                 """
                 msg = textwrap.dedent(msg)
                 raise TypeError(msg)
-            if not is_sub_type_hint(constructor_interface[name], registry.constructor_schema):
+            if not issubclass(schema_enforcer.constructor_schema[name], registry.layer_abstract_type):
                 msg = f"""
                 Abstract interface and indirection registry named {registry.registry_name} were
                 found to be incompatible
@@ -487,96 +736,17 @@ class TorchLayerRegistry(Generic[RegisteredType]):
                 raise TypeError(msg)
 
         # Setup and otherwise store intake details.
-        self.forward_parameters = forward_params
-        self.forward_returns = forward_returns
-
-        self.registry_name = registry_name
-        self.constructor_required_schema = constructor_interface
-        self.registry_indirections = registry_indirections
-
-        self.registry: Dict[str, Dict[str, Any]] = {}
-
-    def validate_forward_schema(self, cls: Type[RegisteredType]):
-        """
-        Validates that the class has a forward schema that is compatible
-        with the registry.
-        :param cls: The class to examine
-        :raises TypeError: If the class has a forward schema that is not compatible
-        """
-        forward_parameters, forward_returns = get_forward_type_hints(cls)
-
-        # If the implementation differs, throw.
-        if forward_parameters.keys() != self.forward_parameters.keys():
-            msg = f"""
-            The forward interface expected to see, in order, features: 
-            
-            {self.forward_parameters.keys()}
-            
-            However, actually implemented was:
-            
-            {forward_parameters.keys()}
-            """
-            msg = textwrap.dedent(msg)
-            raise TypeError(msg)
-
-        # Check the actual types match
-        for name in forward_parameters.keys():
-            if not is_sub_type_hint(self.forward_parameters[name], forward_parameters[name]):
-                msg = f"""
-                Issue found at parameter {name}
-                The forward interface expected to see a type of: {self.forward_parameters[name]}.
-                However, actual implementation was: {forward_parameters[name]}.
-                These are not compatible.
-                """
-                msg = textwrap.dedent(msg)
-                raise TypeError(msg)
-
-        # Check the types of the return match
-        if not is_sub_type_hint(self.forward_returns, forward_returns):
-            msg = f"""
-            Forward interface's return different from implementation.
-            
-            The forward interface was expected to match type {self.forward_returns}.
-            However, actually observed: {forward_returns}.
-            """
-            msg = textwrap.dedent(msg)
-            raise TypeError(msg)
-
-    def validate_constructor_schema(self, cls: Type[RegisteredType]):
-        """
-        Validates the constructor schema is valid.
-        :param cls: The class to validate the constructor schema on
-        :raises TypeError: If the class has a constructor schema that is not compatible
-        """
-
-        constructor_schema = get_constructor_type_hints(cls)
-
-        # Loop over any required types. Verify existence. Verify they
-        # have the same type hints.
-        for required_name, required_type in self.constructor_required_schema.items():
-            if required_name not in constructor_schema:
-                msg = f"""
-                The registry expects registered classes to accept a constructor
-                keyword of name {required_name}. That was not found in class
-                of name '{cls.__name__}'
-                """
-                msg = textwrap.dedent(msg)
-                raise TypeError(msg)
-            if not is_sub_type_hint(required_type, constructor_schema[required_name]):
-                msg = f"""
-                The registry expects the registered class to have a parameter typehint
-                for '{required_name}' of '{required_type}'. However, class named {cls.__name__}
-                implements it as {constructor_schema[required_name]}
-                """
-                msg = textwrap.dedent(msg)
-                raise TypeError(msg)
+        self.layer_type = abstract_layer
+        self.interface_validation = AbstractClassSchemaEnforcer(abstract_layer)
+        self.registry: Dict[str, ImplementationBuilder] = {}
+        self.indirections = registry_indirections
 
     def register_class(self,
                        name: str,
                        class_type: Type[RegisteredType]
                        ):
         """
-        Registers a class in the registry by its name, type, and constructor parameters.
+        Registers a class in the registry by name, and implementation
 
         Args:
             name (str): The name under which to register the class.
@@ -586,18 +756,14 @@ class TorchLayerRegistry(Generic[RegisteredType]):
                                   This class must have a constructor with fully
                                   expressed type hints.
         """
-        # Get the required schema for the constructor
-        constructor_schema = get_constructor_type_hints(class_type)
 
         # Validate
-        self.validate_forward_schema(class_type)
-        self.validate_constructor_schema(class_type)
+        if not isinstance(class_type, type):
+            raise TypeError("class_type must be a class, not a instance.")
+        self.interface_validation(class_type)
 
         # Everything passed validation. Store
-        self.registry[name] = {
-            "type": class_type,
-            "params": constructor_schema
-        }
+        self.registry[name] = ImplementationBuilder(class_type)
 
     def is_optional_type(self, type_hint: Type) -> bool:
         """
@@ -615,66 +781,57 @@ class TorchLayerRegistry(Generic[RegisteredType]):
 
     def build(self, name: str, **params: Dict[str, Any]) -> RegisteredType:
         """
-        Instantiates a registered class using the provided parameters.
+        Instantiates a registered class using the provided parameters. If a parameter is missing
+        and marked as optional, it will be set to `None`. If the parameter requires indirection
+        through another registered builder, it will be built automatically if the implementation
+        is provided
 
-        Args:
-            name (str): The name of the registered class to instantiate.
-            params (Dict[str, Any]): A dictionary containing the parameters to pass
-                to the constructor of the class.
-
-        Returns:
-            T: An instance of the registered class of the expected generic type.
-
-        Raises:
-            ValueError: If the class is not registered, or if a required parameter is missing or has an invalid type.
+        :param name: The name of the implementation to build
+        :param **params: The various pieces that can be used while building.
+        :return: A setup torch layer.
+        :raises KeyError: If the implementation was never registered
+        :raises RuntimeError: If builder indirection fails
+        :raises TypeError: If params have wrong type.
         """
         if name not in self.registry:
-            raise ValueError(f"Class '{name}' is not registered.")
+            raise KeyError(f"Class '{name}' is not registered.")
 
-        class_info = self.registry[name]
-        class_type = class_info["type"]
-        required_params = class_info["params"]
+        implementation_builder = self.registry[name]
+        required_params = implementation_builder.constructor_types
 
+        # Perform standardization. Handle any builder indirection or
+        # optional cases.
         constructor_args = {}
         for param_name, param_type in required_params.items():
-            # Check if the parameter exists in the passed params
+
+            # If dealing with something marked as optional, it may be missing. That is
+            # okay
             if param_name not in params:
-                # There are several reasons why param names may be missing, and we can recover
-                # from some of them
-
-                if param_name in self.registry_indirections:
-                    # If the name was missing, but found in the builders group, we are likely
-                    # being asked to recurrently run a child builder. Lets see if we can do that
-
-                    builder = self.registry_indirections[param_name]
-                    if builder.registry_name not in params:
-                        msg = f"""
-                        Attempt was made to run a subbuilder. However, keyword '{builder.registry_name}'
-                        was not found, preventing this from happening
-                        """
-                        msg = textwrap.dedent(msg)
-                        raise ValueError(msg)
-
-                    build_class = params[builder.registry_name]
-                    constructor_args[param_name] = builder.build(build_class, **params)
-
                 if self.is_optional_type(param_type):
-                    # Optional means none
+                    # Optional means none. We can insert that
                     constructor_args[param_name] = None
                 else:
                     # Not recoverable.
                     raise ValueError(f"Missing required parameter '{param_name}' for class '{name}'.")
+
+            # Sometimes, we might be dealing with builder indirection. When
+            # it is detected, we can run the indirection.
+            elif param_name in self.indirections:
+                subbuilder = self.indirections[param_name]
+                if not isinstance(params[param_name], subbuilder.layer_abstract_type):
+                    try:
+                        constructor_args[param_name] = subbuilder.build(params[param_name], **params)
+                    except Exception as e:
+                        raise RuntimeError(f"Error while building with indirection for {param_name}") from e
+                else:
+                    constructor_args[param_name] = params[param_name]
+
+            # It was present, not a builder. Just insert
             else:
-                value = params[param_name]
-                # Use typeguard to check the type of the parameter
-                try:
-                    typeguard.check_type(value, param_type)
-                    constructor_args[param_name] = value
-                except typeguard.TypeCheckError as e:
-                    raise TypeError(f"Parameter '{param_name}' has an invalid type: {e}") from e
+                constructor_args[param_name] = params[param_name]
 
         # Instantiate the class with the collected arguments
-        return class_type(**constructor_args)
+        return implementation_builder(**constructor_args)
 
     def register(self,
                  name: str

@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from typing import Optional
-from src.main.model.banks import BankedLinear, BankSelector
+from src.main.model.virtual_layers import BankedLinear, BankSelector
 
 class Feedforward(nn.Module):
     """
@@ -91,7 +91,7 @@ class BankedFeedforward(nn.Module):
         :param tensor: The input tensors
             - Shape (..., d_model)
         :return:
-            - The processed attention pieces
+            - The processed long_term_memories pieces
             - Shape (..., bank_select, d_model)
         """
         # Create bank select and add dimensions

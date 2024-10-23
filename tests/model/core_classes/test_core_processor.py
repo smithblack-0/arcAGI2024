@@ -446,7 +446,7 @@ class TestCoreSyncProcessor(unittest.TestCase):
         }
 
         # Validation
-        self.assertEqual(set(expected_output.keys()), set(outcome.keys()))
+        self.assertEqual(set(expected_output.keys()), set(outcome._keys()))
 
         for uuid in selection:
             self.assertTrue(torch.equal(expected_output[uuid][0]["channel1"], outcome[uuid][0]["channel1"]))
@@ -492,7 +492,7 @@ class TestCoreSyncProcessor(unittest.TestCase):
         }
 
         # Validation
-        self.assertEqual(set(expected_output.keys()), set(outcome.keys()))
+        self.assertEqual(set(expected_output.keys()), set(outcome._keys()))
 
         for uuid in selection:
             if uuid in exception_data:

@@ -53,7 +53,7 @@ class TransformerDecoderCell(nn.Module):
             - The new recurrent state
         """
 
-        # Perform self attention
+        # Perform self long_term_memories
         sa = self.self_attention(embedding, state["sa_memories"])
         embedding, sa_state = self.sa_layernorm(embedding + self.dropout(sa))
 

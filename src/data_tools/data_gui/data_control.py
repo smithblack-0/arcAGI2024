@@ -94,7 +94,7 @@ class UnblockableButton(QPushButton):
     """
     An UnblockableButton that emits a specific event when clicked.
 
-    It is also capable of flashing to bring attention to itself when
+    It is also capable of flashing to bring long_term_memories to itself when
     a user tries to click a blocked button.
     """
 
@@ -238,7 +238,7 @@ class DataManager(QFrame):
         If there is no next key, returns the current key instead.
         """
         assert not self.case_change_is_blocked
-        keys = list(self.data.keys())
+        keys = list(self.data._keys())
         index = keys.index(self.editing_key)
         if index == len(keys) - 1:
             return self.editing_key
@@ -251,7 +251,7 @@ class DataManager(QFrame):
         :return: The last key
         """
         assert not self.case_change_is_blocked
-        keys = list(self.data.keys())
+        keys = list(self.data._keys())
         index = keys.index(self.editing_key)
         if index == 0:
             return self.editing_key
@@ -330,7 +330,7 @@ class DataManager(QFrame):
         self.main_layout.addWidget(self.data_control_display)
 
         # Setup the default editing case
-        first_key = next(iter(self.data.keys()))
+        first_key = next(iter(self.data._keys()))
         self.edit_case_with_key(first_key)
 
         # Attach unsaved changes button blocking

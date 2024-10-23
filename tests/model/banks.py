@@ -1,7 +1,7 @@
 
 import torch
 import unittest
-from src.main.model.banks import BankedLinear
+from src.main.model.virtual_layers import BankedLinear
 class TestBankedLinear(unittest.TestCase):
 
     def create_banked_linear(self, in_features, out_features, num_banks):

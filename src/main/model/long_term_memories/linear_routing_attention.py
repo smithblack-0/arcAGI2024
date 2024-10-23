@@ -1,11 +1,12 @@
-from typing import Tuple, Optional, Any
 
 import torch
 from fast_transformers import builders
 from torch import nn
 from src.main.model.base import DropoutLogits, TensorTree
-from src.main.model import banks
+from src.main.model import virtual_layers
 from .base import RecurrentAttention, recurrent_self_attention_registry
+from typing import Tuple, Optional, Any
+
 class MakeHeads(nn.Module):
     """
     Exactly what it says on the tin. Designed to make
@@ -73,7 +74,7 @@ class MergeHeads(nn.Module):
 @recurrent_self_attention_registry.register("LinearRoutingAttention")
 class LinearRoutingAttention(RecurrentAttention):
     """
-    Recurrent linear routing attention, with head
+    Recurrent linear routing long_term_memories, with head
     decay based on natural decay and update strength.
     It operates in linear time.
 
@@ -122,7 +123,7 @@ class LinearRoutingAttention(RecurrentAttention):
         self.write_logits_projector = banks.BankedLinear(d_head, 1, num_heads,
                                                          expand=False, squeeze=False)
 
-        # Set up the attention mechanism.
+        # Set up the long_term_memories mechanism.
 
         self.rla = builders.RecurrentAttentionBuilder.from_kwargs(query_dimensions = d_head)
 
@@ -220,10 +221,10 @@ class LinearRoutingAttention(RecurrentAttention):
 
         # Compute the subset of the head state we are going to work with
 
-        submatrix = banks.banked_state_select(matrix, selection, dim=-3)
-        subnormalizer = banks.banked_state_select(normalizer, selection, dim=-2)
+        submatrix = banks.virtual_state_select(matrix, selection, dim=-3)
+        subnormalizer = banks.virtual_state_select(normalizer, selection, dim=-2)
 
-        # Perform attention. Figure out the state update as the difference
+        # Perform long_term_memories. Figure out the state update as the difference
         # between the new and original state
         output, (new_submatrix, new_subnormalizer) = self.rla(query, key, value, [submatrix, subnormalizer])
 
@@ -250,8 +251,8 @@ class LinearRoutingAttention(RecurrentAttention):
 
         # Now insert this back into the main context.
 
-        matrix = banks.banked_state_scatter(matrix, submatrix, selection, dim=-3)
-        normalizer = banks.banked_state_scatter(normalizer, subnormalizer, selection, dim=-2)
+        matrix = banks.virtual_state_scatter(matrix, submatrix, selection, dim=-3)
+        normalizer = banks.virtual_state_scatter(normalizer, subnormalizer, selection, dim=-2)
 
         # Finally, lets go resolve all those heads!
 
