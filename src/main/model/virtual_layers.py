@@ -52,24 +52,52 @@ class DropoutLogits(nn.Module):
 class SelectionSpec:
     """
     A specification for selecting and weighting different virtual layers
-    (previously referred to as "banks").
+    (previously referred to as "banks") in the context of a virtualized
+    model architecture.
 
     This structure encapsulates both the indices of the virtual layers involved
-    in the computation and the probabilities or weights associated with each
-    selected layer. This is useful in scenarios where multiple virtual layers
-    are used in parallel, and their contributions need to be weighted dynamically.
+    in the computation and the associated probabilities or weights that define
+    their contributions. It is particularly useful when multiple virtual layers
+    are selected and their contributions need to be combined, either through
+    superposition or discrete selection.
+
+    ---- Broadcast and Interpretation Behavior ----
+    The `SelectionSpec` serves as a flexible way to express which virtual layers
+    (or banks) should be used for a given operation. However, the actual **interpretation**
+    of this selection—how it influences tensor operations—depends on the class that uses it
+    (such as `VirtualBuffer`, `VirtualParameter`, etc.).
+
+    These classes take the `SelectionSpec` and **interpret it dynamically**:
+    - Some classes may add **extra dimensions** to the data (for instance, for batch-like features).
+    - Others might combine selected layers by broadcasting over additional data dimensions.
+
+    The selection and broadcasting behavior is not hardcoded into `SelectionSpec` itself but
+    rather relies on the class that interprets it. This flexibility allows the same `SelectionSpec`
+    to be reused across different operations, each adapting the selection mechanism according to
+    its own needs.
+
+    ---- Example: Batch and Data Dimensions ----
+    When applied, the selection mechanism can target different combinations of batch and data dimensions.
+    For example, a selection might apply across batch dimensions, but depending on the context, the selected
+    layers can be **broadcasted over data dimensions** to form a complete tensor expression. This reduces
+    the need for restructuring tensors and allows operations to adapt to multi-dimensional tensors efficiently.
 
     ---- Fields ----
     selection_index (torch.Tensor):
         An integer tensor containing the indices of the virtual layers selected
         for the current operation. Each index points to a specific layer in a
-        collection of layers. Shape: (..., num_selected_virtual_layers).
+        collection of virtual layers.
+        - Shape: (..., num_selected_virtual_layers).
+        The shape can vary depending on how many dimensions the selection applies to.
+        Batch dimensions are explicitly handled, while data dimensions are broadcast as needed.
 
     selection_probabilities (torch.Tensor):
         A tensor containing the probabilities or weights that determine how
         strongly each selected virtual layer contributes to the final result.
-        This is used to calculate a weighted superposition of the selected
-        layers. Shape: (..., num_selected_virtual_layers).
+        This is used to calculate a weighted superposition of the selected layers.
+        - Shape: (..., num_selected_virtual_layers).
+        Like `selection_index`, this tensor's shape can accommodate different dimensions,
+        and will broadcast over remaining data dimensions as required.
     """
     selection_index: torch.Tensor
     selection_probabilities: torch.Tensor
@@ -80,29 +108,64 @@ def virtual_state_select(state: torch.Tensor,
                          dim: int,
                          superposition: bool = True) -> torch.Tensor:
     """
-    Selects and compresses a subset of virtual layers (previously referred to as "banks")
-    from the given state tensor along the specified dimension, applying weights to form
-    a superposition of the selected virtual layers.
+    Selects and compresses a subset of virtual layers (also called "banks")
+    from the provided `state` tensor along the specified dimension (`dim`).
+    This operation either combines the selected layers into a weighted
+    superposition or keeps them separate, depending on the `superposition` flag.
 
-    A "superposition" refers to a mechanism where multiple virtual layers are selected
-    with probabilities and then combined into a single layer representation. This
-    representation can then be processed using standard operations.
+    ---- Superposition and Selection ----
 
-    :param state: The state to select from. Shape should be (...batch, ..., options, ...),
-                  where 'options' represents the available virtual layers.
-    :param selection: The specification for selecting and weighting virtual layers. Made up of:
-        - selection_index: The indices of the virtual layers to select. Shape (...batch, selected)
-        - selection_probabilities: The probabilities or weights for each selected virtual layer.
-                                    Shape (...batch, selected)
-    :param dim: The dimension along which the selection will be performed.
-    :param superposition: Whether to reduce the selected layers into a superposition by weighting
-                          them according to their probabilities. If False, the selected layers
-                          will be returned without combining.
-    :return: The selected and optionally superposed features.
-        - Shape (...batch, ..., selected, ...) if not in superposition
-        - Shape (...batch, ...) if in superposition.
+    A "superposition" refers to a weighted combination of multiple virtual layers,
+    where the selected layers are combined according to probabilities from
+    the `SelectionSpec`. The final output is a tensor that represents the
+    weighted sum of the selected layers.
+
+    When `superposition=False`, the function gathers the selected layers
+    and returns them separately along the specified dimension. It does not
+    use the probabilities to weight them.
+
+    ---- Parameters ----
+    :param state:
+        - A tensor representing the current state from which virtual layers
+          are selected.
+        - Shape: (...batch, ..., options, ...), where the `options` dimension
+          contains the available virtual layers.
+        - The `state` tensor may contain additional data dimensions, which
+          will be broadcast automatically.
+
+    :param selection:
+        - A `SelectionSpec` object containing the selection indices and
+          probabilities.
+        - `selection_index`: The indices of the virtual layers to select
+          (tensor of shape: (...batch, selected)).
+        - `selection_probabilities`: Probabilities or weights for each
+          selected virtual layer (tensor of shape: (...batch, selected)).
+
+    :param dim:
+        - The dimension of the `state` tensor that represents the "virtual layer"
+          or "bank" dimension.
+        - The operation gathers values along this dimension.
+
+    :param superposition:
+        - If `True`, the function reduces the selected layers into a single
+          tensor by weighting them according to `selection_probabilities`.
+        - If `False`, the selected layers are returned without combining,
+          and the result will contain separate layers in the selected dimension.
+
+    ---- Returns ----
+    :return: A tensor containing the selected and optionally superposed features.
+        - If `superposition=True`, returns a tensor of shape (...batch, ...),
+          collapsing the selected layers.
+        - If `superposition=False`, returns a tensor of shape (...batch, ...,
+          selected, ...), keeping the selected layers separate.
+
+    ---- Key Notes ----
+    - The `state` tensor can include common batch dimensions as well as extra
+      data dimensions.
+    - The `SelectionSpec` defines how the selection and weighting of virtual
+      layers occur, but the interpretation of the selected layers (and
+      broadcasting) is handled within this function.
     """
-
     # Unpack selection tuple
     indices = selection.selection_index
     probabilities = selection.selection_probabilities
@@ -138,67 +201,63 @@ def virtual_state_scatter(state: torch.Tensor,
                           superposition: bool = True
                           ) -> torch.Tensor:
     """
-    Inserts a `substate` tensor into a larger `state` tensor along the specified `dim` dimension.
-    The insertion is guided by indices and interpolation probabilities provided by the `selection`
-    dataclass. The process interpolates between the original `state` values and the new `substate` values.
+    Inserts a `substate` tensor into a larger `state` tensor along the specified
+    `dim` dimension. The insertion is guided by indices and interpolation
+    probabilities provided in the `SelectionSpec`. This process interpolates
+    between the original `state` values and the new `substate` values.
+    You might think of it as "smearing" the substate across the selection
+    weighted by the selection probabilities. A probability of 1.0 for a position
+    results in a complete replacement of the element
 
     ---- Parameters ----
     :param state: The original state tensor to update.
-        - If `superposition=False`: Shape is (..., batch_size, ..., num_options, ...)
-        - If `superposition=True`: Shape is (..., batch_size, ...)
-        - This is the base tensor that gets updated with interpolated values from `substate`.
+        - If `superposition=False`: Shape (..., batch_size, ..., num_options, ...)
+        - If `superposition=True`: Shape (..., batch_size, ...)
+        - The base tensor that gets updated with interpolated values from `substate`.
 
     :param substate: The tensor holding new values to insert into `state`.
         - Shape: (..., batch_size, ..., num_selected, ...)
-        - This is the tensor with the values to update in `state`, using the indices and probabilities from `selection`.
+        - The values in this tensor are inserted into `state`, using the indices
+          and probabilities from `selection`.
 
     :param selection: A `SelectionSpec` dataclass that specifies:
-        - `selection_index`: Tensor containing indices of the positions in `state` to update.
-                             Shape is (..., batch_size, num_selected).
-        - `selection_probabilities`: Tensor with interpolation weights for each selected index.
-                                     Shape is (..., batch_size, num_selected).
-        - These are used to control both which locations in `state` are updated and how strongly
-          the new `substate` values replace the existing ones.
+        - `selection_index`: Tensor containing indices of the positions in `state`
+                             to update. Shape (..., batch_size, num_selected).
+        - `selection_probabilities`: Tensor with interpolation weights for each
+                                     selected index. Shape (..., batch_size,
+                                     num_selected).
+        - These control both the locations in `state` to update and the strength
+          of the update from `substate`.
 
-    :param dim: The dimension in `state` along which the updates should occur.
-        - This is the axis in the `state` tensor where the substate will be inserted, indexed using `selection`.
+    :param dim: The dimension of `state` where the updates occur.
+        - This is the axis in `state` where substate values will be inserted,
+          based on the indices from `selection`.
 
-    :param superposition: Boolean flag indicating whether the `state` tensor was previously reduced by a
-                          superposition operation (i.e., some dimensions collapsed or squeezed).
-        - If `True`, the function restores the missing dimension in `state` to match the substate's shape
-          before performing the update.
+    :param superposition: Boolean flag that indicates whether `state` was
+        previously reduced by a superposition operation (i.e., dimensions
+        collapsed or squeezed).
+        - If `True`, the function restores the missing dimension in `state` to
+          match `substate` shape before performing the update.
 
     ---- Returns ----
-    :return: A tensor with the same shape as `state`, updated using the interpolated values from `substate`
-             at the positions specified by `selection`.
+    :return: A tensor with the same shape as `state`, updated using interpolated
+             values from `substate` at positions specified by `selection`.
 
     ---- Behavior ----
-    - **Superposition Handling**: If `superposition=True`, the function first expands the missing dimension
-      in `state` to match the shape of `substate`, allowing proper alignment for the update.
+    - **Superposition Handling**: If `superposition=True`, the function first
+      expands the missing dimension in `state` to align with `substate`, ensuring
+      the update applies correctly.
 
-    - **Gather and Interpolate**: The function gathers the values from `state` at the selected indices,
-      interpolates between those values and the `substate` values using the interpolation probabilities,
-      and then scatters the updated values back into `state`.
+    - **Gather and Interpolate**: The function gathers values from `state` at
+      the specified indices, interpolates between them and `substate` using the
+      probabilities, and scatters the updated values back into `state`.
 
-    ---- Example ----
-    Suppose you have a `state` tensor of shape (10, 100, 50) and a `substate` tensor of shape (10, 10, 50).
-    Using a `SelectionSpec` object, you can select specific positions along the second dimension of `state`
-    and interpolate the new values from `substate` into `state` at those positions.
-
-    Example Code:
-
-    ```python
-    state = torch.randn(10, 100, 50)
-    substate = torch.randn(10, 10, 50)
-    selection = SelectionSpec(
-        selection_index=torch.randint(0, 100, (10, 10)),
-        selection_probabilities=torch.rand(10, 10)
-    )
-    updated_state = virtual_state_scatter(state, substate, selection, dim=1, superposition=False)
-    ```
-    - In this example, the function updates `state` by replacing values at the specified indices
-      (from `selection.selection_index`) using the interpolation weights (from `selection.selection_probabilities`).
-
+    ---- Key Notes ----
+    - The `state` tensor can contain extra batch or data dimensions, and this
+      function automatically broadcasts to handle these.
+    - The `SelectionSpec` defines the locations and weights for interpolation,
+      but the actual dimensions are handled dynamically by this function based on
+      the `state` and `substate`.
     """
     # Data standardization.
     if superposition:
@@ -225,7 +284,6 @@ def virtual_state_scatter(state: torch.Tensor,
 
     # If in a superposition, the indicated dimension was actually squeeze away
     # earlier. Restore it. This is essentially data standardization.
-
 
     # Move the selection dim to the end of the state tensor for easier processing
     state = state.movedim(dim, -1)  # (...batch, ..., options)
@@ -294,8 +352,8 @@ class VirtualParameter(nn.Module):
                      `torch.Tensor` and initializes the parameter in place.
         :return: An instance of the `VirtualParameter` class.
         """
-        parameter = torch.zeros([*shape, bank_size,], device=device,
-                                             dtype=dtype)
+        parameter = torch.zeros([*shape, bank_size, ], device=device,
+                                dtype=dtype)
         if init is not None:
             init(parameter)
         return cls(parameter)
@@ -338,7 +396,7 @@ class VirtualParameter(nn.Module):
         # style indexing. Extract the selected banks using advanced indexing
         parameter = self.parameter.movedim(-1, 0)  # (*shape, bank, )
         parameter = parameter[bank_spec.selection_index]  # (..., *shape,  bank_selected,)
-        parameter = parameter.movedim(-self.parameter.dim(),-1)
+        parameter = parameter.movedim(-self.parameter.dim(), -1)
         # Setup the probabilities. The probability tensor need to have
         # enough elements added to it to broadcast across the shape portions
         # of the parameter tensor. We add those.
@@ -411,7 +469,7 @@ class VirtualBuffer(nn.Module):
         self.bank_size = buffer.shape[-1]  # Last dimension is the bank dimension
         self.device = buffer.device
         self.dtype = buffer.dtype
-        self.register_buffer("buffer", buffer)
+        self.register_buffer("buffer", buffer)  # (...batch, ...data, buffer_size)
 
     def express_buffer(self,
                        selection: SelectionSpec,
@@ -439,7 +497,8 @@ class VirtualBuffer(nn.Module):
             - If `superposition=False`: Returns the selected buffers of shape (..., selected).
         """
         # Basic sanity checking. The buffer shape and selection shape
-        return virtual_state_select(self.buffer, selection, dim=-1, superposition=superposition)
+        buffer = self.buffer  # (...batch, ...data, options)
+        return virtual_state_select(buffer, selection, dim=-1, superposition=superposition)
 
     def update_buffer(self,
                       expression: torch.Tensor,
@@ -461,7 +520,6 @@ class VirtualBuffer(nn.Module):
                                             dim=-1, superposition=superposition)
 
 
-
 class VirtualState:
     """
     This is an instance of a "virtual state", which is a collapsable feature
@@ -471,7 +529,8 @@ class VirtualState:
 
     Unlike `VirtualBuffer`, `VirtualState` does not register as an `nn.Module`,
     and stores the state directly as a `torch.Tensor` without being part of the
-    model's module hierarchy.
+    model's module hierarchy. The bank dimension is maintained as the last
+    dimension, which influences how selection operates.
     """
 
     @classmethod
@@ -494,23 +553,24 @@ class VirtualState:
                      initializes the state in place.
         :return: An instance of the `VirtualState` class.
         """
-        state = torch.zeros([bank_size, *shape], device=device, dtype=dtype)
+        # The bank dimension is now the last dimension in the state tensor
+        state = torch.zeros([*shape, bank_size], device=device, dtype=dtype)
         if init is not None:
             init(state)
         return cls(state)
 
     def __init__(self, state: torch.Tensor):
         """
-        Initializes a `VirtualState`. The `state` passed in has its first dimension
+        Initializes a `VirtualState`. The `state` passed in has its last dimension
         declared as the bank dimension.
 
         :param state: The tensor representing the virtual state, with the shape
-                      (bank_size, ...), where the first dimension is the bank dimension.
+                      (..., bank_size), where the last dimension is the bank dimension.
         """
         assert state.dim() > 0, "No bank dimension was specified."
 
-        self.bank_size = state.shape[0]
-        self.shape = state.shape[1:]
+        self.shape = state.shape[:-1]  # All dimensions except the last are the shape
+        self.bank_size = state.shape[-1]  # Last dimension is the bank dimension
         self.device = state.device
         self.dtype = state.dtype
         self.state = state
@@ -535,26 +595,27 @@ class VirtualState:
             - If False, returns the selected individual state values.
         :return:
             - If `superposition=True`: Returns the combined state of shape (...).
-            - If `superposition=False`: Returns the selected states of shape (states_selected, ...).
+            - If `superposition=False`: Returns the selected states of shape (..., selected).
         """
-        return virtual_state_select(self.state, selection, dim=0, superposition=superposition)
+        # Express the state using the last dimension as the bank dimension
+        return virtual_state_select(self.state, selection, dim=-1, superposition=superposition)
 
     def update_state(self,
                      expression: torch.Tensor,
                      selection: SelectionSpec,
-                     superposition: bool = True
-                     ):
+                     superposition: bool = True):
         """
         Updates the current state based on the given expression and selection.
         The superposition flag allows handling different scenarios.
 
         :param expression: The expression to update the state with.
-            - Shape (states_selected, ...) if expressed using superposition=False.
+            - Shape (..., selected, ...) if expressed using superposition=False.
             - Shape (...) if expressed using superposition=True.
         :param selection: The selections for the virtual state.
         :param superposition: Whether or not it was expressed with the superposition on.
         """
-        self.state = virtual_state_scatter(self.state, expression, selection, dim=0, superposition=superposition)
+        # Scatter the expression into the last dimension (bank dimension)
+        self.state = virtual_state_scatter(self.state, expression, selection, dim=-1, superposition=superposition)
 
 
 class _VirtualModule(nn.Module):
@@ -583,11 +644,9 @@ class _VirtualModule(nn.Module):
         """
         parameter_banks = {}
         for name, _ in core_layers[0].named_parameters(recurse=False):
-            subparameters = parallel_pytree_map(lambda layer: layer.get_parameter(name),
-                                                *core_layers)
-            bank_parameters = torch.stack(subparameters, dim=0)
-            parameter_banks[name] = VirtualParameter(bank_parameters)
-
+            parameters = [layer.get_parameter(name) for layer in core_layers]
+            parameters = torch.stack(parameters, dim=0)
+            parameter_banks[name] = VirtualParameter(parameters)
         return parameter_banks
 
     def create_virtual_submodules(self,
@@ -604,9 +663,8 @@ class _VirtualModule(nn.Module):
         # Create any required sub virtual modules recurrently
         virtual_modules = {}
         for name, _ in core_layers[0].named_children():
-            sublayers = parallel_pytree_map(lambda layer: layer.get_submodule(name),
-                                            *core_layers)
-            virtual_modules[name] = _VirtualModule(sublayers)
+            submodules = [layer.get_submodule(name) for layer in core_layers]
+            virtual_modules[name] = _VirtualModule(submodules)
         return virtual_modules
 
     def create_virtual_buffers(self,
@@ -620,10 +678,9 @@ class _VirtualModule(nn.Module):
         """
         virtual_buffers: Dict[str, VirtualBuffer] = {}
         for name, _ in core_layers[0].named_buffers(recurse=False):
-            buffer_stack = parallel_pytree_map(lambda layer: layer.get_buffer(name),
-                                               *core_layers)
-            buffer_stack = torch.stack(buffer_stack, dim=0)
-            virtual_buffers[name] = VirtualBuffer(buffer_stack)
+            buffers = [layer.get_buffer(name) for layer in core_layers]
+            buffers = torch.stack(buffers, dim=-1)
+            virtual_buffers[name] = VirtualBuffer(buffers)
         return virtual_buffers
 
     def __init__(self, core_layers: List[nn.Module]):
@@ -633,8 +690,8 @@ class _VirtualModule(nn.Module):
         # submodules, the virtual parameters, and the virtual
 
         virtual_buffers = self.create_virtual_buffers(core_layers)
-        virtual_modules = self.create_virtual_submodules(core_layers)
         virtual_parameters = self.create_virtual_parameters(core_layers)
+        virtual_modules = self.create_virtual_submodules(core_layers)
 
         # Store some of them. These will need to be accessed again in
         # the future
@@ -648,11 +705,15 @@ class _VirtualModule(nn.Module):
         # we delete any parameters and replace them with buffers.
 
         core_logic = core_layers[0]
-        for name, _ in core_logic.named_modules():
-            core_logic.set_submodule(name, virtual_modules[name])
+
+
+
+        for name, module in core_logic.named_children():
+            setattr(self, name, virtual_modules[name])
         for name, parameter in core_logic.named_parameters(recurse=False):
-            parameter = parameter.clone()  # No longer a nn.Parameter
-            core_logic.add_buffer(name, parameter)
+            setattr(self, name, virtual_parameters[name])
+        for name, buffer in core_logic.named_buffers(recurse=False):
+            setattr(self, name, virtual_buffers[name])
 
         # Store the modified instance.
         self.core_logic = core_logic
@@ -663,7 +724,7 @@ class _VirtualModule(nn.Module):
         and all attached submodules to the given setup
         :param selection: The selection feature indicating the superposition to set
         """
-        # Set all submodules to the
+        # Set all submodules to the correct superposition.
         for module in self.core_logic.modules():
             module: _VirtualModule
             module.set_superposition(selection)
@@ -722,6 +783,15 @@ class VirtualLayer(nn.Module):
     set of responsive virtual layers. Dynamically swaps
     out the parameter kernels on a fully initialize
     layer instance in order to act as a virtual layer too
+
+    Importantly, this operates by inspection and some hard
+    decisions had to be made. Your warnings:
+
+    WARNINGS/NOTES:
+    - Tensors which are buffers, but NOT floating will not be almagated across
+      the various layers. Instead, the first layer is used.
+    - Features that are not modules, parameters, or buffers will NOT be turned
+      into virtual layers
     """
 
     @classmethod

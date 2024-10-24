@@ -1,7 +1,9 @@
 import unittest
 import torch
+from torch import nn
 from src.main.model.virtual_layers import (DropoutLogits, virtual_state_select, virtual_state_scatter,
-                                           SelectionSpec, VirtualState, VirtualParameter, VirtualBuffer, VirtualLayer
+                                           SelectionSpec, VirtualState, VirtualParameter, VirtualBuffer,
+                                           VirtualLayer
                                            )
 class TestDropoutLogits(unittest.TestCase):
 
@@ -460,9 +462,7 @@ class TestVirtualBuffer(unittest.TestCase):
         result = vb.express_buffer(selection_spec, superposition=True)
 
         # Manual computation of the expected result:
-        expected_result = buffer_bank.clone()
-        expected_result[..., 0] = buffer_bank[..., 0]*0.3
-
+        expected_result = buffer_bank[..., 0]*0.3 + buffer_bank[..., 2]*0.7
         self.assertTrue(torch.allclose(result, expected_result, atol=1e-4))
 
     def test_express_buffer_no_superposition(self):
@@ -470,9 +470,8 @@ class TestVirtualBuffer(unittest.TestCase):
         Test expressing the buffer without superposition.
         Ensures that the selected buffers are returned separately.
         """
-        buffer_bank = torch.tensor([[[0.0, 0.0], [0.0, 0.0]],
-                                    [[1.0, 1.0], [0.0, 0.0]],
-                                    [[2.0, 4.0], [3.0, 1.0]]])
+        buffer_bank = torch.tensor([[[0.0, 1.0, 2.0],[0.0, 1.0, 4.0]],
+                                    [[0.0, 0.0, 3.0], [0.0, 0.0, 1.0]]])
         vb = VirtualBuffer(buffer_bank)
 
         # Define a SelectionSpec with specific indices
@@ -485,8 +484,12 @@ class TestVirtualBuffer(unittest.TestCase):
         result = vb.express_buffer(selection_spec, superposition=False)
 
         # Manually check the expected result
-        expected_result = torch.tensor([[[0.0, 0.0], [0.0, 0.0]],
-                                        [[2.0, 4.0], [3.0, 1.0]]])
+        expected_result = [
+            buffer_bank[..., 0],
+            buffer_bank[..., 2],
+
+        ]
+        expected_result = torch.stack(expected_result, dim=-1)
 
         self.assertTrue(torch.allclose(result, expected_result))
 
@@ -495,9 +498,8 @@ class TestVirtualBuffer(unittest.TestCase):
         Test updating the buffer with a new expression in superposition mode.
         Ensures that the buffer is correctly updated.
         """
-        buffer_bank = torch.tensor([[[0.0, 0.0], [0.0, 0.0]],
-                                    [[1.0, 1.0], [0.0, 0.0]],
-                                    [[2.0, 4.0], [3.0, 1.0]]])
+        buffer_bank = torch.tensor([[[0.0, 1.0, 2.0],[0.0, 1.0, 4.0]],
+                                    [[0.0, 0.0, 3.0], [0.0, 0.0, 1.0]]])
         vb = VirtualBuffer(buffer_bank)
 
         # Define a SelectionSpec with specific indices and probabilities
@@ -512,8 +514,8 @@ class TestVirtualBuffer(unittest.TestCase):
 
         # Manually compute the expected updated buffer
         expected_updated_buffer = buffer_bank.clone()
-        expected_updated_buffer[0] = buffer_bank[0]*0.7 + new_expression*0.3
-        expected_updated_buffer[2] = buffer_bank[2]*0.3 + new_expression*0.7
+        expected_updated_buffer[..., 0] = buffer_bank[...,0]*0.7 + new_expression*0.3
+        expected_updated_buffer[..., 2] = buffer_bank[...,2]*0.3 + new_expression*0.7
 
         # Update the buffer
         vb.update_buffer(new_expression, selection_spec, superposition=True)
@@ -525,9 +527,8 @@ class TestVirtualBuffer(unittest.TestCase):
         Test updating the buffer with a new expression without superposition.
         Ensures that the buffer is updated only at the selected indices.
         """
-        buffer_bank = torch.tensor([[[0.0, 0.0], [0.0, 0.0]],
-                                    [[1.0, 1.0], [0.0, 0.0]],
-                                    [[2.0, 4.0], [3.0, 1.0]]])
+        buffer_bank = torch.tensor([[[0.0, 1.0, 2.0],[0.0, 1.0, 4.0]],
+                                    [[0.0, 0.0, 3.0], [0.0, 0.0, 1.0]]])
         vb = VirtualBuffer(buffer_bank)
 
         # Define a SelectionSpec with specific indices
@@ -545,29 +546,38 @@ class TestVirtualBuffer(unittest.TestCase):
 
         # Manually compute the expected updated buffer
         expected_updated_buffer = buffer_bank.clone()
-        expected_updated_buffer[0] = buffer_bank[0]*0.5 + new_expression[0]*0.5
-        expected_updated_buffer[2] = buffer_bank[2]*0.5 + new_expression[1]*0.5
+        expected_updated_buffer[..., 0] = buffer_bank[..., 0]*0.5 + new_expression[..., 0]*0.5
+        expected_updated_buffer[..., 2] = buffer_bank[..., 2]*0.5 + new_expression[..., 1]*0.5
 
         self.assertTrue(torch.allclose(vb.buffer, expected_updated_buffer))
     def test_batch_shape_handling(self):
         """
-        Test batch shape handling in VirtualState when expressing and updating.
+        Test batch shape handling in virtual buffer when expressing and updating.
         Ensures that batch dimensions are handled correctly.
         """
-        state = torch.randn(3, 4, 6)  # Shape (batch, extra_dim, banks)
-        indices = torch.randint(0, 4, (3, 4, 2))  # Batch shape (batch, extra_dim, selected)
-        probabilities = torch.rand(3, 4, 2)  # Probabilities shape matches the selection
+        buffer = torch.randn(3, 4, 6)  # Shape (batch, extra_dim, banks)
+        indices = torch.randint(0, 4, (3, 2))  # Batch shape (batch, extra_dim, selected)
+        probabilities = torch.rand(3, 2)  # Probabilities shape matches the selection
         selection = SelectionSpec(selection_index=indices, selection_probabilities=probabilities)
 
-        vb = VirtualBuffer(state)
+        vb = VirtualBuffer(buffer)
 
-        # Express state
+        # Express buffer
         expressed = vb.express_buffer(selection, superposition=True)
-        self.assertEqual(expressed.shape, (3, 4, 5))
+        self.assertEqual((3, 4), expressed.shape)
 
-        # Update state
+        # Update buffer
         vb.update_buffer(expressed, selection, superposition=True)
-        self.assertEqual(vb.state.shape, state.shape)
+        self.assertEqual(vb.buffer.shape, buffer.shape)
+
+        # With superposition off
+        expressed = vb.express_buffer(selection, superposition=False)
+        self.assertEqual((3, 4, 2), expressed.shape)
+
+        vb.update_buffer(expressed, selection, superposition=False)
+        self.assertEqual(vb.buffer.shape, buffer.shape)
+
+
 class TestVirtualState(unittest.TestCase):
 
     def test_virtual_state_creation(self):
@@ -582,7 +592,7 @@ class TestVirtualState(unittest.TestCase):
         vs = VirtualState.create(bank_size, shape)
 
         # Ensure the state has the correct shape
-        self.assertEqual(vs.state.shape, (bank_size, *shape))
+        self.assertEqual(vs.state.shape, (*shape, bank_size))
 
     def test_virtual_state_custom_init(self):
         """
@@ -617,14 +627,13 @@ class TestVirtualState(unittest.TestCase):
         Test expressing the state in superposition mode.
         Ensures that the correct combination of selected states is returned.
         """
-        state_bank = torch.tensor([[[0.0, 0.0], [0.0, 0.0]],
-                                   [[1.0, 1.0], [0.0, 0.0]],
-                                   [[2.0, 4.0], [3.0, 1.0]]])
+        state_bank = torch.tensor([[[0.0, 1.0, 2.0], [0.0, 1.0, 4.0]],
+                                   [[0.0, 0.0, 3.0], [0.0, 0.0, 1.0]]])
 
         vs = VirtualState(state_bank)
 
         # Define a SelectionSpec with specific indices and probabilities
-        selection_indices = torch.tensor([0, 2])  # Select states 0 and 2
+        selection_indices = torch.tensor([0, 2])  # Select banks 0 and 2
         selection_probabilities = torch.tensor([0.3, 0.7])  # Weights
         selection_spec = SelectionSpec(selection_index=selection_indices,
                                        selection_probabilities=selection_probabilities)
@@ -633,8 +642,7 @@ class TestVirtualState(unittest.TestCase):
         result = vs.express_state(selection_spec, superposition=True)
 
         # Manual computation of the expected result:
-        expected_result = torch.tensor([[1.4, 2.8], [2.1, 0.7]])
-
+        expected_result = state_bank[..., 0] * 0.3 + state_bank[..., 2] * 0.7
         self.assertTrue(torch.allclose(result, expected_result, atol=1e-4))
 
     def test_express_state_no_superposition(self):
@@ -642,14 +650,13 @@ class TestVirtualState(unittest.TestCase):
         Test expressing the state without superposition.
         Ensures that the selected states are returned separately.
         """
-        state_bank = torch.tensor([[[0.0, 0.0], [0.0, 0.0]],
-                                   [[1.0, 1.0], [0.0, 0.0]],
-                                   [[2.0, 4.0], [3.0, 1.0]]])
+        state_bank = torch.tensor([[[0.0, 1.0, 2.0], [0.0, 1.0, 4.0]],
+                                   [[0.0, 0.0, 3.0], [0.0, 0.0, 1.0]]])
 
         vs = VirtualState(state_bank)
 
         # Define a SelectionSpec with specific indices
-        selection_indices = torch.tensor([0, 2])  # Select states 0 and 2
+        selection_indices = torch.tensor([0, 2])  # Select banks 0 and 2
         selection_probabilities = torch.tensor([0.5, 0.5])  # Dummy weights, not used
         selection_spec = SelectionSpec(selection_index=selection_indices,
                                        selection_probabilities=selection_probabilities)
@@ -658,8 +665,7 @@ class TestVirtualState(unittest.TestCase):
         result = vs.express_state(selection_spec, superposition=False)
 
         # Manually check the expected result
-        expected_result = torch.tensor([[[0.0, 0.0], [0.0, 0.0]],
-                                        [[2.0, 4.0], [3.0, 1.0]]])
+        expected_result = torch.stack([state_bank[..., 0], state_bank[..., 2]], dim=-1)
 
         self.assertTrue(torch.allclose(result, expected_result))
 
@@ -668,14 +674,13 @@ class TestVirtualState(unittest.TestCase):
         Test updating the state with a new expression in superposition mode.
         Ensures that the state is correctly updated.
         """
-        state_bank = torch.tensor([[[0.0, 0.0], [0.0, 0.0]],
-                                   [[1.0, 1.0], [0.0, 0.0]],
-                                   [[2.0, 4.0], [3.0, 1.0]]])
+        state_bank = torch.tensor([[[0.0, 1.0, 2.0], [0.0, 1.0, 4.0]],
+                                   [[0.0, 0.0, 3.0], [0.0, 0.0, 1.0]]])
 
         vs = VirtualState(state_bank)
 
         # Define a SelectionSpec with specific indices and probabilities
-        selection_indices = torch.tensor([0, 2])  # Select states 0 and 2
+        selection_indices = torch.tensor([0, 2])  # Select banks 0 and 2
         selection_probabilities = torch.tensor([0.3, 0.7])  # Weights
         selection_spec = SelectionSpec(selection_index=selection_indices,
                                        selection_probabilities=selection_probabilities)
@@ -685,8 +690,8 @@ class TestVirtualState(unittest.TestCase):
 
         # Manually compute the expected updated state
         expected_updated_state = state_bank.clone()
-        expected_updated_state[0] = state_bank[0] * 0.7 + new_expression * 0.3
-        expected_updated_state[2] = state_bank[2] * 0.3 + new_expression * 0.7
+        expected_updated_state[..., 0] = state_bank[..., 0] * 0.7 + new_expression * 0.3
+        expected_updated_state[..., 2] = state_bank[..., 2] * 0.3 + new_expression * 0.7
 
         # Update the state
         vs.update_state(new_expression, selection_spec, superposition=True)
@@ -698,14 +703,13 @@ class TestVirtualState(unittest.TestCase):
         Test updating the state with a new expression without superposition.
         Ensures that the state is updated only at the selected indices.
         """
-        state_bank = torch.tensor([[[0.0, 0.0], [0.0, 0.0]],
-                                   [[1.0, 1.0], [0.0, 0.0]],
-                                   [[2.0, 4.0], [3.0, 1.0]]])
+        state_bank = torch.tensor([[[0.0, 1.0, 2.0], [0.0, 1.0, 4.0]],
+                                   [[0.0, 0.0, 3.0], [0.0, 0.0, 1.0]]])
 
         vs = VirtualState(state_bank)
 
         # Define a SelectionSpec with specific indices
-        selection_indices = torch.tensor([0, 2])  # Select states 0 and 2
+        selection_indices = torch.tensor([0, 2])  # Select banks 0 and 2
         selection_probabilities = torch.tensor([0.5, 0.5])  # Dummy weights
         selection_spec = SelectionSpec(selection_index=selection_indices,
                                        selection_probabilities=selection_probabilities)
@@ -718,29 +722,77 @@ class TestVirtualState(unittest.TestCase):
         vs.update_state(new_expression, selection_spec, superposition=False)
 
         # Manually compute the expected updated state
-        expected_state = state_bank.clone()
-        expected_state[0] = state_bank[0]*0.5 + new_expression[0]*0.5
-        expected_state[2] = state_bank[2]*0.5 + new_expression[1]*0.5
+        expected_updated_state = state_bank.clone()
+        expected_updated_state[..., 0] = state_bank[..., 0] * 0.5 + new_expression[..., 0] * 0.5
+        expected_updated_state[..., 2] = state_bank[..., 2] * 0.5 + new_expression[..., 1] * 0.5
 
-        self.assertTrue(torch.allclose(vs.state, expected_state))
-
+        self.assertTrue(torch.allclose(vs.state, expected_updated_state))
 
     def test_batch_shape_handling(self):
         """
-        Test batch shape handling in VirtualState when expressing and updating.
+        Test batch shape handling in virtual state when expressing and updating.
         Ensures that batch dimensions are handled correctly.
         """
-        state = torch.randn(3, 4, 6)  # Shape (batch, extra_dim, options, features)
-        indices = torch.randint(0, 4, (3, 4, 2))  # Batch shape (batch, extra_dim, selected)
-        probabilities = torch.rand(3, 4, 2)  # Probabilities shape matches the selection
+        state = torch.randn(3, 4, 6)  # Shape (batch, extra_dim, banks)
+        indices = torch.randint(0, 4, (3, 2))  # Batch shape (batch, extra_dim, selected)
+        probabilities = torch.rand(3, 2)  # Probabilities shape matches the selection
         selection = SelectionSpec(selection_index=indices, selection_probabilities=probabilities)
 
         vs = VirtualState(state)
 
         # Express state
         expressed = vs.express_state(selection, superposition=True)
-        self.assertEqual(expressed.shape, (3, 4, 5))
+        self.assertEqual((3, 4), expressed.shape)
 
         # Update state
         vs.update_state(expressed, selection, superposition=True)
         self.assertEqual(vs.state.shape, state.shape)
+
+        # With superposition off
+        expressed = vs.express_state(selection, superposition=False)
+        self.assertEqual((3, 4, 2), expressed.shape)
+
+        vs.update_state(expressed, selection, superposition=False)
+        self.assertEqual(vs.state.shape, state.shape)
+
+class TestVirtualLayer(unittest.TestCase):
+    def test_moduleless_hierarchy(self):
+        """ Test a simple unnested module less hierarchy. """
+
+        # Define a simple layer. It contains a mechanism to set
+        # to buffers, parameters, and locally stored tensors
+        class simple_layer(nn.Module):
+            def __init__(self):
+                super().__init__()
+
+                parameter = nn.Parameter(torch.randn(3, 4))
+                buffer = torch.randn(3, 4)
+                free = torch.randn(3, 4)
+
+
+                self.register_parameter("parameter", parameter)
+                self.register_buffer("buffer", buffer)
+                self.free = free
+
+            def forward(self):
+                return self.free, self.parameter, self.buffers
+
+        # Manufacture a virtual layer collection
+        layer_collection = [simple_layer() for _ in range(10)]
+        virtual_layer = VirtualLayer.create_from_layers_stack(layer_collection)
+
+        # Now, try invoking it. We start by fetching in each of the ten states
+        for i in range(10):
+            # Create the spec that is supposed to fetch the ith set of banks.
+            # Also, go fetch the thing we actually will be comparing us to.
+
+            selector = SelectionSpec(selection_index= torch.tensor([i]),
+                                     selection_probabilities=torch.tensor([1.0]))
+
+            layer_instance = layer_collection[i]
+
+            #
+
+
+
+
