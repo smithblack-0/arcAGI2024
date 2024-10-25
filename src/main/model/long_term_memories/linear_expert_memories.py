@@ -6,8 +6,8 @@ and efficient access by means of banked memory collections.
 
 import torch
 from torch import nn
-from base import RecurrentMemoryAttention, recurrent_long_term_memory_registry
-from src.main.model.virtual_layers import (SelectionSpec, BankedLinear, DropoutLogits,
+from core import RecurrentMemoryAttention, recurrent_long_term_memory_registry
+from src.main.model.virtual_layers import (SelectionSpec, DropoutLogits, VirtualLinear,
                                            virtual_state_select, virtual_state_scatter)
 from fast_transformers import builders
 from typing import Optional, Tuple
@@ -38,9 +38,7 @@ class MakeHeads(nn.Module):
         self.num_heads = num_heads
         self.num_banks = num_banks
 
-        self.projection = BankedLinear(d_model, d_head * num_heads, num_banks,
-                                       expand=True, squeeze=True
-                                       )
+        self.projection = VirtualLinear(d_model, d_head * num_heads, num_banks)
 
     def forward(self,
                 tensor: torch.Tensor,
@@ -80,9 +78,7 @@ class MergeHeads(nn.Module):
         self.num_heads = num_heads
         self.num_banks = num_banks
 
-        self.projection = BankedLinear(d_head * num_heads, d_model, num_banks,
-                                       expand=True, squeeze=True
-                                       )
+        self.projection = VirtualLinear(d_head * num_heads, d_model, num_banks)
 
     def forward(self,
                 tensor: torch.Tensor,
@@ -328,6 +324,7 @@ class SelectExperts(nn.Module):
 
         return SelectionSpec(composite_indices, composite_probs)
 
+
 @recurrent_long_term_memory_registry.register("LinearExpertMemories")
 class LinearExpertMemories(RecurrentMemoryAttention):
     """
@@ -352,7 +349,6 @@ class LinearExpertMemories(RecurrentMemoryAttention):
         super().__init__(d_model, num_memories, num_banks, dropout)
 
         # Create the recurrent linear attention unit
-        self.rla = builders.RecurrentAttentionBuilder.from_kwargs(query_dimensions=d_memory)
 
         # Create the head generation, and elimination mechanism
         #

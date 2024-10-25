@@ -1,6 +1,6 @@
 import torch
 import unittest
-from src.main.model.subroutine_driver import SubroutineStackFactory, DifferentiableSubroutineStack
+from src.old.subroutine_driver import SubroutineStackFactory, DifferentiableSubroutineStack
 
 
 class TestSubroutineStackFactory(unittest.TestCase):

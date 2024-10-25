@@ -1,6 +1,6 @@
 import unittest
 import torch
-from src.main.model.subroutine_driver import SubroutineStateTracker, SubroutineEmbeddingTracker
+from src.old.subroutine_driver import SubroutineStateTracker, SubroutineEmbeddingTracker
 
 class TestSubroutineStateTracker(unittest.TestCase):
 

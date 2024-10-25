@@ -1,6 +1,6 @@
 import torch
 import unittest
-from src.main.model.subroutine_driver import ActionsProbabilities
+from src.old.subroutine_driver import ActionsProbabilities
 class TestActionProbabilities(unittest.TestCase):
 
     def create_action_manager(self, num_times_before_pop, num_times_before_flush, gumbel_softmax):

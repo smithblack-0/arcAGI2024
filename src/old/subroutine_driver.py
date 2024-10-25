@@ -64,7 +64,7 @@ from torch import nn
 from torch.nn import functional as F
 from typing import List, Dict, Tuple, Union, Optional
 from abc import abstractmethod
-from .subroutine_stubs import SubroutineLogicStub
+from src.old.subroutine_stubs import SubroutineLogicStub
 
 from src.main.model.base import TensorTree, parallel_pytree_map
 

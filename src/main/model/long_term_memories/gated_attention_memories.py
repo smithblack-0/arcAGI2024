@@ -4,8 +4,8 @@ Implementation file for the large gated attention memory
 
 import torch
 from torch import nn
-from base import RecurrentMemoryAttention, recurrent_long_term_memory_registry
-from src.main.model.virtual_layers import SelectionSpec, BankedLinear
+from core import RecurrentMemoryAttention, recurrent_long_term_memory_registry
+from src.main.model.virtual_layers import SelectionSpec, VirtualLinear, VirtualState
 from typing import Optional, Tuple
 
 
@@ -46,22 +46,15 @@ class GatedAttentionMemories(RecurrentMemoryAttention):
         self.memory_default = nn.Parameter(torch.zeros([num_memories, d_model]), requires_grad=True)
         nn.init.normal_(self.memory_default)
 
-        # Set up the initial decay strengths. We want decay strengths that corrolate
-        # with various decay factors of between 0.2 and 0.0001, distributed about
-        # evenly. We go backwards through a sigmoid function to find what these are
 
-        decay_factors = torch.zeros([num_memories, d_model])
-        decay_factors.uniform_(0.0001, 0.2)
-        decay_logits = -torch.log((1 / decay_factors) - 1)
-        self.write_decay_logits = nn.Parameter(decay_logits, requires_grad=True)
 
         # Setup the attention transfer systems. Particularly the write
         # projections. The write gate is banked.
         self.memory_write_transfer = nn.Linear(d_model, d_model * num_memories)
-        self.memory_write_gate = BankedLinear(d_model, num_memories,
-                                              num_banks, expand=True, squeeze=True)
+        self.memory_write_gate = VirtualLinear(d_model, num_memories, num_banks)
 
         # The memory read is not banked. I do not have a banked MHA ready yet.
+        self.make_memory_query = VirtualLinear(d_model, d_model, num_banks)
         self.memory_read_transfer = nn.MultiheadAttention(d_model, num_heads, dropout, batch_first=True)
 
     def write_new_memories(self,
@@ -82,8 +75,8 @@ class GatedAttentionMemories(RecurrentMemoryAttention):
         # write gate.
 
         write_info = self.memory_write_transfer(tensor).reshape(tensor.shape[:-1],
-                                                                                self.num_memories,
-                                                                                self.d_model)  # (..., num_memories, d_model)
+                                                                self.num_memories,
+                                                                self.d_model)  # (..., num_memories, d_model)
 
         write_gate = self.memory_write_gate(write_info, bank_selection)
         write_gate = torch.sigmoid(write_gate).unsqueeze(-1)  # (..., num_memories, 1)
@@ -104,19 +97,24 @@ class GatedAttentionMemories(RecurrentMemoryAttention):
         write_probability = decay_rates * write_gate
 
         # Handle the writing and decay. Return results
-        state = state * (1 -write_probability) + write_info * write_probability
+        state = state * (1 - write_probability) + write_info * write_probability
         return state
 
-    def read_from_memories(self, tensor: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+    def read_from_memories(self,
+                           tensor: torch.Tensor,
+                           state: torch.Tensor,
+                           bank: SelectionSpec) -> torch.Tensor:
         """
         Reads something important from memories, if there is any such thing.
         :param tensor: The tensor to use as a read query. (..., d_model)
         :param state: The memories. (..., num_memories, d_model)
+        :param bank_selection: The bank selection object. Tells us what bank state we are in.
         :return: The result of reading from memory. (..., d_model)
         """
         # Read from memory using multi-head attention, where the tensor acts as the query
         # and the memory state serves as both the key and value.
-        read = self.memory_read_transfer(tensor.unsqueeze(-2), state, state)
+        query = self.make_memory_query(tensor, bank)
+        read = self.memory_read_transfer(query.unsqueeze(-2), state, state)
         return read.squeeze(-2)
 
     def forward(self,

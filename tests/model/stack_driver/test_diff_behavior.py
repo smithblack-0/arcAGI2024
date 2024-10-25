@@ -3,7 +3,7 @@ import torch.nn as nn
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-from src.main.model.subroutine_driver import SubroutineDriver, SubroutineCore
+from src.old.subroutine_driver import SubroutineDriver, SubroutineCore
 import unittest
 
 

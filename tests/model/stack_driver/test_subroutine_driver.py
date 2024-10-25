@@ -1,7 +1,7 @@
 import torch
 import unittest
-from src.main.model.subroutine_driver import (SubroutineDriver, SubroutineCore,
-                                              DifferentiableSubroutineStack)
+from src.old.subroutine_driver import (SubroutineDriver, SubroutineCore,
+                                       DifferentiableSubroutineStack)
 from src.main.model.base import TensorTree
 from typing import Tuple
 

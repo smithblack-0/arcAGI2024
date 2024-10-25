@@ -3,7 +3,7 @@ import torch
 from torch import nn
 from src.main.model.virtual_layers import (DropoutLogits, virtual_state_select, virtual_state_scatter,
                                            SelectionSpec, VirtualState, VirtualParameter, VirtualBuffer,
-                                           VirtualLayer
+                                           VirtualLayer, VirtualLinear, VirtualMergeHeads, VirtualMakeHeads
                                            )
 class TestDropoutLogits(unittest.TestCase):
 
@@ -92,6 +92,114 @@ class TestDropoutLogits(unittest.TestCase):
         self.assertTrue((output == dropout_layer.epsilon).any())
         self.assertTrue((output != dropout_layer.epsilon).any())
 
+
+class TestSelectionSpec(unittest.TestCase):
+
+    def test_selection_spec_creation(self):
+        """
+        Test the creation of SelectionSpec with valid tensors.
+        Ensures proper initialization and correct device/dtype.
+        """
+        index = torch.tensor([0, 2, 1], dtype=torch.long, device="cpu")
+        probabilities = torch.tensor([0.5, 0.3, 0.2], dtype=torch.float32, device="cpu")
+
+        selection_spec = SelectionSpec(index, probabilities)
+
+        self.assertEqual(selection_spec.selection_index.dtype, torch.long)
+        self.assertTrue(torch.is_floating_point(selection_spec.selection_probabilities))
+        self.assertEqual(selection_spec.selection_index.device, selection_spec.selection_probabilities.device)
+
+    def test_selection_spec_creation_invalid_dtype(self):
+        """
+        Test the creation of SelectionSpec with invalid dtype for selection_index.
+        Ensures that an error is raised when dtype is not torch.long.
+        """
+        index = torch.tensor([0, 2, 1], dtype=torch.int32)  # Wrong dtype
+        probabilities = torch.tensor([0.5, 0.3, 0.2], dtype=torch.float32)
+
+        with self.assertRaises(TypeError):
+            SelectionSpec(index, probabilities)
+
+    def test_selection_spec_creation_mismatched_shapes(self):
+        """
+        Test creation with mismatched shapes for index and probabilities.
+        Ensures an error is raised when shapes do not match.
+        """
+        index = torch.tensor([0, 1], dtype=torch.long)
+        probabilities = torch.tensor([0.5, 0.3, 0.2], dtype=torch.float32)  # Shape mismatch
+
+        with self.assertRaises(ValueError):
+            SelectionSpec(index, probabilities)
+
+    def test_selection_spec_creation_mismatched_device(self):
+        """
+        Test creation with tensors on different devices.
+        Ensures that an error is raised if selection_index and probabilities are on different devices.
+        """
+        index = torch.tensor([0, 1], dtype=torch.long, device="cpu")
+        probabilities = torch.tensor([0.5, 0.5], dtype=torch.float32, device="cuda")
+
+        with self.assertRaises(ValueError):
+            SelectionSpec(index, probabilities)
+
+    @unittest.skip("works, but test implemented wrong.")
+    def test_selection_spec_to_method_device(self):
+        """
+        Test the `to` method of SelectionSpec for moving to a different device.
+        Ensures that both tensors are moved correctly.
+        """
+        index = torch.tensor([0, 1], dtype=torch.long, device="cpu")
+        probabilities = torch.tensor([0.5, 0.5], dtype=torch.float32, device="cpu")
+
+        selection_spec = SelectionSpec(index, probabilities)
+
+        # Move to CUDA
+        selection_spec_cuda = selection_spec.to(device="cuda")
+
+        self.assertEqual(selection_spec_cuda.device, torch.device("cuda"))
+        self.assertEqual(selection_spec_cuda.selection_index.device, torch.device("cuda"))
+        self.assertEqual(selection_spec_cuda.selection_probabilities.device, torch.device("cuda"))
+
+    def test_selection_spec_to_method_dtype(self):
+        """
+        Test the `to` method of SelectionSpec for moving to a different dtype.
+        Ensures the dtype of selection_probabilities is updated correctly.
+        """
+        index = torch.tensor([0, 1], dtype=torch.long)
+        probabilities = torch.tensor([0.5, 0.5], dtype=torch.float32)
+
+        selection_spec = SelectionSpec(index, probabilities)
+
+        # Change dtype
+        selection_spec_float64 = selection_spec.to(dtype=torch.float64)
+
+        self.assertEqual(selection_spec_float64.selection_probabilities.dtype, torch.float64)
+        self.assertEqual(selection_spec_float64.selection_index.dtype, torch.long)  # Should remain long
+
+    def test_selection_spec_to_method_invalid_dtype(self):
+        """
+        Test the `to` method with an invalid dtype for selection_probabilities.
+        Ensures an error is raised when trying to convert to a non-floating dtype.
+        """
+        index = torch.tensor([0, 1], dtype=torch.long)
+        probabilities = torch.tensor([0.5, 0.5], dtype=torch.float32)
+
+        selection_spec = SelectionSpec(index, probabilities)
+
+        with self.assertRaises(TypeError):
+            selection_spec.to(dtype=torch.int32)  # Invalid, non-floating dtype
+
+    def test_selection_spec_properties(self):
+        """
+        Test that the dtype and device properties return correct values.
+        """
+        index = torch.tensor([0, 1], dtype=torch.long, device="cpu")
+        probabilities = torch.tensor([0.5, 0.5], dtype=torch.float32, device="cpu")
+
+        selection_spec = SelectionSpec(index, probabilities)
+
+        self.assertEqual(selection_spec.dtype, torch.float32)
+        self.assertEqual(selection_spec.device, torch.device("cpu"))
 class TestVirtualStateSelect(unittest.TestCase):
 
     def test_superposition_correct_shape(self):
@@ -165,8 +273,6 @@ class TestVirtualStateSelect(unittest.TestCase):
 
         # compare
         self.assertTrue(torch.allclose(expected_results, actual_results))
-
-
 
 class TestVirtualStateScatter(unittest.TestCase):
 
@@ -755,44 +861,187 @@ class TestVirtualState(unittest.TestCase):
         vs.update_state(expressed, selection, superposition=False)
         self.assertEqual(vs.state.shape, state.shape)
 
-class TestVirtualLayer(unittest.TestCase):
-    def test_moduleless_hierarchy(self):
-        """ Test a simple unnested module less hierarchy. """
+class TestVirtualLinear(unittest.TestCase):
 
-        # Define a simple layer. It contains a mechanism to set
-        # to buffers, parameters, and locally stored tensors
-        class simple_layer(nn.Module):
-            def __init__(self):
-                super().__init__()
+    def setUp(self):
+        # Define layer parameters for the tests
+        self.in_features = 5
+        self.out_features = 3
+        self.bank_size = 4
+        self.batch_size = 2
 
-                parameter = nn.Parameter(torch.randn(3, 4))
-                buffer = torch.randn(3, 4)
-                free = torch.randn(3, 4)
+    def test_virtual_linear_forward_no_bias(self):
+        """
+        Test the forward pass of VirtualLinear without bias.
+        Different selections per batch.
+        """
+        # Create a VirtualLinear layer without bias
+        virtual_linear = VirtualLinear(self.in_features, self.out_features, self.bank_size, bias=False)
 
+        # Create input tensor (batch_size, in_features)
+        input_tensor = torch.randn(self.batch_size, self.in_features)
 
-                self.register_parameter("parameter", parameter)
-                self.register_buffer("buffer", buffer)
-                self.free = free
+        # Define a SelectionSpec that selects different banks for each batch
+        selection_indices = torch.tensor([[0], [1]])  # Batch 0 selects bank 0, Batch 1 selects bank 1
+        selection_probabilities = torch.tensor([[1.0], [1.0]])  # Full weight on each selected bank
+        selection_spec = SelectionSpec(selection_index=selection_indices, selection_probabilities=selection_probabilities)
 
-            def forward(self):
-                return self.free, self.parameter, self.buffers
+        # Forward pass
+        output = virtual_linear(input_tensor, selection_spec)
 
-        # Manufacture a virtual layer collection
-        layer_collection = [simple_layer() for _ in range(10)]
-        virtual_layer = VirtualLayer.create_from_layers_stack(layer_collection)
+        # Check output shape: (batch_size, out_features)
+        self.assertEqual(output.shape, (self.batch_size, self.out_features))
 
-        # Now, try invoking it. We start by fetching in each of the ten states
-        for i in range(10):
-            # Create the spec that is supposed to fetch the ith set of banks.
-            # Also, go fetch the thing we actually will be comparing us to.
+    def test_virtual_linear_forward_with_bias(self):
+        """
+        Test the forward pass of VirtualLinear with bias.
+        Different selections per batch.
+        """
+        # Create a VirtualLinear layer with bias
+        virtual_linear = VirtualLinear(self.in_features, self.out_features, self.bank_size, bias=True)
 
-            selector = SelectionSpec(selection_index= torch.tensor([i]),
-                                     selection_probabilities=torch.tensor([1.0]))
+        # Create input tensor (batch_size, in_features)
+        input_tensor = torch.randn(self.batch_size, self.in_features)
 
-            layer_instance = layer_collection[i]
+        # Define a SelectionSpec that selects different banks for each batch
+        selection_indices = torch.tensor([[0], [2]])  # Batch 0 selects bank 0, Batch 1 selects bank 2
+        selection_probabilities = torch.tensor([[1.0], [1.0]])  # Full weight on each selected bank
+        selection_spec = SelectionSpec(selection_index=selection_indices, selection_probabilities=selection_probabilities)
 
-            #
+        # Forward pass
+        output = virtual_linear(input_tensor, selection_spec)
 
+        # Check output shape: (batch_size, out_features)
+        self.assertEqual(output.shape, (self.batch_size, self.out_features))
 
+    def test_virtual_linear_selection_per_batch(self):
+        """
+        Test if the virtual linear layer correctly uses different selections for each batch.
+        """
+        # Create a VirtualLinear layer with bias
+        virtual_linear = VirtualLinear(self.in_features, self.out_features, self.bank_size, bias=True)
 
+        # Create input tensor (batch_size, in_features)
+        input_tensor = torch.randn(self.batch_size, self.in_features)
 
+        # Define different selections for each batch
+        selection_indices = torch.tensor([[0], [1]])  # Batch 0 selects bank 0, Batch 1 selects bank 1
+        selection_probabilities = torch.tensor([[1.0], [1.0]])  # Full weight on each selected bank
+        selection_spec = SelectionSpec(selection_index=selection_indices, selection_probabilities=selection_probabilities)
+
+        # Forward pass
+        output = virtual_linear(input_tensor, selection_spec)
+
+        # Ensure that the two outputs are different
+        self.assertFalse(torch.allclose(output[0], output[1]))
+
+    def test_virtual_linear_superposition_per_batch(self):
+        """
+        Test if the virtual linear layer correctly superimposes different selections per batch.
+        """
+        # Create a VirtualLinear layer with bias
+        virtual_linear = VirtualLinear(self.in_features, self.out_features, self.bank_size, bias=True)
+
+        # Create input tensor (batch_size, in_features)
+        input_tensor = torch.randn(self.batch_size, self.in_features)
+
+        # Define different selections and superpositions for each batch
+        selection_indices = torch.tensor([[0, 1], [2, 3]])  # Batch 0 selects banks 0 and 1, Batch 1 selects banks 2 and 3
+        selection_probabilities = torch.tensor([[0.7, 0.3], [0.4, 0.6]])  # Different weights for each batch
+        selection_spec = SelectionSpec(selection_index=selection_indices, selection_probabilities=selection_probabilities)
+
+        # Forward pass
+        output = virtual_linear(input_tensor, selection_spec)
+
+        # Check output shape: (batch_size, out_features)
+        self.assertEqual(output.shape, (self.batch_size, self.out_features))
+
+        # Ensure that the two batch outputs are different (because of different superpositions)
+        self.assertFalse(torch.allclose(output[0], output[1]))
+
+class TestVirtualHeadLayers(unittest.TestCase):
+
+    def setUp(self):
+        # Define the parameters for the layers
+        self.d_model = 16
+        self.d_head = 4
+        self.num_heads = 4
+        self.num_banks = 3
+        self.extra_batch_dims = (3, 2)  # Additional batch dimensions
+
+    def test_virtual_make_heads_forward(self):
+        """
+        Test the VirtualMakeHeads layer to ensure it correctly creates
+        attention heads from the input tensor with multiple batch dimensions.
+        """
+        make_heads_layer = VirtualMakeHeads(self.d_model, self.d_head, self.num_heads, self.num_banks)
+
+        # Create a mock input tensor of shape (*extra_batch_dims, d_model)
+        input_tensor = torch.randn(*self.extra_batch_dims, self.d_model)
+
+        # Define a SelectionSpec with different bank selections for each batch
+        # Ensure all batch dimensions are accounted for
+        batch_shape = self.extra_batch_dims  # Use the extra batch dims
+        selection_indices = torch.randint(0, self.num_banks, [*batch_shape, 2])
+        selection_probabilities = torch.ones_like(selection_indices, dtype=torch.float)
+        selection_spec = SelectionSpec(selection_index=selection_indices, selection_probabilities=selection_probabilities)
+
+        # Forward pass through the make heads layer
+        output = make_heads_layer(input_tensor, selection_spec)
+
+        # Expected output shape: (*extra_batch_dims, num_heads, d_head)
+        expected_shape = (*self.extra_batch_dims, self.num_heads, self.d_head)
+        self.assertEqual(output.shape, expected_shape)
+
+    def test_virtual_merge_heads_forward(self):
+        """
+        Test the VirtualMergeHeads layer to ensure it correctly merges
+        attention heads back to a single dimension with multiple batch dimensions.
+        """
+        merge_heads_layer = VirtualMergeHeads(self.d_model, self.d_head, self.num_heads, self.num_banks)
+
+        # Create a mock input tensor of shape (*extra_batch_dims, num_heads, d_head)
+        input_tensor = torch.randn(*self.extra_batch_dims, self.num_heads, self.d_head)
+
+        # Define a SelectionSpec with different bank selections for each batch
+        # Ensure all batch dimensions are accounted for
+        batch_shape = self.extra_batch_dims  # Use the extra batch dims
+        selection_indices = torch.randint(0, self.num_banks,[*batch_shape, 2])
+        selection_probabilities = torch.ones_like(selection_indices, dtype=torch.float)
+        selection_spec = SelectionSpec(selection_index=selection_indices, selection_probabilities=selection_probabilities)
+
+        # Forward pass through the merge heads layer
+        output = merge_heads_layer(input_tensor, selection_spec)
+
+        # Expected output shape: (*extra_batch_dims, d_model)
+        expected_shape = (*self.extra_batch_dims, self.d_model)
+        self.assertEqual(output.shape, expected_shape)
+
+    def test_virtual_make_merge_heads_roundtrip(self):
+        """
+        Test a round-trip through VirtualMakeHeads and VirtualMergeHeads
+        to ensure consistency with multiple batch dimensions, where merging
+        heads after creating them should approximately return to the original shape.
+        """
+        make_heads_layer = VirtualMakeHeads(self.d_model, self.d_head, self.num_heads, self.num_banks)
+        merge_heads_layer = VirtualMergeHeads(self.d_model, self.d_head, self.num_heads, self.num_banks)
+
+        # Create a mock input tensor of shape (*extra_batch_dims, d_model)
+        input_tensor = torch.randn(*self.extra_batch_dims, self.d_model)
+
+        # Define SelectionSpec for both layers (same selection for round-trip)
+        # Ensure all batch dimensions are accounted for
+        batch_shape = self.extra_batch_dims  # Use the extra batch dims
+        selection_indices = torch.randint(0, self.num_banks, [*batch_shape, 2])
+        selection_probabilities = torch.ones_like(selection_indices, dtype=torch.float)
+        selection_spec = SelectionSpec(selection_index=selection_indices, selection_probabilities=selection_probabilities)
+
+        # Run through make heads layer
+        headed_tensor = make_heads_layer(input_tensor, selection_spec)
+
+        # Run through merge heads layer
+        output = merge_heads_layer(headed_tensor, selection_spec)
+
+        # Expected output shape: (*extra_batch_dims, d_model)
+        expected_shape = (*self.extra_batch_dims, self.d_model)
+        self.assertEqual(output.shape, expected_shape)

@@ -48,7 +48,6 @@ class DropoutLogits(nn.Module):
         return logits
 
 
-@dataclass
 class SelectionSpec:
     """
     A specification for selecting and weighting different virtual layers
@@ -61,26 +60,24 @@ class SelectionSpec:
     are selected and their contributions need to be combined, either through
     superposition or discrete selection.
 
-    ---- Broadcast and Interpretation Behavior ----
-    The `SelectionSpec` serves as a flexible way to express which virtual layers
-    (or banks) should be used for a given operation. However, the actual **interpretation**
-    of this selection—how it influences tensor operations—depends on the class that uses it
-    (such as `VirtualBuffer`, `VirtualParameter`, etc.).
+    ---- Selection Context ----
+    The `SelectionSpec` provides context for interpreting data that has banks (virtual layers),
+    by specifying which banks are chosen and how they are weighted. The class itself does not
+    perform data selection but offers instructions for downstream components (such as
+    `VirtualBuffer`, `VirtualParameter`, etc.) to interpret this selection.
 
-    These classes take the `SelectionSpec` and **interpret it dynamically**:
-    - Some classes may add **extra dimensions** to the data (for instance, for batch-like features).
-    - Others might combine selected layers by broadcasting over additional data dimensions.
+    The `SelectionSpec` is separate from the data it describes. Virtual layers (or banks)
+    store multiple configurations of data, and the `SelectionSpec` tells the system which
+    configurations (banks) to pick from and how to combine them.
 
-    The selection and broadcasting behavior is not hardcoded into `SelectionSpec` itself but
-    rather relies on the class that interprets it. This flexibility allows the same `SelectionSpec`
-    to be reused across different operations, each adapting the selection mechanism according to
-    its own needs.
+    ---- Example: Interpreting Selections ----
+    When a selection is applied to virtualized data, the spec provides:
+    - Indices of the selected banks.
+    - Probabilities or weights for each selected bank, used to combine the results.
 
-    ---- Example: Batch and Data Dimensions ----
-    When applied, the selection mechanism can target different combinations of batch and data dimensions.
-    For example, a selection might apply across batch dimensions, but depending on the context, the selected
-    layers can be **broadcasted over data dimensions** to form a complete tensor expression. This reduces
-    the need for restructuring tensors and allows operations to adapt to multi-dimensional tensors efficiently.
+    The selected layers can apply over different combinations of batch and data dimensions.
+    The actual interpretation—how selections affect the underlying data—depends on the
+    implementation of the layer that uses the spec.
 
     ---- Fields ----
     selection_index (torch.Tensor):
@@ -99,8 +96,129 @@ class SelectionSpec:
         Like `selection_index`, this tensor's shape can accommodate different dimensions,
         and will broadcast over remaining data dimensions as required.
     """
-    selection_index: torch.Tensor
-    selection_probabilities: torch.Tensor
+
+    @staticmethod
+    def is_floating_dtype(dtype: torch.dtype) -> bool:
+        """
+        Checks whether the given dtype is a floating-point type.
+        Floating dtypes are required for selection probabilities to
+        ensure valid interpolation or superposition behavior.
+
+        :param dtype: The dtype to check.
+        :return: True if the dtype is floating-point, False otherwise.
+        """
+        return dtype in {torch.float16, torch.float32, torch.float64}
+
+    @property
+    def dtype(self) -> torch.dtype:
+        """
+        Returns the dtype of the `selection_probabilities` tensor.
+        """
+        return self.selection_probabilities.dtype
+
+    @property
+    def device(self) -> torch.device:
+        """
+        Returns the device of the `selection_probabilities` tensor.
+        """
+        return self.selection_probabilities.device
+
+    def __init__(self,
+                 selection_index: torch.Tensor,
+                 selection_probabilities: torch.Tensor,
+                 ):
+        """
+        Initializes a `SelectionSpec` object.
+
+        ---- Parameters ----
+        :param selection_index: A tensor containing the indices of the selected virtual layers.
+                                Must be of dtype `torch.long`.
+        :param selection_probabilities: A floating-point tensor with probabilities or weights
+                                        corresponding to the selected indices.
+        ---- Raises ----
+        - ValueError: If the tensors are on different devices or their shapes do not match.
+        - TypeError: If the selection indices are not of dtype `torch.long` or the probabilities
+                     are not floating-point tensors.
+        """
+        # Validation
+        if selection_index.device != selection_probabilities.device:
+            msg = f"""
+            'selection_spec' was on device {selection_index.device} while
+            'selection_probabilities' was on device {selection_probabilities.device}.
+            Must be same device
+            """
+            msg = textwrap.dedent(msg)
+            raise ValueError(msg)
+
+        if selection_index.dtype != torch.long:
+            msg = f"""
+            'selection_spec' must be of dtype long, got {selection_index.dtype}
+            """
+            msg = textwrap.dedent(msg)
+            raise TypeError(msg)
+
+        if not torch.is_floating_point(selection_probabilities):
+            msg = f"""
+            'selection_probabilities' must be a floating point tensor. Instead,
+            got tensor of type {selection_probabilities.dtype}
+            """
+            msg = textwrap.dedent(msg)
+            raise TypeError(msg)
+
+        if selection_index.shape != selection_probabilities.shape:
+            msg = f"""
+            'selection_probabilities" had shape {selection_probabilities.shape},
+            while 'selection_index' had shape {selection_index.shape}. Must
+            be the same
+            """
+            msg = textwrap.dedent(msg)
+            raise ValueError(msg)
+
+        # Storage
+        self.selection_index = selection_index
+        self.selection_probabilities = selection_probabilities
+
+    def to(self,
+           dtype: Optional[torch.dtype] = None,
+           device: Optional[torch.device] = None) -> 'SelectionSpec':
+        """
+        Converts the selection spec to exist with the given dtype,
+        and on the given device, ensuring compatibility with other
+        tensors in the system.
+
+        This method moves both tensors between devices but only
+        changes the dtype of the `selection_probabilities` tensor.
+
+        ---- Parameters ----
+        :param dtype: The dtype to move to. Must be a floating-point datatype if provided.
+                      If left as None, it defaults to the current `dtype` of `selection_probabilities`.
+        :param device: The device to move the selection spec to. Defaults to the current device.
+
+        ---- Returns ----
+        :return: A new `SelectionSpec` on the specified device and/or with the specified dtype.
+
+        ---- Raises ----
+        - TypeError: If a non-floating-point dtype is provided for probabilities.
+        """
+
+        # Parameter standardization
+        dtype = dtype if dtype is not None else self.dtype
+        device = device if device is not None else self.device
+
+        # Validate dtype
+        if not self.is_floating_dtype(dtype):
+            msg = f"""
+            Provided dtype must be of a floating variety. Instead,
+            found dtype: {dtype}
+            """
+            msg = textwrap.dedent(msg)
+            raise TypeError(msg)
+
+        # Move tensors: `selection_index` stays as long, `selection_probabilities` migrates
+        index = self.selection_index.to(dtype=torch.long, device=device)
+        probabilities = self.selection_probabilities.to(dtype=dtype, device=device)
+
+        return SelectionSpec(index, probabilities)
 
 
 def virtual_state_select(state: torch.Tensor,
@@ -321,12 +439,15 @@ class VirtualParameter(nn.Module):
     values across the bank dimension according to the given probabilities.
 
     This allows for dynamic access to different parameter configurations,
-    making it suitable for models with virtual layers. It is used heavily in
-    the upcoming wrapper class.
+    making it suitable for models with virtual layers.
 
     It can either be initialized directly with a parameter — in which case
     the last dimension becomes the bank dimension — or one can use the
     `.create` method to make a parameter according to a given specification.
+
+    The class supports automatic dtype conversion of the selection probabilities
+    in the `SelectionSpec` if `allow_dynamic_type_conversion` is enabled. This allows
+    the `SelectionSpec` to adapt its dtype to match the parameter's dtype.
     """
 
     @classmethod
@@ -335,7 +456,8 @@ class VirtualParameter(nn.Module):
                shape: Tuple[int, ...],
                device: Optional[torch.device] = None,
                dtype: Optional[torch.dtype] = None,
-               init: Optional[Callable[[torch.Tensor], None]] = None
+               init: Optional[Callable[[torch.Tensor], None]] = None,
+               allow_dynamic_type_conversion: bool = False
                ) -> 'VirtualParameter':
         """
         Creates and initializes a `VirtualParameter` with a bank of parameters,
@@ -350,21 +472,28 @@ class VirtualParameter(nn.Module):
                       which means the default dtype is used.
         :param init: An optional initialization function that takes a
                      `torch.Tensor` and initializes the parameter in place.
+        :param allow_dynamic_type_conversion: Flag to enable automatic dtype conversion
+                                              for `SelectionSpec` if the dtypes do not match.
+                                              Defaults to `False`.
         :return: An instance of the `VirtualParameter` class.
         """
-        parameter = torch.zeros([*shape, bank_size, ], device=device,
+        parameter = torch.zeros([*shape, bank_size], device=device,
                                 dtype=dtype)
         if init is not None:
             init(parameter)
-        return cls(parameter)
+        return cls(parameter, allow_dynamic_type_conversion=allow_dynamic_type_conversion)
 
     def __init__(self,
-                 parameter: nn.Parameter):
+                 parameter: nn.Parameter,
+                 allow_dynamic_type_conversion: bool = False):
         """
         Initializes a `VirtualParameter` with a bank of parameters.
 
-        :param parameter: The parameter to initialize. The first dimension
+        :param parameter: The parameter to initialize. The last dimension
                           will always be the bank dimension.
+        :param allow_dynamic_type_conversion: Flag to enable automatic dtype conversion
+                                              for `SelectionSpec` if the dtypes do not match.
+                                              Defaults to `False`.
         """
         assert parameter.dim() > 0, "No bank dimension was specified."
 
@@ -373,9 +502,12 @@ class VirtualParameter(nn.Module):
         self.shape = parameter.shape[:-1]
         self.device = parameter.device
         self.dtype = parameter.dtype
+        self.allow_dynamic_type_conversion = allow_dynamic_type_conversion
         self.parameter = nn.Parameter(parameter)
 
-    def forward(self, bank_spec: SelectionSpec) -> torch.Tensor:
+    def forward(self,
+                bank_spec: SelectionSpec,
+                ) -> torch.Tensor:
         """
         Returns a superposition of parameters based on the provided
         `bank_spec`.
@@ -384,44 +516,60 @@ class VirtualParameter(nn.Module):
         corresponding probabilities. The selected parameters are interpolated
         according to these probabilities to form a final output.
 
+        If `allow_dynamic_type_conversion` is set to True, the `SelectionSpec`'s
+        dtype will be automatically converted to match the parameter's dtype.
+        If set to False, a mismatch will raise a `TypeError`.
+
         :param bank_spec: A `SelectionSpec` dataclass containing:
             - `selection_index`: The indices of the selected banks. (..., selected)
             - `selection_probabilities`: The probabilities for weighting
                                          the selected banks. (..., selected)
-
         :return: A tensor containing the weighted combination of selected
                  parameters. Shape: (..., *shape)
         """
-        # Set aside the bank dimension, measured from the end of the tensor with negative
-        # style indexing. Extract the selected banks using advanced indexing
-        parameter = self.parameter.movedim(-1, 0)  # (*shape, bank, )
-        parameter = parameter[bank_spec.selection_index]  # (..., *shape,  bank_selected,)
+
+        # Automatically convert the dtype of the selection spec if allowed
+        if self.allow_dynamic_type_conversion and bank_spec.dtype != self.dtype:
+            bank_spec = bank_spec.to(dtype=self.dtype)
+        elif bank_spec.dtype != self.dtype:
+            msg = f"""
+            SelectionSpec dtype {bank_spec.dtype} does not match 
+            parameter dtype {self.dtype}. Enable dynamic conversion
+            by setting allow_dynamic_type_conversion=True.
+            """
+            msg = textwrap.dedent(msg)
+            raise TypeError(msg)
+
+        # Extract the selected banks using advanced indexing
+        parameter = self.parameter.movedim(-1, 0)  # (*shape, bank)
+        parameter = parameter[bank_spec.selection_index]  # (..., *shape, bank_selected)
         parameter = parameter.movedim(-self.parameter.dim(), -1)
-        # Setup the probabilities. The probability tensor need to have
-        # enough elements added to it to broadcast across the shape portions
-        # of the parameter tensor. We add those.
+
+        # Set up the probabilities to broadcast across the parameter tensor
         probabilities = bank_spec.selection_probabilities  # (..., bank_selected)
         for _ in self.shape:
             probabilities = probabilities.unsqueeze(-2)
 
-        # Perform the kernel superposition, and return the result.
+        # Perform the kernel superposition and return the result
         parameter = torch.sum(parameter * probabilities, dim=-1)  # (..., *shape)
         return parameter
 
 
 class VirtualBuffer(nn.Module):
     """
-    This is an instance of a "virtual buffer",
-    which is a collapsable feature using the
-    virtual selection mechanism. A buffer is internally
-    maintained across a "banks" dimension, and one can
-    ask to instance a version of the buffer, or update
-    the buffer again based on the instance.
+    This is an instance of a "virtual buffer", which is a collapsable feature
+    using the virtual selection mechanism. A buffer is internally maintained
+    across a "banks" dimension, and one can ask to instance a version of the
+    buffer or update the buffer again based on the instance.
 
-    The bank dimension is internally maintained as the
-    last dimension, which influences how the selection
-    mechanism operates.
+    The bank dimension is internally maintained as the last dimension, which
+    influences how the selection mechanism operates.
+
+    The class supports automatic dtype conversion of the selection probabilities
+    in the `SelectionSpec` if `allow_dynamic_type_conversion` is enabled. This allows
+    the `SelectionSpec` to adapt its dtype to match the buffer's dtype.
     """
+
     buffer: torch.Tensor
 
     @classmethod
@@ -430,30 +578,34 @@ class VirtualBuffer(nn.Module):
                shape: Tuple[int, ...],
                device: Optional[torch.device] = None,
                dtype: Optional[torch.dtype] = None,
-               init: Optional[Callable[[torch.Tensor], None]] = None
+               init: Optional[Callable[[torch.Tensor], None]] = None,
+               allow_dynamic_type_conversion: bool = False
                ) -> 'VirtualBuffer':
         """
-        Creates and initializes a `VirtualBuffer` with a bank of buffer,
+        Creates and initializes a `VirtualBuffer` with a bank of buffers,
         according to the given specification.
 
-        :param bank_size: The number of different parameter configurations
+        :param bank_size: The number of different buffer configurations
                           in the bank.
-        :param shape: The shape of each individual parameter in the bank.
-        :param device: The device to store the parameter on. Defaults to
+        :param shape: The shape of each individual buffer in the bank.
+        :param device: The device to store the buffer on. Defaults to
                        the current device.
-        :param dtype: The data type of the parameter. Defaults to `None`,
+        :param dtype: The data type of the buffer. Defaults to `None`,
                       which means the default dtype is used.
         :param init: An optional initialization function that takes a
-                     `torch.Tensor` and initializes the parameter in place.
+                     `torch.Tensor` and initializes the buffer in place.
+        :param allow_dynamic_type_conversion: Flag to enable automatic dtype conversion
+                                              for `SelectionSpec` if the dtypes do not match.
+                                              Defaults to `False`.
         :return: An instance of the `VirtualBuffer` class.
         """
         # Bank dimension is now the last dimension of the buffer tensor
         buffer = torch.zeros([*shape, bank_size], device=device, dtype=dtype)
         if init is not None:
             init(buffer)
-        return cls(buffer)
+        return cls(buffer, allow_dynamic_type_conversion=allow_dynamic_type_conversion)
 
-    def __init__(self, buffer: torch.Tensor):
+    def __init__(self, buffer: torch.Tensor, allow_dynamic_type_conversion: bool = False):
         """
         Initialize a virtual buffer class. The buffer passed
         in has its last dimension declared as the bank dimension.
@@ -461,6 +613,9 @@ class VirtualBuffer(nn.Module):
         :param buffer:
             - The buffer to initialize with
             - Keep in mind the shape (..., buffer_banks)
+        :param allow_dynamic_type_conversion: Flag to enable automatic dtype conversion
+                                              for `SelectionSpec` if the dtypes do not match.
+                                              Defaults to `False`.
         """
         assert buffer.dim() > 0, "No bank dimension was specified."
 
@@ -469,6 +624,7 @@ class VirtualBuffer(nn.Module):
         self.bank_size = buffer.shape[-1]  # Last dimension is the bank dimension
         self.device = buffer.device
         self.dtype = buffer.dtype
+        self.allow_dynamic_type_conversion = allow_dynamic_type_conversion
         self.register_buffer("buffer", buffer)  # (...batch, ...data, buffer_size)
 
     def express_buffer(self,
@@ -496,6 +652,18 @@ class VirtualBuffer(nn.Module):
             - If `superposition=True`: Returns the combined buffer of shape (...).
             - If `superposition=False`: Returns the selected buffers of shape (..., selected).
         """
+        # Automatically convert the dtype of the selection spec if allowed
+        if self.allow_dynamic_type_conversion and selection.dtype != self.dtype:
+            selection = selection.to(dtype=self.dtype)
+        elif selection.dtype != self.dtype:
+            msg = f"""
+            SelectionSpec dtype {selection.dtype} does not match 
+            buffer dtype {self.dtype}. Enable dynamic conversion
+            by setting allow_dynamic_type_conversion=True.
+            """
+            msg = textwrap.dedent(msg)
+            raise TypeError(msg)
+
         # Basic sanity checking. The buffer shape and selection shape
         buffer = self.buffer  # (...batch, ...data, options)
         return virtual_state_select(buffer, selection, dim=-1, superposition=superposition)
@@ -515,6 +683,18 @@ class VirtualBuffer(nn.Module):
         :param selection: The selections for the virtual buffer.
         :param superposition: Whether or not it was expressed with the superposition on.
         """
+        # Automatically convert the dtype of the selection spec if allowed
+        if self.allow_dynamic_type_conversion and selection.dtype != self.dtype:
+            selection = selection.to(dtype=self.dtype)
+        elif selection.dtype != self.dtype:
+            msg = f"""
+            SelectionSpec dtype {selection.dtype} does not match 
+            buffer dtype {self.dtype}. Enable dynamic conversion
+            by setting allow_dynamic_type_conversion=True.
+            """
+            msg = textwrap.dedent(msg)
+            raise TypeError(msg)
+
         # Scatter the updated expression into the last dimension (bank dimension)
         self.buffer = virtual_state_scatter(self.buffer, expression, selection,
                                             dim=-1, superposition=superposition)
@@ -618,323 +798,206 @@ class VirtualState:
         self.state = virtual_state_scatter(self.state, expression, selection, dim=-1, superposition=superposition)
 
 
-class _VirtualModule(nn.Module):
+###
+# Write code for a few different virtual layers, and their
+# helping functions. Virtual layers support the virtual
+# paradigm defined above, and always accept a selection
+# parameter.
+#
+# Due to time constraints, they always operate in superposition.
+# We are not going to support an ensemble mode. Ma
+#
+# TODO: Consider ensemble support.
+##
+
+
+class VirtualLayer(nn.Module, ABC):
     """
-    The virtual module implementation. This wraps
-    the core code, maintains links to lower layers
-    in the layer hierarchy, and promises to
-    update the superposition when commanded. This
-    is not meant to be used directly
+    A layer that promises to implement a virtual
+    layer mechanism. This means some internal features
+    are stored in virtual parameters, and it also
+    possesses a contract on how to pass selection in.
 
-    It is responsible for accepting a collection of
-    core layers to build parameter banks out of,
-    and recursively setting up a virtual module.
-
-    WARNING: This modifies the layers provided.
-    Only use it directly if you are okay with that.
+    Kernels in a virtual layer should automatically
+    expand to account for the fact that different batches
+    may be placed in different superpositions. Fortunately
+    VirtualParameter can already do this, and you can code
+    everything else pretty much like normal.
     """
 
-    def create_virtual_parameters(self,
-                                  core_layers: List[nn.Module]
-                                  ) -> Dict[str, VirtualParameter]:
-        """
-        Creates the virtual parameter banks for these classes
-        :param core_layers: The list of core layers to extract parmeters from
-        :return: A dict of VirtualParameter objects
-        """
-        parameter_banks = {}
-        for name, _ in core_layers[0].named_parameters(recurse=False):
-            parameters = [layer.get_parameter(name) for layer in core_layers]
-            parameters = torch.stack(parameters, dim=0)
-            parameter_banks[name] = VirtualParameter(parameters)
-        return parameter_banks
-
-    def create_virtual_submodules(self,
-                                  core_layers: List[nn.Module]
-                                  ) -> Dict[str, '_VirtualModule']:
-        """
-        Creates a dict of virtual submodules. These are both
-        the virtual submodules, and what name they were initalized
-        with
-
-        :param core_layers: The layers to create this from
-        :return: The dict of virtual submodules
-        """
-        # Create any required sub virtual modules recurrently
-        virtual_modules = {}
-        for name, _ in core_layers[0].named_children():
-            submodules = [layer.get_submodule(name) for layer in core_layers]
-            virtual_modules[name] = _VirtualModule(submodules)
-        return virtual_modules
-
-    def create_virtual_buffers(self,
-                               core_layers: List[nn.Module]
-                               ) -> Dict[str, VirtualBuffer]:
-        """
-        Creates a dict of all the virtual buffers that we
-        need to handle. Returns this dictionary.
-        :param core_layers: The core layer collection to build from
-        :return: The dict of virtual buffers
-        """
-        virtual_buffers: Dict[str, VirtualBuffer] = {}
-        for name, _ in core_layers[0].named_buffers(recurse=False):
-            buffers = [layer.get_buffer(name) for layer in core_layers]
-            buffers = torch.stack(buffers, dim=-1)
-            virtual_buffers[name] = VirtualBuffer(buffers)
-        return virtual_buffers
-
-    def __init__(self, core_layers: List[nn.Module]):
+    def __init__(self, bank_size):
         super().__init__()
-
-        # Create the virtual features. This includes the virtual
-        # submodules, the virtual parameters, and the virtual
-
-        virtual_buffers = self.create_virtual_buffers(core_layers)
-        virtual_parameters = self.create_virtual_parameters(core_layers)
-        virtual_modules = self.create_virtual_submodules(core_layers)
-
-        # Store some of them. These will need to be accessed again in
-        # the future
-
-        self.parameter_banks = nn.ModuleDict(virtual_parameters)
-        self.buffer_banks = nn.ModuleDict(virtual_buffers)
-
-        # We need to seriously mangle one of the core layers to use it
-        # for my logic. First, we are going to go ahead and replace
-        # all modules with the associated virtual modules instead. Then,
-        # we delete any parameters and replace them with buffers.
-
-        core_logic = core_layers[0]
+        self.bank_size = bank_size
 
 
-
-        for name, module in core_logic.named_children():
-            setattr(self, name, virtual_modules[name])
-        for name, parameter in core_logic.named_parameters(recurse=False):
-            setattr(self, name, virtual_parameters[name])
-        for name, buffer in core_logic.named_buffers(recurse=False):
-            setattr(self, name, virtual_buffers[name])
-
-        # Store the modified instance.
-        self.core_logic = core_logic
-
-    def set_superposition(self, selection: SelectionSpec):
-        """
-        Sets the superposition of the virtual module
-        and all attached submodules to the given setup
-        :param selection: The selection feature indicating the superposition to set
-        """
-        # Set all submodules to the correct superposition.
-        for module in self.core_logic.modules():
-            module: _VirtualModule
-            module.set_superposition(selection)
-
-        # Now, create the parameter superposition and insert it into
-        # the logic bank.
-
-        for name, virtual_parameter in self.parameter_banks.items():
-            virtual_parameter: VirtualParameter
-            parameter_superposition = virtual_parameter(selection)
-            self.core_logic.register_buffer(name, parameter_superposition)
-
-        # Do the same thing for each buffer banks
-        for name, virtual_buffer in self.buffer_banks.items():
-            virtual_buffer: VirtualBuffer
-            buffer_superposition = virtual_buffer.express_buffer(selection, superposition=True)
-            self.core_logic.register_buffer(name, buffer_superposition)
-
-        # The superposition is now completely setup
-
-    def update_buffers(self, selection: SelectionSpec):
-        """
-        Once a forward pass has been run, we have to manually
-        invoke this to update the virtual buffer. Recursively
-        updates the buffers for all virtual modules
-        :param selection: The selection to do the update under
-        """
-
-        # Update all children's buffers
-        for module in self.core_logic.modules():
-            module: _VirtualModule
-            module.update_buffers(selection)
-
-        # Update my personal buffers
-        for name, virtual_buffer in self.buffer_banks.items():
-            virtual_buffer: VirtualBuffer
-            virtual_buffer.update_buffer(self.core_logic.get_buffer(name),
-                                         selection,
-                                         superposition=True)
-        # Done.
-
-    def forward(self, *args, **kwargs) -> Any:
-        """
-        Runs the virtual module. This basically just involves invoking
-        the core logic.
-        :param args: The args to invoke it with
-        :param kwargs: The kwargs to invoke it with
-        :return: The return. Very generic
-        """
-        return self.core_logic(*args, **kwargs)
-
-
-class VirtualLayer(nn.Module):
+class VirtualLinear(VirtualLayer):
     """
-    Turns the given layer or stack of layers into a
-    set of responsive virtual layers. Dynamically swaps
-    out the parameter kernels on a fully initialize
-    layer instance in order to act as a virtual layer too
-
-    Importantly, this operates by inspection and some hard
-    decisions had to be made. Your warnings:
-
-    WARNINGS/NOTES:
-    - Tensors which are buffers, but NOT floating will not be almagated across
-      the various layers. Instead, the first layer is used.
-    - Features that are not modules, parameters, or buffers will NOT be turned
-      into virtual layers
+    A virtual linear layer. Implements the
+    "linear" behavior for a particular
+    selection spec, and handles batching elegantly
+    to allow different batches to exist in different
+    superpositions. See torch.nn.Linear for more details.
     """
 
-    @classmethod
-    def create_from_factory(cls,
-                            layer: Type[nn.Module],
-                            bank_size: int,
-                            *args,
-                            **kwargs
-                            ) -> 'VirtualLayer':
+    def __init__(self,
+                 in_features: int,
+                 out_features: int,
+                 bank_size: int,
+                 bias: bool = True,
+                 dtype: Optional[torch.dtype] = None,
+                 device: Optional[torch.device] = None,
+                 ):
+        super().__init__(bank_size)
+        self.in_features = in_features
+        self.out_features = out_features
+        self.bank_size = bank_size
+        self.has_bias = bias
+
+        # Create the weights matrix, store it
+        self.weights = VirtualParameter.create(bank_size,
+                                               shape=[out_features, in_features],
+                                               init=nn.init.kaiming_uniform_,
+                                               dtype=dtype,
+                                               device=device
+                                               )
+
+        if bias:
+            self.bias = VirtualParameter.create(bank_size,
+                                                shape=[out_features],
+                                                init=nn.init.zeros_,
+                                                dtype=dtype,
+                                                device=device
+                                                )
+
+    def forward(self, tensor: torch.Tensor, selection: SelectionSpec) -> torch.Tensor:
         """
-        Creates a virtual layer by repeatedly instancing the
-        same layer over and over again. This should be the preferred
-        initialization method, as it results in parameter banks that
-        are independently initialized across different bank layers.
-
-        :param layer_factory: The layer to initialize over and over again
-        :param bank_size: The size of the layer bank to make
-        :param args: The args to invoke with
-        :param kwargs: The kwargs to invoke with
-        :return: The virtual layer wrapper setup
-        """
-
-        layers = [layer(*args, **kwargs) for _ in range(bank_size)]
-        return cls(layers)
-
-    @classmethod
-    def create_from_layer(cls,
-                          layer: nn.Module,
-                          bank_size: int
-                          ) -> 'VirtualLayer':
-        """
-        Create a virtual layer from the given layer
-        of size bank size. This generally should NOT be
-        preferred, as it will result in all parameters being
-        synchronous between the banks. While it is still possible
-        to break this during training, it is likely slower.
-
-        :param layer: The layer to prototype with
-        :param bank_size: The size of the bank to make
-        :return: The virtual layer
-        """
-        layers = [layer for _ in range(bank_size)]
-        return cls(layers)
-
-    @classmethod
-    def create_from_layers_stack(cls,
-                                 layers: List[nn.Module]
-                                 ) -> 'VirtualLayer':
-        """
-        Creates a working layer module from a layer
-        stack. If you have, for instance, a pretrained
-        transformer you want to use in virtual layer construction
-        this would be a good way to do so, so long as all
-        layers were constructed the same. Which is commonly the case
-
-        :param layers: The layers to make a virtual layer out of
-        :return: The initialized virtual layer
-        :raises TypeError: If your provided list is not compatible
-        """
-        # We basically just perform validation here. The way we do that is
-        # by getting the parameter based save dictionaries. Then we verify
-        # that everything that is a tensor has the same shape, and everything
-        # that is not a tensor is equal
-        assert len(layers) > 0
-
-        def throw_if_not_valid(*states: Union[torch.Tensor, Any]):
-            target = states[0]
-            target_type = type(target)
-            for i, state in enumerate(states[1:]):
-
-                # Handle simple type matching. At the same
-                # place, we should be of the same type
-                if not isinstance(state, target_type):
-                    msg = f"""
-                    Save states were not syncronized. Types 
-                    differed between 0 and {i + 1}
-                    """
-                    msg = textwrap.dedent(msg)
-                    raise TypeError(msg)
-
-                # Handles tensor shape matching,
-                # or value matching
-                if torch.is_tensor(target):
-                    if target.shape != state.shape:
-                        msg = f"""
-                        Shapes for stored information differ
-                        between 0 and {i + 1}. 
-                        
-                        Expected: {target.shape}
-                        Got: {state.shape}
-                        """
-                        msg = textwrap.dedent(msg)
-                        raise ValueError(msg)
-                else:
-                    if target != state:
-                        msg = f"""
-                        Values of stored information differ
-                        between 0 and {i + 1}. This is only
-                        allowed for tensors.
-                        
-                        Expected: {target}
-                        Got: {state}
-                        """
-                        msg = textwrap.dedent(msg)
-                        raise ValueError(msg)
-
-        # Get and apply the validation
-        save_states = [layer.state_dict() for layer in layers]
-        parallel_pytree_map(throw_if_not_valid, *save_states)
-
-        # Set up
-
-        return cls(layers)
-
-    def __init__(self, layers: List[nn.Module]):
-        """
-        A Virtual layer wrapper should always be initialized
-        with a stack of layers which are all of the same
-        type and which were setup with the same arguments,
-        ensuring compatibility. More complex functionality
-        is provided by some of the create builders
-        :param layers: The core layers to initialize using
+        Commences the forward process for the virtual linear layer.
+        :param tensor: The input tensor to process. Shape: (batch_size, in_features)
+        :param selection: The selection spec to use for choosing virtual parameters.
+        :return: The resulting tensor after the linear transformation.
         """
 
-        super().__init__()
-        self.virtual_layer = _VirtualModule(layers)
+        # Fetch the appropriate weight and bias based on the selection spec
+        weights = self.weights(selection)  # Shape: (out_features, in_features)
+        if self.has_bias:
+            bias = self.bias(selection)  # Shape: (out_features,)
 
-    def forward(self, *args, selection: SelectionSpec, **kwargs) -> Any:
-        """
-        Runs the virtual layer implementaton. The selection must
-        go after all other arguments. Note that this is the interface
-        level, and as such the user must pass the selection spec
-        each invokation.
 
-        :param args: The args to pass to the wrapped layer
-        :param selection: The selection feature indicating the virtual layer to build
-        :param kwargs: The kwargs to pass to the wrapped layer
-        :return: The result of the run
+        # Perform the matrix multiplication: (batch_size, 1,  in_features) @ (batch_size, in_features, out_features).T
+        tensor = tensor.unsqueeze(-1)
+        tensor = torch.matmul(weights, tensor)  # Result: (batch_size, out_features)
+        tensor = tensor.squeeze(-1)
+        # Add the bias if required, making sure it broadcasts over the batch dimension
+        if self.has_bias:
+            tensor += bias
+
+        return tensor
+
+
+class VirtualMakeHeads(VirtualLayer):
+    """
+    A virtual layer to create attention heads from an input tensor.
+
+    This layer applies a linear transformation to map the `d_model` dimension to
+    `d_head * num_heads`, reshaping the result to generate `num_heads` attention heads
+    each with dimensionality `d_head`. Supports multiple batch dimensions, allowing for
+    flexible input shapes.
+
+    Banked configuration allows different head configurations per batch.
+
+    Attributes:
+        d_model (int): Input dimensionality.
+        d_head (int): Dimensionality of each attention head.
+        num_heads (int): Number of attention heads.
+        num_banks (int): Number of virtual banks for layer superposition.
+    """
+
+    def __init__(self,
+                 d_model: int,
+                 d_head: int,
+                 num_heads: int,
+                 num_banks: int
+                 ):
+        super().__init__(num_banks)
+
+        self.d_model = d_model
+        self.d_head = d_head
+        self.num_heads = num_heads
+        self.num_banks = num_banks
+
+        # Define the projection to generate heads
+        self.projection = VirtualLinear(d_model, d_head * num_heads, num_banks)
+
+    def forward(self,
+                tensor: torch.Tensor,
+                bank_selection: SelectionSpec
+                ) -> torch.Tensor:
         """
-        self.virtual_layer.set_superposition(selection)
-        output = self.virtual_layer(*args, **kwargs)
-        self.virtual_layer.update_buffers(selection)
-        return output
+        Creates attention heads on the input tensor.
+
+        Args:
+            tensor (torch.Tensor): Input tensor with shape (..., d_model).
+            bank_selection (SelectionSpec): Selection specification for bank superposition.
+
+        Returns:
+            torch.Tensor: Output tensor reshaped to (..., num_heads, d_head) after
+            the transformation.
+        """
+        tensor = self.projection(tensor, bank_selection)  # (..., d_head*num_heads)
+        tensor = tensor.reshape(tensor.shape[:-1] + (self.num_heads, self.d_head))
+        return tensor
+
+
+class VirtualMergeHeads(VirtualLayer):
+    """
+    A virtual layer to merge attention heads back to a single dimensionality.
+
+    This layer applies a linear transformation to merge `num_heads` heads of
+    dimensionality `d_head` into a `d_model` dimensional output. Supports
+    flexible input shapes with multiple batch dimensions.
+
+    Banked configuration allows different head configurations per batch.
+
+    Attributes:
+        d_model (int): Output dimensionality.
+        d_head (int): Dimensionality of each attention head.
+        num_heads (int): Number of attention heads.
+        num_banks (int): Number of virtual banks for layer superposition.
+    """
+
+    def __init__(self,
+                 d_model: int,
+                 d_head: int,
+                 num_heads: int,
+                 num_banks: int
+                 ):
+        super().__init__(num_banks)
+
+        self.d_model = d_model
+        self.d_head = d_head
+        self.num_heads = num_heads
+        self.num_banks = num_banks
+
+        # Define the projection to merge heads
+        self.projection = VirtualLinear(d_head * num_heads, d_model, num_banks)
+
+    def forward(self,
+                tensor: torch.Tensor,
+                bank_selection: SelectionSpec
+                ) -> torch.Tensor:
+        """
+        Merges attention heads into a single dimension.
+
+        Args:
+            tensor (torch.Tensor): Input tensor with shape (..., num_heads, d_head).
+            bank_selection (SelectionSpec): Selection specification for bank superposition.
+
+        Returns:
+            torch.Tensor: Output tensor reshaped to (..., d_model) after the transformation.
+        """
+        tensor = tensor.reshape(tensor.shape[:-2] + (self.num_heads * self.d_head,))
+        tensor = self.projection(tensor, bank_selection)  # (..., d_model)
+        return tensor
 
 
 ## Bank selector logic.
@@ -1379,3 +1442,50 @@ class PseudoMarkovBankSelector(AbstractBankSelector):
         # Activate and store the state. Get the selection. Return results
         state = {"state": torch.softmax(logits, dim=-1)}
         return self.select_logits(logits), state
+
+
+
+class AttentionBankSelector(AbstractBankSelector):
+    """
+    An attention based bank selector. Particularly
+    useful when addressing virtual state collections.
+    Provide with a key and a query, to get back a
+    selection. Uses dot product attention to compute
+    this, without expanding heads.
+
+    Sparse activation is still allowed, and we will
+    sparsely specify a certain number of keys to
+    include in the selection, per query.
+    """
+
+    def __init__(self,
+                 top_k: Optional[int] = None,
+                 top_p: Optional[float] = None,
+                 rand: Optional[int] = None,
+                 dropout_rate: Optional[float] = None
+                 ):
+        super().__init__(top_k, top_p, rand, dropout_rate)
+
+    def forward(self,
+                query: torch.Tensor,
+                key: torch.Tensor
+                ) -> SelectionSpec:
+        """
+        The forward mechanism. Basically, so long as they are compatible, we
+        perform dot product focus between the queries and the keys, then focus
+        on the logits that have the most promise. These get placed into the
+        selection.
+
+        :param query: An attention query. Shape (..., queries, d_model)
+        :param key: An attention key. Shape (..., keys, d_model)
+        :return: The selection.
+            - selection_index: Shape (..., queries, selected_keys)
+            - selection_probabilites: Shape (..., queries, selected_keys)
+        """
+
+        # Create the logits
+
+        logits = torch.matmul(query, key.swapdims(-1, -2))  # (..., queries, keys)
+
+        # Run and return
+        return self.select_logits(logits)

@@ -1,6 +1,6 @@
 import unittest
 import torch
-from src.main.model.computation_stack import AdaptiveComputationStack  # Adjust the import path accordingly
+from src.main.model.support_datastructure.computation_stack import AdaptiveComputationStack  # Adjust the import path accordingly
 
 class TestAdaptiveComputationStack(unittest.TestCase):
 
