@@ -143,7 +143,7 @@ class SelectionSpec:
         # Validation
         if selection_index.device != selection_probabilities.device:
             msg = f"""
-            'selection_spec' was on device {selection_index.device} while
+            'selection_index' was on device {selection_index.device} while
             'selection_probabilities' was on device {selection_probabilities.device}.
             Must be same device
             """
@@ -152,7 +152,7 @@ class SelectionSpec:
 
         if selection_index.dtype != torch.long:
             msg = f"""
-            'selection_spec' must be of dtype long, got {selection_index.dtype}
+            'selection_index' must be of dtype long, got {selection_index.dtype}
             """
             msg = textwrap.dedent(msg)
             raise TypeError(msg)
@@ -999,6 +999,39 @@ class VirtualMergeHeads(VirtualLayer):
         tensor = self.projection(tensor, bank_selection)  # (..., d_model)
         return tensor
 
+class VirtualFeedforward(VirtualLayer):
+    """
+    A Virtual feedforward process, with plenty of different
+    of feedforward kernels that may vary depending on the
+    exact configuration. Consists of two levels with
+    an activation in between.
+    """
+    def __init__(self,
+                 d_model: int,
+                 d_hidden: int,
+                 bank_size: int,
+                 dropout: float,
+                 ):
+        super().__init__(bank_size)
+        self.ff1 = VirtualLinear(d_model, d_hidden, bank_size)
+        self.ff2 = VirtualLinear(d_hidden, d_model, bank_size)
+        self.activation = torch.relu
+        self.dropout = nn.Dropout(dropout)
+    def forward(self,
+                tensor: torch.Tensor,
+                selection: SelectionSpec
+                )-> torch.Tensor:
+        """
+        Runs the feedforward process under the given
+        selection.
+        :param tensor: The tensor to run feedforward with.
+        :param selection: The virtual layer selection to use
+        :return: The resulting tensor
+        """
+        tensor = self.ff1(tensor, selection)
+        tensor = self.dropout(self.activation(tensor))
+        tensor = self.ff2(tensor, selection)
+        return tensor
 
 ## Bank selector logic.
 #
@@ -1041,11 +1074,15 @@ def make_top_p_selection_mask(logits: torch.Tensor, top_p: float) -> torch.Tenso
     # However, what we are ACTUALLY doing is figuring out what
     # the mask looks like in the sorted domain, then moving
     # that back into the unsorted mask.
+    #
+    # We perform a roll here to make sure that we are only considering
+    # the probabilities selected so far.
 
     ordered_probabilities, sorting_index = probabilities.sort(dim=-1, descending=True)
     cumulative_probabilities = ordered_probabilities.cumsum(dim=-1)
-    cumulative_mask = cumulative_probabilities > top_p
-    cumulative_mask[..., 0] = True  # First element is always included, to avoid numeric nonsense
+    cumulative_probabilities[..., -1] = 0.0
+    cumulative_probabilities = cumulative_probabilities.roll(dims=-1, shifts=1)
+    cumulative_mask = cumulative_probabilities <= top_p
 
     # We now transfer the cumulative mask back into the selection
     # mask, in the designated order.
@@ -1076,7 +1113,8 @@ def make_top_k_selection_mask(logits: torch.Tensor, top_k: int) -> torch.Tensor:
         # mode is active. We get the indexes associated with
         # the top k, and mark those parts of the mask as active
         _, index = torch.topk(logits, k=top_k, dim=-1)
-        selection_mask[index] = True
+        src = torch.full_like(index, True, dtype=torch.bool)
+        selection_mask.scatter_(dim=-1, index=index, src=src)
     return selection_mask
 
 
@@ -1109,7 +1147,9 @@ def make_random_selection_mask(logits: torch.Tensor, num: int) -> torch.Tensor:
     random_weights = torch.rand_like(logits)
     randomized_indices = torch.argsort(random_weights, dim=-1)
     randomized_indices = randomized_indices[..., :num]
-    selection_mask[randomized_indices] = True
+
+    src = torch.full_like(randomized_indices, True, dtype=torch.bool)
+    selection_mask.scatter_(dim=-1, index=randomized_indices, src=src)
 
     # Return the selection
     return selection_mask
@@ -1179,7 +1219,6 @@ class AbstractBankSelector(nn.Module, ABC):
         logit_index = torch.arange(
             logits.shape[-1],
             device=logits.device,
-            dtype=logits.dtype,
         )
 
         # Perform normalization
@@ -1201,7 +1240,7 @@ class AbstractBankSelector(nn.Module, ABC):
             # a space to hold the selected logits. The space is initialized with highly
             # negative defaults, to ensure anything not transferred ends up masked
 
-            num_required_logits, _ = selection_mask.sum(dim=-1).max()
+            num_required_logits = selection_mask.sum(dim=-1).max()
             final_logits = torch.full([*logits.shape[:-1], num_required_logits],
                                       fill_value=-1e+9,
                                       device=logits.device, dtype=logits.dtype)
@@ -1228,7 +1267,7 @@ class AbstractBankSelector(nn.Module, ABC):
 
             final_index = logit_index
             while final_index.dim() < logits.dim():
-                final_index = final_index.unsqueeze(-1)
+                final_index = final_index.unsqueeze(0)
 
             final_index = final_index.expand_as(logits)
             final_logits = logits
@@ -1443,49 +1482,3 @@ class PseudoMarkovBankSelector(AbstractBankSelector):
         state = {"state": torch.softmax(logits, dim=-1)}
         return self.select_logits(logits), state
 
-
-
-class AttentionBankSelector(AbstractBankSelector):
-    """
-    An attention based bank selector. Particularly
-    useful when addressing virtual state collections.
-    Provide with a key and a query, to get back a
-    selection. Uses dot product attention to compute
-    this, without expanding heads.
-
-    Sparse activation is still allowed, and we will
-    sparsely specify a certain number of keys to
-    include in the selection, per query.
-    """
-
-    def __init__(self,
-                 top_k: Optional[int] = None,
-                 top_p: Optional[float] = None,
-                 rand: Optional[int] = None,
-                 dropout_rate: Optional[float] = None
-                 ):
-        super().__init__(top_k, top_p, rand, dropout_rate)
-
-    def forward(self,
-                query: torch.Tensor,
-                key: torch.Tensor
-                ) -> SelectionSpec:
-        """
-        The forward mechanism. Basically, so long as they are compatible, we
-        perform dot product focus between the queries and the keys, then focus
-        on the logits that have the most promise. These get placed into the
-        selection.
-
-        :param query: An attention query. Shape (..., queries, d_model)
-        :param key: An attention key. Shape (..., keys, d_model)
-        :return: The selection.
-            - selection_index: Shape (..., queries, selected_keys)
-            - selection_probabilites: Shape (..., queries, selected_keys)
-        """
-
-        # Create the logits
-
-        logits = torch.matmul(query, key.swapdims(-1, -2))  # (..., queries, keys)
-
-        # Run and return
-        return self.select_logits(logits)

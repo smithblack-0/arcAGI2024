@@ -32,7 +32,7 @@ SubroutineDriver, which manages subroutine execution based on action probabiliti
 
 1. **Probabilistic Pointers**:
    - Each stack level is weighted by probabilistic pointers. These pointers represent the "focus" or
-     "long_term_memories" at each depth, meaning that stack element 1 might be active with 30% probability
+     "deep_memories" at each depth, meaning that stack element 1 might be active with 30% probability
       and element 2 with 70%. This allows for smooth transitions between subroutines during
       differentiable training.
 
@@ -214,7 +214,7 @@ class ProbabilisticPointers:
     the probabilistic pointers.
 
     Probabilistic pointers distribute the focus across stack levels, allowing
-    actions like `enstack`, `no-op`, and `destack` to adjust how long_term_memories is
+    actions like `enstack`, `no-op`, and `destack` to adjust how deep_memories is
     split across the levels of the stack.
 
     It handles rolling of the pointers based on the action probabilities and

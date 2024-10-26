@@ -6,7 +6,7 @@ class LatentEmbedding(nn.Module):
     """
     Converts a tensor of embedding inputs into a collection
     of latent representations. Adds an extra dimension in the
-    appropriate place to ensure long_term_memories occurs on the efficient
+    appropriate place to ensure deep_memories occurs on the efficient
     dimension.
     """
     def __init__(self,

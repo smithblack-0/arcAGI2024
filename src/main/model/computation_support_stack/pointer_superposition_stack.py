@@ -1,7 +1,9 @@
 import torch
+from ..transformer_primitives import AbstractComputationStack, stack_registry
 
 
-class AdaptiveComputationStack:
+@stack_registry.register("PointerSuperpositionStack")
+class PointerSuperpositionStack(AbstractComputationStack):
     """
     A differentiable stack designed to manage computation with probabilistic pointers for tasks involving
     adaptive computation. It enables stack-based subroutine management, where each level of the stack is
@@ -177,16 +179,3 @@ class AdaptiveComputationStack:
 
         # Incorporate update. Do not change masked
         self.stack = torch.where(batch_mask, self.stack, updated_stack)
-
-    def __call__(self, embedding: torch.Tensor, probabilities: torch.Tensor, batch_mask: torch.Tensor) -> torch.Tensor:
-        """
-        Performs adjust, set, get, and eval all in one go.
-        :param embedding: The embedding to store somewhere or retrieve.
-        :param probabilities: The probabilities for enstack, no-op, and destack.
-        :param batch_mask: Tensor of shape (*batch_shape), either 0 or 1, indicating whether
-                            to update the stack and statistics for this batch.
-        :return: The extracted stack feature.
-        """
-        self.set_expression(embedding, batch_mask)
-        self.adjust_stack(probabilities, batch_mask)
-        return self.get_expression()

@@ -522,7 +522,7 @@ class TorchLayerRegistry(Generic[RegisteredType]):
     by allowing a registry to include other builders as part of its constructor.
 
     Example: Consider building a transformer model that consists of multiple components
-    such as feedforward layers, self-long_term_memories layers, and cross-long_term_memories layers.
+    such as feedforward layers, self-deep_memories layers, and cross-deep_memories layers.
     Instead of manually creating each layer, you can nest builders into the transformer
     registry.
 
@@ -627,7 +627,7 @@ class TorchLayerRegistry(Generic[RegisteredType]):
     class abstract_feedforward(nn.Module):
         ...
 
-    # Define a builder for an long_term_memories layer and for feedforward
+    # Define a builder for an deep_memories layer and for feedforward
     attention_builder = TorchLayerRegistry[abstract_attention]("Attention", abstract_attention)
     feedforward_builder = TorchLayerRegistry[abstract_feedforward]("Feedforward", abstract_feedforward)
 
@@ -653,7 +653,7 @@ class TorchLayerRegistry(Generic[RegisteredType]):
 
     # Construct a transformer. Notice the use of the names of the registries,
     # that is of 'Attention' and 'Feedforward',
-    # in order to specify what kind of long_term_memories and feedforward to use
+    # in order to specify what kind of deep_memories and feedforward to use
 
     transformer = transformer_builder.build("transformer",
                                              d_model=128,

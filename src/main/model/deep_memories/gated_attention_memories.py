@@ -4,13 +4,12 @@ Implementation file for the large gated attention memory
 
 import torch
 from torch import nn
-from core import RecurrentMemoryAttention, recurrent_long_term_memory_registry
+from src.main.model.transformer_primitives import DeepMemoryUnit
 from src.main.model.virtual_layers import SelectionSpec, VirtualLinear, VirtualState
 from typing import Optional, Tuple
 
 
-@recurrent_long_term_memory_registry.register("GatedAttentionMemory")
-class GatedAttentionMemories(RecurrentMemoryAttention):
+class GatedAttentionMemories(DeepMemoryUnit):
     """
     GatedAttentionMemories is an extension of the RecurrentMemoryAttention mechanism
     that employs a gated write operation and memory decay. This model allows selective

@@ -13,7 +13,7 @@ class DecoderLayer(nn.Module):
     """
 
     # Fetch context
-    # self long_term_memories across the latents.
+    # self deep_memories across the latents.
     # feedforward.
 
     def __init__(self,
@@ -97,7 +97,7 @@ class BlockDecoder(nn.Module):
                 targets: Optional[torch.Tensor],
                 )->torch.Tensor:
         """
-        Performs the final causal long_term_memories process, producing the predictions for
+        Performs the final causal deep_memories process, producing the predictions for
         each computation section.
 
         :param incremental_latents: A list of the incremental latent states

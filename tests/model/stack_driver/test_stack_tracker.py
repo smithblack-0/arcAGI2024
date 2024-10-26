@@ -19,11 +19,11 @@ class TestSubroutineStateTracker(unittest.TestCase):
         tracker = self.create_state_tracker(stack)
 
         pointer_probabilities = torch.zeros(4)
-        pointer_probabilities[1] = 1.0  # Expect full long_term_memories on stack[1]
+        pointer_probabilities[1] = 1.0  # Expect full deep_memories on stack[1]
 
         result = tracker.get(pointer_probabilities)
 
-        self.assertTrue(torch.allclose(result, stack[1]), "Expected full long_term_memories on stack[1].")
+        self.assertTrue(torch.allclose(result, stack[1]), "Expected full deep_memories on stack[1].")
 
     def test_change_superposition(self):
         """
@@ -102,11 +102,11 @@ class TestEmbeddingTracker(unittest.TestCase):
         tracker = self.create_stack_tracker(stack, layernorm, positions)
 
         pointer_probabilities = torch.zeros(4)
-        pointer_probabilities[1] = 1.0  # Expect full long_term_memories on stack[1]
+        pointer_probabilities[1] = 1.0  # Expect full deep_memories on stack[1]
 
         result = tracker.get(pointer_probabilities)
 
-        self.assertTrue(torch.allclose(result, stack[1]), "Expected full long_term_memories on stack[1].")
+        self.assertTrue(torch.allclose(result, stack[1]), "Expected full deep_memories on stack[1].")
 
     def test_change_superposition(self):
         """

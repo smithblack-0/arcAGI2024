@@ -1,0 +1,1 @@
+from src.main.model.transformer_primitives import deep_memory_registry

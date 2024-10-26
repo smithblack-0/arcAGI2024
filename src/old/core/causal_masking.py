@@ -5,15 +5,15 @@ def generate_canonical_causal_self_mask(mask_size: int,
                                         peek_ahead: int = 0,
                                         device: Optional[torch.device] = None)->torch.Tensor:
     """
-    Generates a canonical casual long_term_memories mask designed to keep the long_term_memories mechanism
-    fron peeking into the future. Designed for self long_term_memories. Mask size says how big the mask should
+    Generates a canonical casual deep_memories mask designed to keep the deep_memories mechanism
+    fron peeking into the future. Designed for self deep_memories. Mask size says how big the mask should
     be, and will result in a square mask being returned of that shape. Peek ahead, meanwhile, lets
     us know how many units into the future we can peek - 1 means one unit, -1 means cannot see self, etc.
 
     :param mask_size: The size of the self attentiom mask
     :param peek_ahead: The degree to peek ahead
     :param device: The device.
-    :return: A boolean long_term_memories mask. True means masked
+    :return: A boolean deep_memories mask. True means masked
     """
     output = torch.full([mask_size, mask_size], True, device=device)
     output = torch.triu(output, diagonal= peek_ahead)
@@ -27,11 +27,11 @@ def generate_casual_cross_attention_mask(self_positions: torch.Tensor,
                                          ):
     """
     :param self_positions:
-        - The position of each element in self with respect to the elements of the cross long_term_memories sequence
+        - The position of each element in self with respect to the elements of the cross deep_memories sequence
         - (..., positions)
         - Positions are integers < cross_size, addressing elements
     :param cross_sequence_length:
-        - The length of the cross long_term_memories sequence to draw from
+        - The length of the cross deep_memories sequence to draw from
         - Conceptually, the self-positions are addressing locations in here
     :param peek_ahead:
         - How far the mask conceptually peeks ahead.

@@ -24,7 +24,7 @@ class TransformerEncoderLayer(nn.Module):
         # Dropout (shared)
         self.dropout = nn.Dropout(dropout)
 
-        # Self long_term_memories implementation
+        # Self deep_memories implementation
         self.sa_layernorm = nn.LayerNorm(query_dim)
         self.self_attn = MultiheadedAttention.create(query_dim,
                                                      num_heads,
@@ -46,13 +46,13 @@ class TransformerEncoderLayer(nn.Module):
                 self_mask: Optional[torch.Tensor] = None,
                 ) -> torch.Tensor:
         """
-        Performs a transformer based long_term_memories step
+        Performs a transformer based deep_memories step
 
         :param tensor:
             - The data to process
             - Shape (..., sequence, query_dim)
         :param self_mask:
-            - An optional mask that corrolates with the self long_term_memories step.
+            - An optional mask that corrolates with the self deep_memories step.
             - Core shape is (query_sequence, query_sequence). Additional heads and batch feature alloed.
               batch content allowed.
             - First dimension is target, second is source.
@@ -98,7 +98,7 @@ class TransformerDecoderLayer(nn.Module):
         # Dropout. Shared.
         self.dropout = nn.Dropout(dropout)
 
-        # Self long_term_memories implementation
+        # Self deep_memories implementation
         self.sa_layernorm = nn.LayerNorm(query_dim)
         self.self_attn = MultiheadedAttention.create(query_dim,
                                                      num_heads,
@@ -106,7 +106,7 @@ class TransformerDecoderLayer(nn.Module):
                                                      dtype=dtype,
                                                      device=device)
 
-        # Cross long_term_memories implementation
+        # Cross deep_memories implementation
         self.ca_layernorm = nn.LayerNorm(query_dim)
         self.cross_attention = MultiheadedAttention.create(query_dim,
                                                            num_heads,
@@ -131,7 +131,7 @@ class TransformerDecoderLayer(nn.Module):
                 cross_mask: Optional[torch.Tensor] = None,
                 ) -> torch.Tensor:
         """
-        Performs a transformer based long_term_memories decoding
+        Performs a transformer based deep_memories decoding
         process. Supports multidimension batching.
 
         :param tensor:
@@ -141,13 +141,13 @@ class TransformerDecoderLayer(nn.Module):
             - The context tensor to decode with
             - Shape (..., context_sequence, source_dim)
         :param self_mask:
-            - An optional mask that corrolates with the self long_term_memories step.
+            - An optional mask that corrolates with the self deep_memories step.
             - Core shape is (query_sequence, query_sequence). Additional heads and batch feature alloed.
               batch content allowed.
             - First dimension is target, second is source.
             - See MultiheadedAttention for more details
         :param context_mask:
-            - An optional mask that corrolates with the cross long_term_memories step
+            - An optional mask that corrolates with the cross deep_memories step
             - Restricts queries from accessing content elements.
             - Core shape (query_sequence, context_sequence)
             - See MultiheadedAttention for more details on masking.

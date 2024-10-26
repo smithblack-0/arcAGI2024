@@ -91,7 +91,7 @@ class BankedFeedforward(nn.Module):
         :param tensor: The input tensors
             - Shape (..., d_model)
         :return:
-            - The processed long_term_memories pieces
+            - The processed deep_memories pieces
             - Shape (..., bank_select, d_model)
         """
         # Create bank select and add dimensions

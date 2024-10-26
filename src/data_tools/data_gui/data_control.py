@@ -94,7 +94,7 @@ class UnblockableButton(QPushButton):
     """
     An UnblockableButton that emits a specific event when clicked.
 
-    It is also capable of flashing to bring long_term_memories to itself when
+    It is also capable of flashing to bring deep_memories to itself when
     a user tries to click a blocked button.
     """
 

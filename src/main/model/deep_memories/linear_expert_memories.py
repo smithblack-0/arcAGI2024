@@ -6,10 +6,9 @@ and efficient access by means of banked memory collections.
 
 import torch
 from torch import nn
-from core import RecurrentMemoryAttention, recurrent_long_term_memory_registry
+from src.main.model.transformer_primitives import DeepMemoryUnit
 from src.main.model.virtual_layers import (SelectionSpec, DropoutLogits, VirtualLinear,
                                            virtual_state_select, virtual_state_scatter)
-from fast_transformers import builders
 from typing import Optional, Tuple
 
 
@@ -326,7 +325,7 @@ class SelectExperts(nn.Module):
 
 
 @recurrent_long_term_memory_registry.register("LinearExpertMemories")
-class LinearExpertMemories(RecurrentMemoryAttention):
+class LinearExpertMemories(DeepMemoryUnit):
     """
     The linear expert attention mechanism. A collection of
     experts are consumed each iteration in order to both update the

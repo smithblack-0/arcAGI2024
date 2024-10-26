@@ -1,6 +1,6 @@
 import unittest
 import torch
-from src.main.model.support_datastructure.computation_stack import AdaptiveComputationStack  # Adjust the import path accordingly
+from src.main.model.computation_support_stack.pointer_superposition_stack import PointerSuperpositionStack  # Adjust the import path accordingly
 
 class TestAdaptiveComputationStack(unittest.TestCase):
 
@@ -15,7 +15,7 @@ class TestAdaptiveComputationStack(unittest.TestCase):
         Verify the shape of the stack and pointers, and ensure they start with the correct values.
         """
         embedding_shape, stack_depth = self.create_mock_data(batch_size=2, d_model=4, stack_depth=3)
-        stack = AdaptiveComputationStack(stack_depth, embedding_shape)
+        stack = PointerSuperpositionStack(stack_depth, embedding_shape)
 
         # Check if stack is initialized with correct shape and zeros
         self.assertEqual(stack.stack.shape, torch.Size([stack_depth, *embedding_shape]))
@@ -31,7 +31,7 @@ class TestAdaptiveComputationStack(unittest.TestCase):
         Test if the set_expression function correctly updates the stack based on embedding and pointer probabilities.
         """
         embedding_shape, stack_depth = self.create_mock_data(batch_size=2, d_model=4, stack_depth=3)
-        stack = AdaptiveComputationStack(stack_depth, embedding_shape)
+        stack = PointerSuperpositionStack(stack_depth, embedding_shape)
 
         embedding = torch.randn(*embedding_shape)
         batch_mask = torch.zeros(embedding_shape[:-1], dtype=torch.bool)
@@ -55,7 +55,7 @@ class TestAdaptiveComputationStack(unittest.TestCase):
         Test the adjust_stack method to ensure correct behavior when applying enstack, no-op, and destack actions.
         """
         embedding_shape, stack_depth = self.create_mock_data(batch_size=2, d_model=4, stack_depth=3)
-        stack = AdaptiveComputationStack(stack_depth, embedding_shape)
+        stack = PointerSuperpositionStack(stack_depth, embedding_shape)
 
         action_probabilities = torch.tensor([[0.7, 0.2, 0.1], [0.4, 0.4, 0.2]])
         batch_mask = torch.zeros(embedding_shape[:-1], dtype=torch.bool)
@@ -79,7 +79,7 @@ class TestAdaptiveComputationStack(unittest.TestCase):
         Test if statistics are properly accumulated when adjust_stack is called.
         """
         embedding_shape, stack_depth = self.create_mock_data(batch_size=2, d_model=4, stack_depth=3)
-        stack = AdaptiveComputationStack(stack_depth, embedding_shape)
+        stack = PointerSuperpositionStack(stack_depth, embedding_shape)
 
         action_probabilities = torch.tensor([[0.7, 0.2, 0.1], [0.4, 0.4, 0.2]])
         batch_mask = torch.zeros(embedding_shape[:-1], dtype=torch.bool)  # Allow updates
@@ -108,7 +108,7 @@ class TestAdaptiveComputationStack(unittest.TestCase):
         Test the __call__ method, which performs set, adjust, and get in one step.
         """
         embedding_shape, stack_depth = self.create_mock_data(batch_size=2, d_model=4, stack_depth=3)
-        stack = AdaptiveComputationStack(stack_depth, embedding_shape)
+        stack = PointerSuperpositionStack(stack_depth, embedding_shape)
 
         embedding = torch.randn(*embedding_shape)
         action_probabilities = torch.tensor([[0.5, 0.3, 0.2], [0.2, 0.5, 0.3]])

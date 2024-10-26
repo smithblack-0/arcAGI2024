@@ -1,6 +1,6 @@
 """
-Sliding window recurrent long_term_memories. This contains the mechanisms for sliding
-window long_term_memories, including the creation and update mechanisms
+Sliding window recurrent deep_memories. This contains the mechanisms for sliding
+window deep_memories, including the creation and update mechanisms
 """
 
 import torch
@@ -68,7 +68,7 @@ class Window:
 class SlidingWindowAttention(RecurrentSelfAttention):
     """
     Maintains a sliding window of recurrent context,
-    and updates it when called. Performs normal long_term_memories
+    and updates it when called. Performs normal deep_memories
     within this window.
     """
 
@@ -85,7 +85,7 @@ class SlidingWindowAttention(RecurrentSelfAttention):
         super().__init__(d_model, d_key, d_value, d_head, num_heads, dropout)
         self.window_size = window_size
 
-        # Create the long_term_memories mechanism
+        # Create the deep_memories mechanism
         self.mha = nn.MultiheadAttention(d_model, num_heads, dropout,
                                          kdim=d_key, vdim=d_value, batch_first=True
                                          )
@@ -97,7 +97,7 @@ class SlidingWindowAttention(RecurrentSelfAttention):
                 state: Optional[Window] = None
                 ) -> Tuple[torch.Tensor, Any]:
         """
-        Performs multiheaded long_term_memories against the sliding window, then
+        Performs multiheaded deep_memories against the sliding window, then
         updates the sliding window.
         :param query: The query
         :param key: The key
@@ -113,5 +113,5 @@ class SlidingWindowAttention(RecurrentSelfAttention):
         # Update the window with the inputs
         state.update(query, key, value)
 
-        # Perform long_term_memories, return result
+        # Perform deep_memories, return result
         return self.mha(query.unsqueeze(-2), state.keys, state.values)

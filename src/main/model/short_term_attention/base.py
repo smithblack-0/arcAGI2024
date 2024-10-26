@@ -1,5 +1,5 @@
 """
-The base recurrent long_term_memories class, the interface contract,
+The base recurrent deep_memories class, the interface contract,
 and the builder registry all in one place. The outside world
 learns how to interface from here.
 """
@@ -13,8 +13,8 @@ from ..registry import TorchLayerRegistry
 
 class RecurrentSelfAttention(nn.Module, ABC):
     """
-    The base contract for the recurrent linear long_term_memories
-    mechanism. Includes the three slots for the standard long_term_memories
+    The base contract for the recurrent linear deep_memories
+    mechanism. Includes the three slots for the standard deep_memories
     parameters, then an additional state slot as well.
     """
 
