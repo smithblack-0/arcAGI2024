@@ -43,6 +43,7 @@ class DeepMemoryUnit(VirtualLayer, Generic[MemState], ABC):
         """
 
 
+
 class AbstractComputationStack(ABC):
     """
     Abstract interface for a differentiable computation stack used in adaptive computation.
