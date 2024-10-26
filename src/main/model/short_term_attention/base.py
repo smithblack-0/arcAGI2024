@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from abc import ABC, abstractmethod
 from typing import Dict, Tuple, Union, Type, List, Any
-from ..registry import TorchLayerRegistry
+from ..registry import InterfaceRegistry
 
 
 class RecurrentSelfAttention(nn.Module, ABC):
@@ -55,5 +55,5 @@ class MakeHeads(nn.Module):
 
 # create some of the registries
 
-recurrent_short_term_attention_registry = TorchLayerRegistry[RecurrentSelfAttention]("ShortTermAttention",
-                                                                                     RecurrentSelfAttention)
+recurrent_short_term_attention_registry = InterfaceRegistry[RecurrentSelfAttention]("ShortTermAttention",
+                                                                                    RecurrentSelfAttention)

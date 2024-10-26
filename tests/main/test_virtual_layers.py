@@ -457,7 +457,7 @@ class TestVirtualParameter(unittest.TestCase):
         vp = VirtualParameter.create(bank_size, shape)
 
         # Define a SelectionSpec with no valid indices
-        selection_indices = torch.tensor([])  # No banks selected
+        selection_indices = torch.tensor([], dtype=torch.long)  # No banks selected
         selection_probabilities = torch.tensor([])
         selection_spec = SelectionSpec(selection_index=selection_indices,
                                        selection_probabilities=selection_probabilities)

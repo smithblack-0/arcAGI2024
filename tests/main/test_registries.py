@@ -3,8 +3,8 @@ import torch
 from torch import nn
 from typing import Optional, List, Dict, Any, Tuple, Union
 from src.main.model.registry import (is_type_hint, is_same_type_hint, is_sub_type_hint,
-                                     TorchLayerRegistry)
-
+                                     InterfaceRegistry)
+from abc import ABC, abstractmethod
 
 class TestHelperFunctions(unittest.TestCase):
     """
@@ -91,213 +91,200 @@ class TestHelperFunctions(unittest.TestCase):
 
 class TestRegistryBuilder(unittest.TestCase):
     """
-    Test the registry, and associated build, method.
+    Test the InterfaceRegistry class and its associated build method.
     """
 
     def test_basic_class(self):
-        """Test registry of a basic class."""
+        """Test registration of a basic class."""
 
-        class MyClass(nn.Module):
+        class MyClass(nn.Module, ABC):
             def __init__(self, a: int, b: Optional[str]):
                 super().__init__()
                 self.a = a
                 self.b = b
 
+            @abstractmethod
             def forward(self, x: torch.Tensor) -> torch.Tensor:
                 pass
 
-        # Registering MyClass in RegistryBuilder[MyClass]
-        registry = TorchLayerRegistry[MyClass]("test_classes", MyClass)
-        registry.register_class("my_class", MyClass)
+        class ConcreteClass(MyClass):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return x
+
+        # Registering MyClass in InterfaceRegistry[MyClass]
+        registry = InterfaceRegistry[MyClass]("test_classes", MyClass)
+        registry.register_class("my_class", ConcreteClass)
         self.assertIn("my_class", registry.registry)
 
         # Instance it
-
         instance = registry.build("my_class", a=3, b="potato")
 
     def test_constructor_validation(self):
-        """Test we catch when registering insane requirements or classes"""
+        """Test that invalid registrations raise expected errors."""
 
-        # Basic type checking
-        class MyClass(nn.Module):
+        class MyClass(nn.Module, ABC):
             def __init__(self, a: int, b: Optional[str]):
                 super().__init__()
                 self.a = a
                 self.b = b
-            def forward(self)->None:
+
+            @abstractmethod
+            def forward(self) -> None:
                 pass
 
-        # Raise when trying to use somethign other than a string as a name
         with self.assertRaises(TypeError):
-            registry = TorchLayerRegistry[MyClass](3, MyClass)
+            registry = InterfaceRegistry[MyClass](3, MyClass)
 
-        # Raise when trying to use an instance as a class prototype
         with self.assertRaises(TypeError):
             instance = MyClass(1, "3")
-            registry = TorchLayerRegistry[MyClass](3, instance)
+            registry = InterfaceRegistry[MyClass](3, instance)
 
-
-        # Try to setup a registry that does not implement forward
-        class MyClass(nn.Module):
-            def __init__(self, a: int, b: Optional[str]):
+        class IncompleteClass(nn.Module):
+            def __init__(self, a: int, b):
                 super().__init__()
                 self.a = a
                 self.b = b
 
-        with self.assertRaises(TypeError):
-            registry = TorchLayerRegistry[MyClass]("test_registry", MyClass)
-
-        # Try to setup a class with missing constructor type hints
-
-        class MyClass:
-            def __init__(self, a: int, b):
-                self.a = a
-                self.b = b
-
+            @abstractmethod
             def forward(self) -> torch.Tensor:
                 pass
 
         with self.assertRaises(TypeError):
-            registry = TorchLayerRegistry[MyClass]("test_registry", MyClass)
+            registry = InterfaceRegistry[IncompleteClass]("test_registry", IncompleteClass)
 
-        # Try to setup a class with missing forward type hints
-        class MyClass:
+        class IncompleteForward(nn.Module, ABC):
             def __init__(self, a: int, b: int):
+                super().__init__()
                 self.a = a
                 self.b = b
 
+            @abstractmethod
             def forward(self, x) -> torch.Tensor:
                 pass
 
         with self.assertRaises(TypeError):
-            registry = TorchLayerRegistry[MyClass]("test_registry", MyClass)
+            registry = InterfaceRegistry[IncompleteForward]("test_registry", IncompleteForward)
 
-        # Try to setup a class that would work, but with insane registry
-        # indirection
-
-        class MyClass:
-            def __init__(self, a: int, b: Optional[str]):
-                self.a = a
-                self.b = b
-
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                pass
-
-        with self.assertRaises(TypeError):
-            registry = TorchLayerRegistry[MyClass]("test_registry", MyClass, a="apple")
-
-        # Try to setup a class that would work, but with a registry redirection that it cannot
-        # consume
-
-        class MyClass:
-            def __init__(self, a: int, b: Optional[str]):
-                self.a = a
-                self.b = b
-
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                pass
-
-        with self.assertRaises(TypeError):
-            irrelevant_registry = TorchLayerRegistry[MyClass]("test_registry", MyClass)
-            registry = TorchLayerRegistry[MyClass]("test_registry", MyClass)
-
-
-    def test_register_validation(self):
-        """Test we catch when you are attempting to register something insane or nonmatching"""
-
-        class MyClass:
-            def __init__(self, a: int, b: Optional[str]):
-                self.a = a
-                self.b = b
-
-        # Try to register something that is missing a required keyword
-        with self.assertRaises(TypeError):
-            registry = TorchLayerRegistry[MyClass](c=int)
-            registry.register_class("my_class", MyClass)
-
-        # Try to register to a registry with different required typing
-
-        with self.assertRaises(TypeError):
-            registry = TorchLayerRegistry[MyClass](a=float, b=str)
-            registry.register_class("my_class", MyClass)
-
-    def test_build_details(self):
-        """Test the builder mechanism, in its various modes of operation"""
-
-        class MyClass(nn.Module):
+        class MyClassWithIndirection(nn.Module, ABC):
             def __init__(self, a: int, b: Optional[str]):
                 super().__init__()
                 self.a = a
                 self.b = b
 
+            @abstractmethod
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                pass
+
+        with self.assertRaises(TypeError):
+            registry = InterfaceRegistry[MyClassWithIndirection]("test_registry", MyClassWithIndirection, a="apple")
+
+    def test_register_validation(self):
+        """Test that invalid registrations raise expected errors."""
+
+        class MyClass(nn.Module, ABC):
+            def __init__(self, a: int, b: Optional[str]):
+                super().__init__()
+                self.a = a
+                self.b = b
+
+            @abstractmethod
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                pass
+
+        with self.assertRaises(TypeError):
+            registry = InterfaceRegistry[MyClass](c=int)
+            registry.register_class("my_class", MyClass)
+
+        with self.assertRaises(TypeError):
+            registry = InterfaceRegistry[MyClass](a=float, b=str)
+            registry.register_class("my_class", MyClass)
+
+    def test_build_details(self):
+        """Test the builder mechanism in various operational modes."""
+
+        class MyClass(nn.Module, ABC):
+            def __init__(self, a: int, b: Optional[str]):
+                super().__init__()
+                self.a = a
+                self.b = b
+
+            @abstractmethod
             def forward(self, x: torch.Tensor) -> torch.Tensor:
                 return x
 
-        # Test building with an optional, unprovided, parameter
-        registry = TorchLayerRegistry[MyClass]("test_builder", MyClass)
-        registry.register_class("my_class", MyClass)
+        class ConcreteClass(MyClass):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return x
+
+        registry = InterfaceRegistry[MyClass]("test_builder", MyClass)
+        registry.register_class("my_class", ConcreteClass)
         instance = registry.build("my_class", a=3)
 
-        # Test building with other, unused, parameters
         instance = registry.build("my_class", a=3, c="potato")
 
-        # Test when we attempt to build with something that is non optional, and
-        # it is not provided, we throw
         with self.assertRaises(ValueError):
             registry.build("my_class")
-
-        # Test when we attempt to build something, and it is the wrong
-        # type, we throw
 
         with self.assertRaises(TypeError):
             registry.build("my_class", a="potato")
 
     def test_build_indirection(self):
+        """Test build functionality with builder indirection."""
 
-        class Indirection(nn.Module):
+        class Indirection(nn.Module, ABC):
             def __init__(self, a: int):
                 super().__init__()
                 self.a = a
-            def forward(self)->int:
+
+            @abstractmethod
+            def forward(self) -> int:
+                pass
+
+        class ConcreteIndirection(Indirection):
+            def forward(self) -> int:
                 return self.a
 
-        class MyClass(nn.Module):
+        class MyClass(nn.Module, ABC):
             def __init__(self, indirect: Indirection):
                 super().__init__()
                 self.indirect = indirect
-            def forward(self)->int:
+
+            @abstractmethod
+            def forward(self) -> int:
+                pass
+
+        class ConcreteClass(MyClass):
+            def forward(self) -> int:
                 return self.indirect()
 
-        # Create indirection builder
-        indirection_builder = TorchLayerRegistry[Indirection]("indirection_builder", Indirection)
 
-        # Create main builder/registry
-        registry = TorchLayerRegistry[MyClass]("test_builder", MyClass, indirect=indirection_builder)
+        indirection_builder = InterfaceRegistry[Indirection]("indirection_builder", Indirection)
 
-        # Register implementations
-        indirection_builder.register_class("indirection", Indirection)
-        registry.register_class("test_class", MyClass)
+        registry = InterfaceRegistry[MyClass]("test_builder", MyClass, indirect=indirection_builder)
 
-        # Try building with indirection
-        instance = registry.build("test_class", a = 3, indirect = "indirection")
+        indirection_builder.register_class("indirection", ConcreteIndirection)
+        registry.register_class("test_class", ConcreteClass)
+
+        instance = registry.build("test_class", a=3, indirect="indirection")
 
     def test_interfaces(self):
-        """
-        Test the ability to define the complex interfaces I need.
-        """
+        """Test ability to define and enforce complex interfaces."""
 
-        class Abstract(nn.Module):
+        class Abstract(nn.Module, ABC):
             def __init__(self):
                 super().__init__()
-            def forward(self, x: torch.Tensor, *params: Any)->torch.Tensor:
+
+            @abstractmethod
+            def forward(self, x: torch.Tensor, *params: Any) -> torch.Tensor:
                 pass
 
         class Implements(Abstract):
             def __init__(self, output: torch.Tensor):
                 super().__init__()
                 self.output = output
-            def forward(self, x: torch.Tensor, *params: Any) -> torch.Tensor:
-                return self.output+x
 
-        registry = TorchLayerRegistry[Abstract]("test", Abstract)
+            def forward(self, x: torch.Tensor, *params: Any) -> torch.Tensor:
+                return self.output + x
+
+        registry = InterfaceRegistry[Abstract]("test", Abstract)
         registry.register_class("Implements", Implements)

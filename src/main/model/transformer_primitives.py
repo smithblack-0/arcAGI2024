@@ -75,8 +75,18 @@ class AbstractComputationStack(ABC):
     - `set_expression`: Sets the stack expression using embeddings and a batch mask.
     - `record_statistics`: Logs statistics on actions and stack transitions based on probabilistic pointers.
     """
-    def __init__(self):
-        super().__init__()
+    def __init__(self,
+                 stack_depth: int,
+                 embedding_shape: torch.Size,
+                 dtype: torch.dtype = None,
+                 device: torch.device = None):
+        """
+        Interface for the abstract computation stack..
+
+        :param stack_depth: The depth of the stack.
+        :param embedding_shape: Shape for embeddings. All but the last dimension are batch-like,
+                                and the last dimension is d_model.
+        """
 
     @property
     @abstractmethod
@@ -153,6 +163,8 @@ class AbstractComputationStack(ABC):
         self.adjust_stack(probabilities, batch_mask)
         return self.get_expression()
 
+
 # Initialize the various registries
 # with their abstract contents.
-deep_memory_registry = registry.TorchLayerRegistry[DeepMemoryUnit]("DeepMemoryUnits", DeepMemoryUnit)
+deep_memory_registry = registry.InterfaceRegistry[DeepMemoryUnit]("DeepMemoryUnits", DeepMemoryUnit)
+stack_registry = registry.InterfaceRegistry[AbstractComputationStack]("ComputationStack", AbstractComputationStack)
