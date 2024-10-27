@@ -11,7 +11,8 @@ from typing import Tuple, Any, Optional
 from transformer_primitives import (stack_registry, deep_memory_registry,
                                     DeepMemoryUnit, AbstractComputationStack, MemState)
 from virtual_layers import VirtualFeedforward, AbstractBankSelector
-
+from .pointer_superposition_stack import PointerSuperpositionStack, StackFactory
+from .adaptive_computation_time import AdaptiveComputationTime
 class RecurrentDecoder(nn.Module):
     """
     The recurrent decoder mechanism. Sets up and
@@ -24,24 +25,26 @@ class RecurrentDecoder(nn.Module):
                  stack_depth: int,
                  memory_unit: DeepMemoryUnit,
                  feedforward: VirtualFeedforward,
-                 layer_selector: AbstractBankSelector
+                 layer_selector: AbstractBankSelector,
+                 stack_factory: StackFactory
                  ):
         super().__init__()
 
         self.d_model = d_model
         self.stack_depth = stack_depth
 
-        # Create ACT controller.
-
         # Store layers
         self.memory_unit = memory_unit
         self.feedforward = feedforward
         self.layer_selector = layer_selector
+        self.stack_factory = stack_factory
 
         # Create layernorm features
         self.memory_layernorm = nn.LayerNorm(d_model)
         self.feedforward_layernorm = nn.LayerNorm(d_model)
         self.stack_layernorm = nn.LayerNorm(d_model)
+
+
 
     def forward(self,
                 embedding: torch.Tensor,
@@ -56,15 +59,17 @@ class RecurrentDecoder(nn.Module):
             - The response embedding. Shape (..., d_model)
             - The recurrent state.
         """
+        if recurrent_state is None:
+            self.memory_unit.
 
-        # Build the stack.
+        # Build the stack. Build the ACT
+        stack = self.stack_factory(embedding, embedding)
+        act = AdaptiveComputationTime(embedding.shape[:-1],
+                                      dtype=embedding.dtype,
+                                      device=embedding.device)
 
-        stack = stack_registry.build("PointerSuperpositionStack",
-                                     stack_depth=self.stack_depth,
-                                     dtype=embedding.dtype,
-                                     device=embedding.device,
-                                     embedding_shape=embedding.shape
-                                     )
+        while act.should_continue():
+
 
         # Setup for adaptive computation time.
         accumulator = torch.zeros_like(embedding)

@@ -43,7 +43,6 @@ class AdaptiveComputationTime:
     """
 
     def __init__(self,
-                 max_steps: int,
                  batch_shape: torch.Size,
                  threshold: float = 0.99,
                  device: Optional[torch.device] = None,
@@ -53,8 +52,7 @@ class AdaptiveComputationTime:
         Initialize ACT class with adaptive computation time setup.
 
         Args:
-            max_steps (int): Maximum steps allowed.
-            threshold (float): Probability threshold for halting.
+             threshold (float): Probability threshold for halting.
             batch_shape torch.Size: expected shape of the batch for halting probabilities.
 
         """
@@ -176,7 +174,7 @@ class AdaptiveComputationTime:
         Returns:
             bool: True if additional computation is needed, False if all samples have halted or reached max steps.
         """
-        return not self.has_halted.all() and (self.steps_taken < self.max_steps).any()
+        return not self.has_halted.all()
 
     def finalize(self) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
