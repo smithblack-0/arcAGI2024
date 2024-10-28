@@ -52,6 +52,7 @@ def is_same_type_hint(required_type_hint: Any,
     if proposed_type_hint is types.NoneType:
         proposed_type_hint = None
 
+
     # When both origins are not the same, this is not the same type hint
     if origin1 != origin2:
         return False
@@ -107,6 +108,7 @@ def is_sub_type_hint(origin_hint: Any,
                 return True
         return False
 
+
     # It was not a union. But it COULD still be a generic, with unions inside of them.
     # So we take apart the generics and process them. If the taken apart generics are all
     # true, then some union node deeper in resolved to a working value
@@ -145,7 +147,7 @@ def is_sub_type_hint(origin_hint: Any,
 
             # Then, the extensions must match the last provided solid type
             for extra in args2[standard_length:]:
-                if not is_sub_type_hint(extra, args1[standard_length - 1]):
+                if not is_sub_type_hint(extra, args1[standard_length-1]):
                     return False
             return True
 
@@ -155,12 +157,11 @@ def is_sub_type_hint(origin_hint: Any,
             return False
     return True
 
-
 def get_signature_type_hints(method_name: str,
                              class_name: str,
-                             signature: inspect.Signature,
-                             expect_return: bool
-                             ) -> Tuple[Dict[str, Any], Any]:
+                            signature: inspect.Signature,
+                            expect_return: bool
+                            ) -> Tuple[Dict[str, Any], Any]:
     """
     Gets the type hints for the parameters and return type of a provided method
     from the given class, excluding the first parameter (usually 'self'). Notably,
@@ -185,8 +186,7 @@ def get_signature_type_hints(method_name: str,
     parameter_types = {}
     for name in param_names:
         if method_params[name].annotation == inspect.Parameter.empty:
-            raise TypeError(
-                f"Parameter '{name}' in method '{method_name}' of class '{class_name}' does not have a type annotation.")
+            raise TypeError(f"Parameter '{name}' in method '{method_name}' of class '{class_name}' does not have a type annotation.")
         parameter_types[name] = method_params[name].annotation
 
     # Get the return type hint and raise an error if it is missing
@@ -198,17 +198,14 @@ def get_signature_type_hints(method_name: str,
             return_type = None
     return parameter_types, return_type
 
-
-def get_constructor_spec(abstract_cls: Type[nn.Module]) -> Tuple[inspect.Signature, Dict[str, Any]]:
+def get_constructor_spec(abstract_cls: Type[nn.Module]) -> inspect.Signature:
     """
     Gets constructor data. This includes the signature, and the typing on each parameter.
     """
     signature = inspect.signature(abstract_cls.__init__)
-    params, _ = get_signature_type_hints("__init__", abstract_cls.__name__, signature, expect_return=False)
-    return signature, params
+    return signature
 
-
-def get_abstract_spec(abstract_cls: Type[nn.Module]) -> Dict[str, Tuple[inspect.Signature, Dict[str, Any], Any]]:
+def get_abstract_spec(abstract_cls: Type[nn.Module]) -> Dict[str, inspect.Signature]:
     """
     Collects abstract method specs from a given abstract class.
     :param abstract_cls: The class to inspect.
@@ -218,9 +215,16 @@ def get_abstract_spec(abstract_cls: Type[nn.Module]) -> Dict[str, Tuple[inspect.
     for name, method in abstract_cls.__dict__.items():
         if inspect.isfunction(method) and hasattr(method, "__isabstractmethod__"):
             signature = inspect.signature(method)
-            params, return_type = get_signature_type_hints(name, abstract_cls.__name__, signature, expect_return=True)
-            abstract_specs[name] = (signature, params, return_type)
+            abstract_specs[name] = signature
     return abstract_specs
+
+def get_concrete_specs(abstract_specs: Dict[str, inspect.Signature],
+                       concrete_cls: Type[Any]
+                       )->Dict[str, inspect.Signature]:
+    concrete_specs = {}
+    for name in abstract_specs.keys():
+        concrete_specs[name] = inspect.signature(getattr(concrete_cls, name))
+    return concrete_specs
 
 
 class AbstractClassSchemaEnforcer:
@@ -230,38 +234,180 @@ class AbstractClassSchemaEnforcer:
     This enforces consistency across implementations within a registry.
     """
 
+    def verify_abstract_schema(self,
+                               signature: inspect.Signature,
+                               method: str,
+                               expect_return: bool
+                               ):
+        """
+        Verify that a method signature is sane
+        :param signature: The signature to verify
+        :param method: The method it is called
+        :param expect_return: Whether it must have a return type annotation
+        """
+        has_self_been_skipped = False
+        for name, parameter in signature.parameters.items():
+            if not has_self_been_skipped:
+                has_self_been_skipped = True
+                continue
+
+            if parameter.annotation == inspect.Parameter.empty:
+                msg = f"""
+                Issue with method '{method}'
+                All parameters were expected to have a type annotation.
+                However, parameter called {name} had none
+                """
+                msg = textwrap.dedent(msg)
+                raise TypeError(msg)
+        if signature.return_annotation == inspect.Signature.empty and expect_return:
+            msg = f"""
+            Issue with method '{method}'
+            The return was expected to have a type annotation, but 
+            none was detected
+            """
+            msg = textwrap.dedent(msg)
+            raise TypeError(msg)
+
+
+
     def __init__(self, cls_abstract: Type[nn.Module]):
         """
         Initializes the schema enforcer with the abstract class's specifications.
         """
         self.name = cls_abstract.__name__
         self.cls_interface = cls_abstract
-        self.constructor_spec = get_constructor_spec(cls_abstract)
-        self.abstract_specs = get_abstract_spec(cls_abstract)
+
+        contructor_signature = get_constructor_spec(cls_abstract)
+        methods_signature = get_abstract_spec(cls_abstract)
+
+        self.verify_abstract_schema(contructor_signature, "__init__", False)
+        for name, signature in methods_signature.items():
+            self.verify_abstract_schema(signature, name, True)
+
+        self.constructor_signature = contructor_signature
+        self.abstract_methods_signature = methods_signature
+
+    def verify_signatures_compatible(self,
+                                     method_name: str,
+                                     abstract_signature: inspect.Signature,
+                                     concrete_signature: inspect.Signature,
+                                     ):
+
+        # If the abstract signature is the same as the concrete signature
+        # no further checks are needed
+        if abstract_signature == concrete_signature:
+            return
+
+        if abstract_signature.parameters != concrete_signature.parameters:
+            # This is possibly because we had a kwarg or arg and possibly because
+            # we had a bad specification. To narrow this down, we try to bind the concrete
+            # signature paramters onto the abstract parameter specification. Then we verify
+            # all types were properly reducable
+            try:
+                args_routing = (inspect.Parameter.POSITIONAL_ONLY,
+                                inspect.Parameter.VAR_POSITIONAL,
+                                inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                kwargs_routing = (inspect.Parameter.KEYWORD_ONLY,
+                                  inspect.Parameter.VAR_KEYWORD)
+
+                args = [arg for arg in concrete_signature.parameters.values() if arg.kind in args_routing]
+                kwargs = {key: value for key, value in concrete_signature.parameters.items()
+                          if value.kind in kwargs_routing}
+                bound_parameters = abstract_signature.bind(*args, **kwargs)
+            except Exception as e:
+                msg = """
+                  Could not bind concrete implementation to abstract sequence: {e}
+                  """
+                msg = textwrap.dedent(msg)
+                raise TypeError(msg) from e
+
+            has_self_been_skipped = False
+            for name, abstract_parameter in abstract_signature.parameters.items():
+
+                # Skip this if we are dealing
+                if not has_self_been_skipped:
+                    has_self_been_skipped = True
+                    continue
+                # Skip variable args if nothing was bound to it
+                if (abstract_parameter.kind == inspect.Parameter.VAR_POSITIONAL
+                        and name not in bound_parameters.arguments):
+                    continue
+
+                # Skip variable kwargs if nothing was bound to it.
+                if (abstract_parameter.kind == inspect.Parameter.VAR_KEYWORD
+                        and name not in bound_parameters.arguments):
+                    continue
+
+
+                # Get the concrete cases. This is either a single parameter,
+                # or a list or dict of them if we are dealing with a varidac
+                concrete_cases = bound_parameters.arguments[name]
+                if isinstance(concrete_cases, inspect.Parameter) and \
+                        concrete_cases.annotation != abstract_parameter.annotation:
+                    # This is a normal parameter. Just verify it.
+                    if not is_sub_type_hint(abstract_parameter.annotation, concrete_cases.annotation):
+                        msg = f"""
+                        Issue detected with implementation of '{method_name}'.
+                        
+                        In parameter {name} of the abstract implementation, we were 
+                        given type of '{abstract_parameter.annotation}'. However, implemented
+                        '{concrete_cases.annotation} which was not compatible.
+                        """
+                        msg = textwrap.dedent(msg)
+                        raise TypeError(msg)
+                if isinstance(concrete_cases, tuple):
+                    # Variable args need to be looped over and checked
+                    for concrete_case in concrete_cases:
+                        if not is_sub_type_hint(abstract_parameter.annotation, concrete_case.annotation):
+                            msg = f"""
+                            Issue detected with implementation of '{method_name}'.
+                            The abstract type had variable args named {name}, with
+                            a type of '{abstract_parameter.annotation}'. However, one
+                            of the arguments had type '{concrete_case.annotation}
+                            """
+                            msg = textwrap.dedent(msg)
+                            raise TypeError(msg)
+                elif isinstance(concrete_cases, dict):
+                    # Keyword arguments need to be looped over and checked
+                    # as well
+                    for kwarg_name, concrete_case in concrete_cases.items():
+                        if not is_sub_type_hint(abstract_parameter.annotation, concrete_case.annotation):
+                            msg = f"""
+                            Issue detected with implementation of '{method_name}'.
+                            The abstract type was a variable kwargs feature named {name},
+                            with attached type of '{abstract_parameter.annotation}'. However,
+                            kwarg with name '{kwarg_name}' in the concrete implementation
+                            had type of '{concrete_case.annotation}'
+                            """
+                            msg = textwrap.dedent(msg)
+                            raise TypeError(msg)
 
     @property
-    def constructor_schema(self) -> Dict[str, Any]:
-        return self.constructor_spec[1]
+    def constructor_schema(self) -> inspect.Signature:
+        return self.constructor_signature
 
     @property
-    def abstract_schemas(self) -> Dict[str, Tuple[inspect.Signature, Dict[str, Any], Any]]:
-        return self.abstract_specs
+    def abstract_schemas(self) -> Dict[str, inspect.Signature]:
+        return self.abstract_methods_signature
 
     def validate_constructor_specification(self, cls_implementation: Type[nn.Module]):
         """
         Validates that the constructor of an implementation matches the abstract class's constructor schema.
         """
-        constructor_signature, constructor_params = get_constructor_spec(cls_implementation)
-        expected_signature, expected_params = self.constructor_spec
+        constructor_signature = get_constructor_spec(cls_implementation)
+        expected_signature = self.constructor_signature
 
-        for name, expected_type in expected_params.items():
-            if name not in constructor_params:
+        for name, parameter in expected_signature.parameters.items():
+
+            if name not in constructor_signature.parameters:
                 raise TypeError(f"Implementation constructor missing parameter '{name}'")
-            if not is_sub_type_hint(expected_type, constructor_params[name]):
+
+            type_hint = constructor_signature.parameters[name].annotation
+            if not is_sub_type_hint(parameter.annotation, type_hint):
                 msg = f"""
                 Types did not match for parameter '{name}' in constructor.
-                Abstract Interface: '{expected_type}'
-                Implementation: '{constructor_params[name]}'
+                Abstract Interface: '{parameter.annotation}'
+                Implementation: '{type_hint}'
                 """
                 raise TypeError(textwrap.dedent(msg))
 
@@ -269,14 +415,13 @@ class AbstractClassSchemaEnforcer:
         """
         Validates that a specific method in the implementation matches the abstract method specification.
         """
-        if method_name not in self.abstract_specs:
+        if method_name not in self.abstract_methods_signature:
             raise ValueError(f"Method '{method_name}' is not an abstract method in '{self.name}'.")
 
         # Fetching the specs to compare
-        expected_signature, expected_params, expected_return = self.abstract_specs[method_name]
+        expected_signature, expected_params, expected_return = self.abstract_methods_signature[method_name]
         actual_signature = inspect.signature(getattr(cls_implementation, method_name))
-        actual_params, actual_return = get_signature_type_hints(method_name, cls_implementation.__name__,
-                                                                actual_signature, expect_return=True)
+        actual_params, actual_return = get_signature_type_hints(method_name, cls_implementation.__name__, actual_signature, expect_return=True)
 
         # Parameter checks
         if expected_params.keys() != actual_params.keys():
@@ -319,10 +464,11 @@ class AbstractClassSchemaEnforcer:
         self.validate_constructor_specification(cls_implementation)
 
         # Validate each abstract method
-        for method_name in self.abstract_specs:
-            self.validate_method_specification(cls_implementation, method_name)
-
-
+        concrete_signatures = get_concrete_specs(self.abstract_methods_signature, cls_implementation)
+        for name in self.abstract_methods_signature.keys():
+            abstract_signature = self.abstract_methods_signature[name]
+            concrete_signature = concrete_signatures[name]
+            self.verify_signatures_compatible(name, abstract_signature, concrete_signature)
 class ImplementationBuilder:
     """
     A helper class responsible for validating constructor arguments against an implementation's
@@ -354,19 +500,26 @@ class ImplementationBuilder:
     * `is_varidac_keywords`: Determines if the given parameter name is a `**kwargs` argument in the constructor.
     * `is_varidac_args`: Determines if the given parameter name is a `*args` argument in the constructor.
     """
+    @property
+    def constructor_types(self)->Dict[str, Any]:
+        signature = self.constructor_spec
+        constructor_params = {}
+        has_skipped_self = False
+        for name, param in signature.parameters.items():
+            if not has_skipped_self:
+                has_skipped_self = True
+                continue
+            constructor_params[name] = param.annotation
+        return constructor_params
 
     @property
-    def constructor_types(self) -> Dict[str, Any]:
-        return self.constructor_spec[1]
+    def constructor_signature(self)->inspect.Signature:
+        return self.constructor_spec
 
-    @property
-    def constructor_signature(self) -> inspect.Signature:
-        return self.constructor_spec[0]
-
-    def is_varidac_keywords(self, parameter: str) -> bool:
+    def is_varidac_keywords(self, parameter: str)->bool:
         return self.constructor_signature.parameters[parameter].kind == inspect.Parameter.VAR_KEYWORD
 
-    def is_varidac_args(self, parameter: str) -> bool:
+    def is_varidac_args(self, parameter: str)->bool:
         return self.constructor_signature.parameters[parameter].kind == inspect.Parameter.VAR_POSITIONAL
 
     def __init__(self,
@@ -389,7 +542,6 @@ class ImplementationBuilder:
             typeguard.check_type(parameter, type)
         except typeguard.TypeCheckError as e:
             raise TypeError(f"Parameter '{parameter}' has an invalid type: {e}") from e
-
     def __call__(self, *args, **kwargs):
         """
         Runs the validation.
@@ -399,11 +551,12 @@ class ImplementationBuilder:
         """
         # Get data to use
 
-        signature, param_types = self.constructor_spec
+        signature = self.constructor_signature
+        param_types = self.constructor_types
 
         # Try to bind the arguments to the signature. This now
         # ensures we can associate them downstream with the correct type
-        bindings = signature.bind("self", *args, **kwargs)
+        bindings = signature.bind("self",*args, **kwargs)
 
         # Go over each binding slot. Ensure all in each slot has correct type
         # Note that the bindings feature can now have direct feature, and arg,
@@ -434,6 +587,9 @@ class ImplementationBuilder:
         # We succeeded in validation. Init
 
         return self.implementation(*args, **kwargs)
+
+
+
 
 
 class InterfaceRegistry(Generic[RegisteredType]):
@@ -581,7 +737,6 @@ class InterfaceRegistry(Generic[RegisteredType]):
         Feedforward="standard_feedforward"
     )
     """
-
     @property
     def layer_abstract_type(self) -> Type[Any]:
         return self.layer_type
@@ -632,12 +787,10 @@ class InterfaceRegistry(Generic[RegisteredType]):
             if not isinstance(registry, InterfaceRegistry):
                 msg = f"Issue on registry indirection named '{name}'. The indirection value was not a TorchLayerRegistry."
                 raise TypeError(msg)
-            if name not in schema_enforcer.constructor_schema:
+            if name not in schema_enforcer.constructor_schema.parameters:
                 msg = f"Indirection registry of name '{name}' was not found among constructor arguments"
                 raise TypeError(msg)
-            if not issubclass(schema_enforcer.constructor_schema[name], registry.layer_abstract_type):
-                msg = f"Abstract interface and indirection registry named {registry.registry_name} were found to be incompatible"
-                raise TypeError(msg)
+
 
         # Setup and otherwise store intake details
         self.layer_type = abstract_layer
@@ -682,7 +835,7 @@ class InterfaceRegistry(Generic[RegisteredType]):
         args = getattr(type_hint, '__args__', ())
         return origin is Union and type(None) in args
 
-    def build(self, name: str, **params: Dict[str, Any]) -> RegisteredType:
+    def build(self, name: str = "Default", **params: Dict[str, Any]) -> RegisteredType:
         """
         Instantiates a registered class using the provided parameters. If a parameter is missing
         and marked as optional, it will be set to `None`. If the parameter requires indirection
@@ -750,3 +903,6 @@ class InterfaceRegistry(Generic[RegisteredType]):
             return class_type
 
         return register
+
+
+

@@ -172,10 +172,51 @@ class DropoutLogits(nn.Module):
         return logits
 
 
+class SavableState(ABC):
+    """
+    A abstract state that implemented two methods,
+    designed to turn the state into something
+    that can be saved and loaded as a pytree.
+
+    This makes it compatible with some otherwise
+    impossible to use functions, such as parallel
+    pytree map.
+
+    Note that the first instance will be kept
+    around and used to initialize the subsequent
+    state. Nontensor features, such as a common threshold,
+    can be initializes using the class.
+    """
+
+    @abstractmethod
+    def save_state(self) -> TensorTree:
+        """
+        Saves the state feature as a tensortree, making it
+        accessable to many classes and features
+        :return: The tensortree containing the state
+        """
+
+    @abstractmethod
+    def load_state(self, pytree: TensorTree) -> 'SavableState':
+        """
+        The reverse of the above. Loads the state from
+        a given pytree.
+        :param pytree: The pytree to load from
+        :return: A setup instance.
+        """
+
 def parallel_pytree_map(func: Callable[..., Any], *pytrees: Any) -> Any:
     """
     Recursively applies a function to corresponding leaves of multiple pytrees with the same structure.
     Nodes where the function returns None are dropped.
+
+    ---- support ----
+
+    Support is present for the dict, list, tuple, and SavableState classes. See SaveableState
+    for more details on that, but it can be mixed in and implemented to let us pytree map things
+    that otherwise would not work.
+
+    ---- spec ---
 
     Args:
         func (Callable[..., Any]): A function to apply to corresponding leaves of the pytrees.
@@ -196,6 +237,12 @@ def parallel_pytree_map(func: Callable[..., Any], *pytrees: Any) -> Any:
         result = {key: parallel_pytree_map(func, *(pytree[key] for pytree in pytrees))
                   for key in pytrees[0]}
         return {key: value for key, value in result.items() if value is not None}  # Remove none results.
+    elif all(isinstance(pytree, SavableState) for pytree in pytrees):
+        # Convert to pytrees, and update state
+        template = pytrees[0]
+        return template.load_state(parallel_pytree_map(func, *(state.save_state() for state in pytrees)))
     else:
         # These are leaves, apply the function to them
         return func(*pytrees)
+
+

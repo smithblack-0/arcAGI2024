@@ -311,7 +311,7 @@ class AbstractBankSelector(nn.Module, ABC):
 selector_registry = registry.InterfaceRegistry[AbstractBankSelector]("BankSelector", AbstractBankSelector)
 
 
-selector_registry.register("LinearBankSelector")
+@selector_registry.register("LinearBankSelector")
 class LinearBankSelector(AbstractBankSelector):
     """
     The `LinearBankSelector` is a simple bank selector that uses a single linear

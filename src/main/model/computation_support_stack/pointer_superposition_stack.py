@@ -1,4 +1,4 @@
-from typing import Any, Tuple, Optional
+from typing import Any, Tuple, Optional, Dict
 
 import torch
 from torch import nn
@@ -30,25 +30,22 @@ class PointerSuperpositionStack:
         if tensor.dtype != self.dtype:
             raise ValueError('`tensor` must have the same dtype')
         if tensor.shape[:self.batch_length] != self.batch_shape:
-            raise ValueError('`tensor` must have the same inital shape as batch shape')
+            raise ValueError('`tensor` must have the same initial shape as batch shape')
 
     def __init__(self,
                  stack_depth: int,
                  batch_shape: torch.Size,
                  action_projector: nn.Linear,
                  focus_projector: nn.Linear,
-                 defaults: TensorTree,
-                 dtype: torch.dtype = None,
-                 device: torch.device = None):
-        defaults = tuple(defaults)
-
+                 **defaults: Tuple[TensorTree],
+                 ):
 
         # Store pertinent information
         self.stack_depth = stack_depth
-        self.batch_shape = batch_shape
+        self.batch_shape = torch.Size(batch_shape)
         self.batch_length = len(batch_shape)
-        self.dtype = dtype
-        self.device = device
+        self.dtype = action_projector.weight.dtype
+        self.device = action_projector.weight.device
         self.post_init_done = True
         self.num_invoked = 0
 
@@ -64,9 +61,9 @@ class PointerSuperpositionStack:
         # and the probability mass holder
 
         self.pointers = torch.zeros([stack_depth, *self.batch_shape],
-                                    device=device, dtype=dtype)
+                                    device=self.device, dtype=self.dtype)
         self.pointer_prob_masses = torch.zeros([stack_depth, *self.batch_shape],
-                                               device=device, dtype=dtype)
+                                               device=self.device, dtype=self.dtype)
         self.pointers[0] = 1.0
 
         # Store the two helper layers
@@ -75,23 +72,18 @@ class PointerSuperpositionStack:
     def get_statistics(self)->torch.Tensor:
         return self.pointer_prob_masses
 
-    def adjust_stack(self,
-                     embedding: torch.Tensor,
-                     batch_mask: torch.Tensor,
-                     max_iterations: int,
-                     min_iterations: int
-                     ) -> torch.Tensor:
+    def compute_controls(self,
+                         embedding: torch.Tensor,
+                         max_iterations: int,
+                         )->Tuple[torch.Tensor, torch.Tensor]:
         """
-        Adjust the stack using information extracted from the
-        provided embedding. Does not perform any adjustment when
-        masked.
-
-        :param embedding: An embedding of shape (...batch_shape, d_model)
-        :param batch_mask: Indicator for whether to update the stack and statistics for this batch.
-        :param max_iterations: Once this is exceeded, we only allow destacking
-        :param min_iterations: Until here, we do not allow popping off the stack.
+        Computes the controls directly from the embeddings.
+        :param embedding: The embedding to compute from
+        :param max_iterations: The maximum allowed iterations before forced flushing
+        :return:
+            - The action probabilities
+            - the sharpening factor
         """
-
         # Compute the action probabilities and focus behavior. This will be used
         # shortly to adjust the stack.
 
@@ -106,6 +98,25 @@ class PointerSuperpositionStack:
 
         actions_probabilities = torch.softmax(action_logits, dim=-1)
         sharpening = 1 + F.elu(focus_logits).squeeze(-1)
+        return actions_probabilities, sharpening
+    def adjust_stack(self,
+                     controls: Tuple[torch.Tensor, torch.Tensor],
+                     batch_mask: torch.Tensor,
+                     min_iterations: int
+                     ) -> torch.Tensor:
+        """
+        Adjust the stack using information extracted from the
+        provided embedding. Does not perform any adjustment when
+        masked.
+
+        :param controls: The control tensors
+            - Action probabiilities of shape (..., 3)
+            - sharpening factor of shape (..., 1)
+        :param batch_mask: Indicator for whether to update the stack and statistics for this batch.
+        :param max_iterations: Once this is exceeded, we only allow destacking
+        :param min_iterations: Until here, we do not allow popping off the stack.
+        """
+        actions_probabilities, sharpening = controls
 
         # Create a set of probabilities that can each
         # be viewed as associated with the enstack,
@@ -179,7 +190,7 @@ class PointerSuperpositionStack:
 
         return lost_probability
 
-    def get_expression(self) -> Tuple[TensorTree]:
+    def get_expression(self) -> Dict[str, TensorTree]:
         """
         Get the current expression of the stack by weighting with probabilistic pointers.
 
@@ -195,7 +206,7 @@ class PointerSuperpositionStack:
 
         return parallel_pytree_map(weighted_sum, self.stack)
 
-    def set_expression(self, batch_mask: torch.Tensor, *tensors: TensorTree):
+    def set_expression(self, batch_mask: torch.Tensor, **tensors: TensorTree):
         """
         Sets the current stack level using an interpolation of probabilities.
         :param batch_mask: Tensor that indicates whether to update the stack for this batch.
@@ -239,8 +250,8 @@ class PointerSuperpositionStack:
                  batch_mask: torch.Tensor,
                  max_iterations: int,
                  min_iterations: int,
-                 *tensors: TensorTree
-                 ) -> Tuple[Tuple[TensorTree, ...], torch.Tensor]:
+                 **tensors: TensorTree
+                 ) -> Tuple[Dict[str, TensorTree], torch.Tensor]:
         """
         The actual invocation. Consists of using the action probabilities
         to perform stack updates, and then return the resutls
@@ -252,8 +263,9 @@ class PointerSuperpositionStack:
             - tensor: Shape (...batch_shape). The probability that fell off the end of the stack.
         """
 
-        self.set_expression(batch_mask, *tensors)
-        lost_probability = self.adjust_stack(embedding, batch_mask, max_iterations, min_iterations)
+        self.set_expression(batch_mask, **tensors)
+        controls = self.compute_controls(embedding, max_iterations)
+        lost_probability = self.adjust_stack(controls, batch_mask, min_iterations)
         return self.get_expression(), lost_probability
 
 class StackFactory(nn.Module):

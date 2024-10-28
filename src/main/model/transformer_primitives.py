@@ -15,6 +15,16 @@ from src.main.model.virtual_layers import VirtualLayer, SelectionSpec
 
 MemState = TypeVar('MemState')
 
+##
+#
+# Adaptive computation time contracts. We implement
+# information related to adaptive computation time
+# here, including implementation factories, layers
+# and more.
+#
+##
+
+
 
 class DeepMemoryUnit(VirtualLayer, Generic[MemState], ABC):
     """

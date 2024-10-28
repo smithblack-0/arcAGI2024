@@ -2,16 +2,13 @@
 The actual decoder implementation is specified here.
 """
 import torch
-import virtual_layers
-import registry
 from torch import nn
 
 # Registry imports
 from typing import Tuple, Any, Optional
-from transformer_primitives import (stack_registry, deep_memory_registry,
-                                    DeepMemoryUnit, AbstractComputationStack, MemState)
+from transformer_primitives import (DeepMemoryUnit)
 from virtual_layers import VirtualFeedforward, AbstractBankSelector
-from .pointer_superposition_stack import PointerSuperpositionStack, StackFactory
+from src.main.model.computation_support_stack.pointer_superposition_stack import StackFactory
 from .adaptive_computation_time import AdaptiveComputationTime
 class RecurrentDecoder(nn.Module):
     """
