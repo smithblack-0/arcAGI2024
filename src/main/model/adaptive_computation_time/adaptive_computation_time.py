@@ -45,6 +45,9 @@ class AdaptiveComputationTime(AbstractACT):
         threshold (float): Probability threshold for halting.
         batch_shape (torch.Size): Expected batch shape for halting probabilities.
     """
+    @property
+    def halted_batches(self)->torch.Tensor:
+        return self.has_halted
 
     def __init__(self,
                  halting_probabilities: torch.Tensor,

@@ -4,8 +4,8 @@ from typing import TypeVar, Generic, Optional, Any, Tuple, Dict
 import torch
 from torch import nn
 
-from ..base import TensorTree
-from ..registry import InterfaceRegistry
+from src.main.model.base import TensorTree
+from src.main.model.registry import InterfaceRegistry
 
 class AbstractACT(ABC):
     """
@@ -46,6 +46,12 @@ class AbstractACT(ABC):
     - `finalize`: Returns the accumulated values upon completing the adaptive computation.
 
     """
+    @property
+    @abstractmethod
+    def halted_batches(self)->torch.Tensor:
+        """
+        Shows what batches have halted
+        """
     @abstractmethod
     def get_statistics(self) -> Dict[str, Any]:
         """
@@ -159,8 +165,6 @@ class ACTController(nn.Module):
     def __init__(self,
                  d_model: int,
                  act_factory: AbstractACTFactory,
-                 device: torch.device,
-                 dtype: torch.dtype,
                  ):
 
         super().__init__()
@@ -170,16 +174,29 @@ class ACTController(nn.Module):
 
         # store the factory
         self.act_factory = act_factory
+    def create_state(self,
+                     batch_shape: torch.Size,
+                     **accumulator_templates: TensorTree
+                     )->AbstractACT:
+        """
+        Creates a blank ACT state.
+        :param batch_shape: The batch shape to match
+        :param accumulator_templates: The accumulations to template
+        :return: The setup act process
+        """
+        batch_shape = torch.Size(batch_shape)
+        return self.act_factory(batch_shape, **accumulator_templates)
+
 
     def forward(self,
-                embedding: torch.Tensor,
+                control_embedding: torch.Tensor,
                 act_state: Optional[AbstractACT] = None,
                 **accumulation_details: TensorTree
                 )->AbstractACT:
         """
         Runs the ACT process, setting it up if needed.
         One either
-        :param embedding: The embedding. Shape (...batch_shape, d_model).
+        :param control_embedding: The embedding. Shape (...batch_shape, d_model).
             - Used to produce halting probabilities and model features.
             - Also we can figure out batch shape from this.
         :param act_state: The act state
@@ -189,17 +206,13 @@ class ACTController(nn.Module):
         :return: The updated abstract act instance.
         """
 
-        # If not yet initialized, setup the act state. Do basic sanity checking
-        if act_state is None:
-            act_state = self.act_factory(embedding.shape[:-1],
-                                         **accumulation_details)
         if not act_state.should_continue():
             raise RuntimeError("You should have stopped when should continue was false")
 
         #Run ACT update. Generate halting probabilities, incorporate new
         # details in step
 
-        halting_probability = self.probability_projector(embedding)
+        halting_probability = self.probability_projector(control_embedding).squeeze(-1)
         halting_probability = torch.sigmoid(halting_probability)
         act_state.step(halting_probability, **accumulation_details)
         return act_state

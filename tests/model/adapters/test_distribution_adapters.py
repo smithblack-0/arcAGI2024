@@ -276,7 +276,7 @@ class TestVocabularyDistributionAdapter(unittest.TestCase):
         }
 
         # Instantiate the adapter using the registry's setup method
-        adapter_instance = registry.setup("vocab_distribution", setup_config)
+        adapter_instance = registry.create_state("vocab_distribution", setup_config)
 
         # Check that the adapter was instantiated correctly
         self.assertIsInstance(adapter_instance, VocabularyDistributionAdapter)

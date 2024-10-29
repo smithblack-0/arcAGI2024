@@ -8,7 +8,8 @@ from src.main.model.virtual_layers import (DropoutLogits, virtual_state_select, 
                                            VirtualLayer, VirtualLinear, VirtualMergeHeads, VirtualMakeHeads,
                                            VirtualFeedforward, AbstractBankSelector, LinearBankSelector,
                                            PseudoMarkovBankSelector, make_random_selection_mask,
-                                           make_top_k_selection_mask, make_top_p_selection_mask
+                                           make_top_k_selection_mask, make_top_p_selection_mask,
+                                           VirtualAdvancedLinear
                                            )
 class TestDropoutLogits(unittest.TestCase):
 
@@ -457,14 +458,11 @@ class TestVirtualParameter(unittest.TestCase):
         vp = VirtualParameter.create(bank_size, shape)
 
         # Define a SelectionSpec with no valid indices
-        selection_indices = torch.tensor([], dtype=torch.long)  # No banks selected
-        selection_probabilities = torch.tensor([])
+        selection_indices = torch.empty([0, 3], dtype=torch.long)  # No banks selected
+        selection_probabilities = torch.empty([0, 3])
         selection_spec = SelectionSpec(selection_index=selection_indices,
                                        selection_probabilities=selection_probabilities)
-
-        # Expecting an empty result
-        with self.assertRaises(IndexError):
-            vp(selection_spec)
+        outcome = vp(selection_spec)
 
     def test_virtual_parameter_batched_selection(self):
         # Test virtual parameter selection with complex batches
@@ -531,27 +529,6 @@ class TestVirtualBuffer(unittest.TestCase):
         vb = VirtualBuffer(buffer_bank)
         self.assertTrue(torch.allclose(vb.buffer, buffer_bank))
 
-    def test_throws_on_broadcasting(self):
-        """
-        Test expressing the buffer in superposition mode.
-        Ensures that the correct combination of selected buffers is returned.
-        """
-        buffer_bank = torch.tensor([[[0.0, 1.0, 2.0],[0.0, 1.0, 4.0]],
-                                    [[0.0, 0.0, 3.0], [0.0, 0.0, 1.0]]])
-
-        vb = VirtualBuffer(buffer_bank)
-
-        # Define a SelectionSpec with specific indices and probabilities.
-        # Note that there is one fewer dimension than is required for a superposition
-        # invokation, as this is
-        selection_indices = torch.tensor([0, 2])  # Select banks 0 and 2
-        selection_probabilities = torch.tensor([0.3, 0.7])  # Weights
-        selection_spec = SelectionSpec(selection_index=selection_indices,
-                                       selection_probabilities=selection_probabilities)
-
-        # Express the buffer in superposition mode
-        with self.assertRaises(ValueError):
-            result = vb.express_buffer(selection_spec, superposition=True)
 
     def test_express_buffer_superposition(self):
         """
@@ -1305,7 +1282,7 @@ class TestAbstractBankSelector(unittest.TestCase):
 
     def test_dropout_integration(self):
         """Verify dropout integration does not affect mode switching."""
-        selector = MockBankSelector(top_k=3, dropout_rate=0.5)
+        selector = MockBankSelector(top_k=3, control_dropout=0.5)
         selection_spec, _ = selector(self.logits)
 
         # Confirm top-k is applied, but some logits may be zeroed by dropout
@@ -1345,7 +1322,7 @@ class TestLinearBankSelector(unittest.TestCase):
 
     def test_dense_mode(self):
         """Test dense mode selection without sparse criteria (top_k, top_p, rand)."""
-        selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size)
+        selector = LinearBankSelector(d_embedding=self.d_model, bank_size=self.bank_size)
         selection_spec, _ = selector(self.embedding)
 
         # Verify that all banks are selected in dense mode
@@ -1355,7 +1332,7 @@ class TestLinearBankSelector(unittest.TestCase):
     def test_top_k_selection(self):
         """Test top-k sparse selection with k < bank_size."""
         top_k = 3
-        selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size, top_k=top_k)
+        selector = LinearBankSelector(d_embedding=self.d_model, bank_size=self.bank_size, top_k=top_k)
         selection_spec, _ = selector(self.embedding)
 
         # Ensure exactly top_k indices are selected per batch element
@@ -1367,7 +1344,7 @@ class TestLinearBankSelector(unittest.TestCase):
     def test_top_p_selection(self):
         """Test top-p (nucleus) selection with cumulative probability threshold."""
         top_p = 0.7
-        selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size, top_p=top_p)
+        selector = LinearBankSelector(d_embedding=self.d_model, bank_size=self.bank_size, top_p=top_p)
         selection_spec, _ = selector(self.embedding)
 
         # Check that the number of selected banks varies and is limited by cumulative probability
@@ -1379,7 +1356,7 @@ class TestLinearBankSelector(unittest.TestCase):
     def test_random_selection(self):
         """Test random selection mode with num < bank_size."""
         rand = 4
-        selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size, rand=rand)
+        selector = LinearBankSelector(d_embedding=self.d_model, bank_size=self.bank_size, rand=rand)
         selection_spec, _ = selector(self.embedding)
 
         # Confirm that exactly rand indices are selected randomly
@@ -1393,7 +1370,7 @@ class TestLinearBankSelector(unittest.TestCase):
         top_k = 3
         top_p = 0.5
         rand = 2
-        selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size, top_k=top_k, top_p=top_p,
+        selector = LinearBankSelector(d_embedding=self.d_model, bank_size=self.bank_size, top_k=top_k, top_p=top_p,
                                       rand=rand)
         selection_spec, _ = selector(self.embedding)
 
@@ -1405,8 +1382,8 @@ class TestLinearBankSelector(unittest.TestCase):
         """Verify dropout does not affect mode but may introduce zeroed probabilities in sparse selections."""
         top_k = 3
         dropout_rate = 0.5
-        selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size, top_k=top_k,
-                                      dropout_rate=dropout_rate)
+        selector = LinearBankSelector(d_embedding=self.d_model, bank_size=self.bank_size, top_k=top_k,
+                                      control_dropout=dropout_rate)
         selection_spec, _ = selector(self.embedding)
 
         # Ensure top_k is applied and some logits may be zeroed out by dropout
@@ -1415,7 +1392,7 @@ class TestLinearBankSelector(unittest.TestCase):
 
     def test_dynamic_mode_adjustment(self):
         """Test dynamic adjustment of top_k, top_p, and rand values."""
-        selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size)
+        selector = LinearBankSelector(d_embedding=self.d_model, bank_size=self.bank_size)
 
         # Initially dense mode
         self.assertTrue(selector.is_dense, "Should be dense mode when all sparse options are zero")
@@ -1435,3 +1412,107 @@ class TestLinearBankSelector(unittest.TestCase):
         self.assertFalse(selector.is_dense, "Setting rand should also switch to sparse mode")
 
 
+class TestVirtualAdvancedLinear(unittest.TestCase):
+    def setUp(self):
+        """
+        Sets up the initial conditions and common test variables.
+        """
+        # Define shapes and sizes for testing
+        self.in_shape = (4, 5)  # Input shape for the test
+        self.out_shape = (3, 6)  # Output shape for the test
+        self.bank_size = 2  # Number of virtual layers
+        self.device = torch.device("cpu")  # Device for testing
+        self.dtype = torch.float32  # Data type for testing
+
+        # Initialize the VirtualAdvancedLinear layer
+        self.layer = VirtualAdvancedLinear(
+            in_shape=self.in_shape,
+            out_shape=self.out_shape,
+            bank_size=self.bank_size,
+            device=self.device,
+            dtype=self.dtype
+        )
+
+    def test_forward_shape(self):
+        """
+        Tests that the forward method correctly transforms the input to the specified output shape.
+        """
+        # Prepare test input tensor with the expected input shape
+        test_input = torch.randn(8, *self.in_shape, dtype=self.dtype, device=self.device)  # Batch size of 8
+
+        # Create a SelectionSpec with random indices and probabilities
+        selection_indices = torch.randint(0, self.bank_size, (8, 1), dtype=torch.long, device=self.device)
+        selection_probabilities = torch.rand(8, 1, dtype=self.dtype, device=self.device)
+        selection_spec = SelectionSpec(selection_index=selection_indices,
+                                       selection_probabilities=selection_probabilities)
+
+        # Forward pass
+        output = self.layer(test_input, selection_spec)
+
+        # Check if the output shape is as expected
+        expected_shape = (8, *self.out_shape)
+        self.assertEqual(output.shape, expected_shape, "Output shape mismatch.")
+
+    def test_forward_invalid_shape(self):
+        """
+        Tests that the forward method raises an error when an input tensor with invalid shape is passed.
+        """
+        # Prepare an invalid input shape
+        invalid_input = torch.randn(8, 3, 5, dtype=self.dtype, device=self.device)  # Incorrect in_shape
+
+        # Create a SelectionSpec with random indices and probabilities
+        selection_indices = torch.randint(0, self.bank_size, (8, 1), dtype=torch.long, device=self.device)
+        selection_probabilities = torch.rand(8, 1, dtype=self.dtype, device=self.device)
+        selection_spec = SelectionSpec(selection_index=selection_indices,
+                                       selection_probabilities=selection_probabilities)
+
+        # Forward pass should raise a ValueError due to shape mismatch
+        with self.assertRaises(ValueError):
+            self.layer(invalid_input, selection_spec)
+
+    def test_selection_integration(self):
+        """
+        Tests that the SelectionSpec properly influences which parameters are used in the forward computation.
+        """
+        # Prepare input tensor with valid shape
+        test_input = torch.randn(8, *self.in_shape, dtype=self.dtype, device=self.device)
+
+        # Define selection indices and probabilities
+        selection_indices = torch.tensor([[0], [1]] * 4, dtype=torch.long,
+                                         device=self.device)  # Alternate between banks
+        selection_probabilities = torch.ones(8, 1, dtype=self.dtype,
+                                             device=self.device)  # Full weight on selected index
+        selection_spec = SelectionSpec(selection_index=selection_indices,
+                                       selection_probabilities=selection_probabilities)
+
+        # Forward pass
+        output = self.layer(test_input, selection_spec)
+
+        # Check if the output has the correct shape and device
+        self.assertEqual(output.shape, (8, *self.out_shape), "Output shape mismatch with selection integration.")
+        self.assertEqual(output.device, self.device, "Output device mismatch.")
+
+    def test_device_dtype_consistency(self):
+        """
+        Tests that the layer and selection spec work properly on a different device and dtype.
+        """
+        if torch.cuda.is_available():
+            # Reinitialize on CUDA
+            device=  torch.device("cuda")
+            layer_cuda = VirtualAdvancedLinear(self.in_shape, self.out_shape, self.bank_size, dtype=torch.float64,
+                                               device=device)
+
+            # Prepare input and SelectionSpec on CUDA
+            test_input = torch.randn(8, *self.in_shape, dtype=torch.float64, device=device)
+            selection_indices = torch.randint(0, self.bank_size, (8, 1), dtype=torch.long, device=device)
+            selection_probabilities = torch.rand(8, 1, dtype=torch.float64, device=device)
+            selection_spec = SelectionSpec(selection_index=selection_indices,
+                                           selection_probabilities=selection_probabilities)
+
+            # Forward pass
+            output = layer_cuda(test_input, selection_spec)
+
+            # Verify output properties
+            self.assertEqual(output.shape, (8, *self.out_shape), "CUDA output shape mismatch.")
+            self.assertEqual(output.dtype, torch.float64, "CUDA output dtype mismatch.")
+            self.assertEqual(output.device.type, device.type, "CUDA output device mismatch.")

@@ -1,16 +1,51 @@
-from typing import Optional, Tuple, List, Callable
+from typing import Optional, Tuple, List, Callable, Any
 
 import torch
 from dataclasses import dataclass
 from torch import nn
+from torch.nn import functional as F
 
-from src.main.model.transformer_primitives import DeepMemoryUnit, deep_memory_registry
+from src.main.model.base import TensorTree
+from src.main.model.deep_memories.abstract import DeepMemoryUnit, deep_memory_registry, AbstractMemoryState
 from src.main.model.virtual_layers import (DropoutLogits, VirtualLinear,
                                            VirtualMakeHeads, VirtualMergeHeads,
 
                                            SelectionSpec)
 
-state_tuple = Tuple[torch.Tensor, torch.Tensor]
+
+# Define the memory state
+
+class MemoryState(AbstractMemoryState):
+    """
+    The memory state. Contains within it
+    the linear kernel attention matrix
+    and normalizer
+
+    matrix: (...batch_shape, d_key, d_value)
+    normalizer: (...batch_shape, d_key)
+    """
+    def __init__(self,
+                 matrix: torch.Tensor,
+                 normalizer: torch.Tensor,
+                 ):
+        self.matrix = matrix
+        self.normalizer = normalizer
+
+    # Save and load contracts
+    def save_state(self) -> Tuple[TensorTree, Optional[Any]]:
+        return (self.matrix, self.normalizer), None
+    @classmethod
+    def load_state(cls, pytree: TensorTree, bypass: Any) -> 'MemoryState':
+        return cls(*pytree)
+
+    # Update and get contracts
+    def update_(self, matrix: torch.Tensor, normalizer: torch.Tensor):
+        self.matrix = matrix
+        self.normalizer = normalizer
+
+    def get(self) ->Tuple[torch.Tensor, torch.Tensor]:
+        return self.matrix, self.normalizer
+
 
 
 ##
@@ -32,15 +67,15 @@ class CreateState(nn.Module):
         self.d_value = d_value
         self.num_memories = num_memories
 
-    def forward(self, shape: torch.Size) -> state_tuple:
+    def forward(self, batch_shape: torch.Size) -> MemoryState:
         """
         Sets up the state.
-        :param shape:
-        :return:
+        :param batch_shape: The batch shape that is corrolated with the memories
+        :return: The setup memory state.
         """
-        matrix = torch.zeros([*shape, self.num_memories, self.d_key, self.d_value])
-        normalizer = torch.zeros([*shape, self.num_memories, self.d_key])
-        return matrix, normalizer
+        matrix = torch.zeros([*batch_shape, self.num_memories, self.d_key, self.d_value])
+        normalizer = torch.zeros([*batch_shape, self.num_memories, self.d_key])
+        return MemoryState(matrix, normalizer)
 
 
 # Define the straightforward
@@ -90,7 +125,7 @@ class ReadState(nn.Module):
 
     def forward(self,
                 tensor: torch.Tensor,
-                state: state_tuple,
+                state: MemoryState,
                 selection: SelectionSpec
                 ) -> torch.Tensor:
         """
@@ -104,8 +139,9 @@ class ReadState(nn.Module):
             - results: The result of reading from memory, using linear kernels.
         """
         # Unpack state
-        matrix = state[0]  # (..., num_memories, d_key, d_value)
-        normalizer = state[1]  # (..., num_memories, d_key)
+        matrix, normalizer = state.get()
+        # matrix: (..., num_memories, d_key, d_value)
+        # normalizer: (..., num_memories, d_key)
 
         # Create queries
         queries = self.query_creator(tensor, selection)  # (..., num_memories, d_key)
@@ -260,9 +296,9 @@ class WriteState(nn.Module):
 
     def forward(self,
                 tensor: torch.Tensor,
-                state: state_tuple,
+                state: MemoryState,
                 selection: SelectionSpec
-                ) -> state_tuple:
+                ):
         """
         Performs the update process for the linear attention mechanism,
         consisting of creating the updates then passing them through
@@ -273,8 +309,6 @@ class WriteState(nn.Module):
             - matrix: (..., num_memories, d_key, d_value)
             - normalizer: (..., num_memories, d_key)
         :param selection: The virtual layer selection.
-        :return:
-            - The new state
         """
 
         # Create headed features, and activate them by running it through
@@ -314,8 +348,7 @@ class WriteState(nn.Module):
         # down the updates by the strength of the decay probabilities, which lets it act
         # as a running average over the writes.
 
-        matrix = state[0]
-        normalizer = state[1]
+        matrix, normalizer = state.get()
 
         matrix_update = headed_keys.unsqueeze(-1) * headed_values.unsqueeze(-2)  #(..., memories, d_key, d_value)
         normalizer_update = headed_keys  # (..., memories, d_key)
@@ -332,12 +365,12 @@ class WriteState(nn.Module):
         normalizer = normalizer * (1 - normalizer_write_probabilities * normalizer_erase_probabilities) + \
                      normalizer_update * normalizer_write_probabilities
 
-        # Return the new spec
-        return matrix, normalizer
+        # Store the new spec
+        state.update_(matrix, normalizer)
 
 
 @deep_memory_registry.register("LinearKernelMemoryBank")
-class LinearKernelMemoryBank(DeepMemoryUnit[state_tuple]):
+class LinearKernelMemoryBank(DeepMemoryUnit):
     """
     The linear kernel memory bank is designed to provide
     extremely long term memory building capability and
@@ -385,52 +418,57 @@ class LinearKernelMemoryBank(DeepMemoryUnit[state_tuple]):
 
     def __init__(self,
                  d_model: int,
-                 d_key: int,
-                 d_value: int,
+                 mem_d_value: int,
                  num_memories: int,
                  bank_size: int,
-                 dropout: Optional[float] = None,
+                 submodule_dropout: Optional[float] = None,
                  kernel_activation: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
                  ):
         """
         :param d_model: The size of the incoming tensors to build and access memories from
-        :param d_key: The size of the internel key dimension. Usually less than d_model
-        :param d_value: The size of the internal value dimension. Larger here will mean more memory slots
+        :param mem_d_value: The size of the internal value dimension. Larger here will mean more memory slots
         :param num_memories: The number of memories to store. Heads.
         :param bank_size: The size of the virtual layer bank
-        :param dropout: The dropout strength
+        :param submodule_dropout: The dropout strength
         :param kernel_activation: The activation kernel. Defaults to relu
         """
         super().__init__(bank_size)
 
         if kernel_activation is None:
-            kernel_activation = torch.relu
-        if dropout is None:
-            dropout = 0.0
+            kernel_activation = F.elu
+        if submodule_dropout is None:
+            submodule_dropout = 0.0
 
-        self.create_state = CreateState(d_key, d_value, num_memories)
-        self.read_state = ReadState(d_model, d_key, d_value, num_memories,
-                                    bank_size, dropout, kernel_activation)
-        self.write_state = WriteState(d_model, d_key, d_value, num_memories,
-                                      bank_size, dropout, kernel_activation)
+        self.state_creator = CreateState(d_model, mem_d_value, num_memories)
+        self.read_state = ReadState(d_model, d_model, mem_d_value, num_memories,
+                                    bank_size, submodule_dropout, kernel_activation)
+        self.write_state = WriteState(d_model, d_model, mem_d_value, num_memories,
+                                      bank_size, submodule_dropout, kernel_activation)
+
+    def create_state(self,
+                     batch_shape: torch.Size
+                     ) -> MemoryState:
+        """
+        Creates the default memory state
+        :param batch_shape: The batch shape to build it around
+        :return: The memory state container.
+        """
+        return self.state_creator(batch_shape)
 
     def forward(self,
                 tensor: torch.Tensor,
                 selection: SelectionSpec,
-                state: Optional[state_tuple] = None
-                ) -> Tuple[torch.Tensor, state_tuple]:
+                state: MemoryState
+                ) -> torch.Tensor:
         """
         Runs the linear kernel memory attention process
         :param tensor: The tensor to access and update with. Shape (..., d_model)
         :param selection: The virtual layer selection
-        :param state: The state, if it exists
+        :param state: The setup memory state. Need one? Use create state
         :return:
             - The response. (..., d_model)
             - The new memory state.
         """
-        if state is None:
-            state = self.create_state(tensor.shape[:-1])
-
-        state = self.write_state(tensor, state, selection)
+        self.write_state(tensor, state, selection)
         response = self.read_state(tensor, state, selection)
-        return response, state
+        return response

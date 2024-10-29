@@ -165,7 +165,7 @@ class AbstractBankSelector(nn.Module, ABC):
     :param top_k: The number of top logits to select (optional, defaults to 0).
     :param top_p: The cumulative probability threshold for top-p selection (optional, defaults to 0.0).
     :param rand: The number of random logits to select (optional, defaults to 0).
-    :param dropout_rate: Dropout rate to apply to the logits during selection (optional, defaults to 0.0).
+    :param control_dropout: Dropout rate to apply to the logits during selection (optional, defaults to 0.0).
     """
 
     #TODO: Add bank selector metrics and, optionally, bank balancing.
@@ -258,7 +258,7 @@ class AbstractBankSelector(nn.Module, ABC):
                  top_k: Optional[int] = None,
                  top_p: Optional[float] = None,
                  rand: Optional[int] = None,
-                 dropout_rate: Optional[float] = None
+                 control_dropout: Optional[float] = None
                  ):
         """
         The abstract bank selection process cna be defined here
@@ -271,7 +271,7 @@ class AbstractBankSelector(nn.Module, ABC):
         :param top_k: The top k logits are included.
         :param top_p: Nucleus sampling is done to get the top p logits
         :param rand: This many logits are randomly selected
-        :param dropout_rate: The dropout rate to apply to the logits
+        :param control_dropout: The dropout rate to apply to the logits
         """
         super().__init__()
 
@@ -282,14 +282,14 @@ class AbstractBankSelector(nn.Module, ABC):
             top_p = 0.0
         if rand is None:
             rand = 0
-        if dropout_rate is None:
-            dropout_rate = 0.0
+        if control_dropout is None:
+            control_dropout = 0.0
 
         # Setup
         self.top_k = top_k
         self.top_p = top_p
         self.rand = rand
-        self.dropout = DropoutLogits(dropout_rate)
+        self.dropout = DropoutLogits(control_dropout)
 
     @abstractmethod
     def forward(self, *args: Any, **kwargs: Any) -> Tuple[SelectionSpec, Any]:
@@ -331,26 +331,26 @@ class LinearBankSelector(AbstractBankSelector):
     """
 
     def __init__(self,
-                 d_model: int,
+                 d_embedding: int,
                  bank_size: int,
                  top_k: Optional[int] = None,
                  top_p: Optional[float] = None,
                  rand: Optional[int] = None,
-                 dropout_rate: Optional[float] = None
+                 control_dropout: Optional[float] = None
                  ):
         """
         Initializes the `LinearBankSelector` with the given embedding size, bank size,
         and selection configuration.
 
-        :param d_model: The size of the embeddings that will be provided.
+        :param d_embedding: The size of the embeddings that will be provided.
         :param bank_size: The size of the bank selection to create.
         :param top_k: The number of top logits selected (optional, defaults to 0).
         :param top_p: The probability mass to select by (optional, defaults to 0.0).
         :param rand: The number of random logits to include (optional, defaults to 0).
-        :param dropout_rate: Logit dropout rate (optional, defaults to 0.0).
+        :param control_dropout: Logit dropout rate (optional, defaults to 0.0).
         """
-        super().__init__(top_k, top_p, rand, dropout_rate)
-        self.projector = nn.Linear(d_model, bank_size)
+        super().__init__(top_k, top_p, rand, control_dropout)
+        self.projector = nn.Linear(d_embedding, bank_size)
 
     def forward(self, embedding: torch.Tensor) -> Tuple[SelectionSpec, None]:
         """
@@ -397,26 +397,26 @@ class PseudoMarkovBankSelector(AbstractBankSelector):
     """
 
     def __init__(self,
-                 d_model: int,
+                 d_embedding: int,
                  bank_size: int,
                  top_k: Optional[int] = None,
                  top_p: Optional[float] = None,
                  rand: Optional[int] = None,
-                 dropout_rate: Optional[float] = None
+                 control_dropout: Optional[float] = None
                  ):
         """
         Initializes the layer with the given embedding size, bank size,
         and selection configuration.
 
-        :param d_model: The size of the embeddings that will be provided.
+        :param d_embedding: The size of the embeddings that will be provided.
         :param bank_size: The size of the bank selection to create.
         :param top_k: The number of top logits selected (optional, defaults to 0).
         :param top_p: The probability mass to select by (optional, defaults to 0.0).
         :param rand: The number of random logits to include (optional, defaults to 0).
-        :param dropout_rate: Logit dropout rate (optional, defaults to 0.0).
+        :param control_dropout: Logit dropout rate (optional, defaults to 0.0).
         """
-        super().__init__(top_k, top_p, rand, dropout_rate)
-        self.d_model = d_model
+        super().__init__(top_k, top_p, rand, control_dropout)
+        self.d_model = d_embedding
         self.bank_size = bank_size
 
         # This bears a little explanation. It turns out
@@ -426,7 +426,7 @@ class PseudoMarkovBankSelector(AbstractBankSelector):
         # can just use a linear projection for that.
         #
         # The embedding projector just works like normal, though.
-        self.projector = nn.Linear(d_model, bank_size)
+        self.projector = nn.Linear(d_embedding, bank_size)
         self.markov_biases = nn.Linear(bank_size, bank_size)
 
     def forward(self,

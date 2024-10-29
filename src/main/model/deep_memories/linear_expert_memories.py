@@ -6,7 +6,7 @@ and efficient access by means of banked memory collections.
 
 import torch
 from torch import nn
-from src.main.model.transformer_primitives import DeepMemoryUnit
+from src.main.model.deep_memories.abstract import DeepMemoryUnit
 from src.main.model.virtual_layers import (SelectionSpec, DropoutLogits, VirtualLinear,
                                            virtual_state_select, virtual_state_scatter)
 from typing import Optional, Tuple

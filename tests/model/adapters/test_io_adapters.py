@@ -61,7 +61,7 @@ class TestIORegistry(unittest.TestCase):
         self.registry.register("mock_adapter", config_spec, MockAdapter)
 
         # Check that the adapter can be set up correctly
-        adapter_instance = self.registry.setup("mock_adapter", {"embedding_dim": 128, "vocabulary_size": 10000})
+        adapter_instance = self.registry.create_state("mock_adapter", {"embedding_dim": 128, "vocabulary_size": 10000})
         self.assertIsInstance(adapter_instance, MockAdapter)
         self.assertEqual(adapter_instance.embedding_dim, 128)
         self.assertEqual(adapter_instance.vocabulary_size, 10000)
@@ -78,7 +78,7 @@ class TestIORegistry(unittest.TestCase):
         decorator(MockAdapter)
 
         # Check that the adapter was registered and can be set up
-        adapter_instance = self.registry.setup("decorator_test_adapter", {"embedding_dim": 64, "vocabulary_size": 5000})
+        adapter_instance = self.registry.create_state("decorator_test_adapter", {"embedding_dim": 64, "vocabulary_size": 5000})
         self.assertIsInstance(adapter_instance, MockAdapter)
         self.assertEqual(adapter_instance.embedding_dim, 64)
         self.assertEqual(adapter_instance.vocabulary_size, 5000)
@@ -92,7 +92,7 @@ class TestIORegistry(unittest.TestCase):
 
         # Missing 'vocabulary_size' in config should raise ValueError
         with self.assertRaises(TypeError) as context:
-            self.registry.setup("mock_adapter", {"embedding_dim": 128})
+            self.registry.create_state("mock_adapter", {"embedding_dim": 128})
 
     def test_setup_with_wrong_type(self):
         config_spec = {"embedding_dim": int, "vocabulary_size": int}
@@ -100,7 +100,7 @@ class TestIORegistry(unittest.TestCase):
 
         # Incorrect type for 'embedding_dim' should raise ValueError
         with self.assertRaises(TypeError) as context:
-            self.registry.setup("mock_adapter", {"embedding_dim": "128", "vocabulary_size": 10000})
+            self.registry.create_state("mock_adapter", {"embedding_dim": "128", "vocabulary_size": 10000})
 
     def test_get_structure(self):
         config_spec = {"embedding_dim": int, "vocabulary_size": int}
@@ -138,7 +138,7 @@ class TestVocabularyIOAdapter(unittest.TestCase):
         # Set up for each test
         self.embedding_dim = 128
         self.vocabulary_size = 10000
-        self.adapter_instance = VocabularyIOAdapter.setup(self.embedding_dim, self.vocabulary_size)
+        self.adapter_instance = VocabularyIOAdapter.create_state(self.embedding_dim, self.vocabulary_size)
 
     def test_embed_input_with_weights_3d_tensor(self):
         # Test the embed_input function with a 3D tensor and weights
@@ -163,7 +163,7 @@ class TestVocabularyIOAdapter(unittest.TestCase):
         vocabulary_size = 10000
 
         # Set up the adapter
-        adapter_instance = VocabularyIOAdapter.setup(embedding_dim, vocabulary_size)
+        adapter_instance = VocabularyIOAdapter.create_state(embedding_dim, vocabulary_size)
 
         # Create two separate sample cases with a batch dimension of 1
         sample_1 = torch.randint(0, vocabulary_size, (1, 10, 10))
@@ -191,7 +191,7 @@ class TestVocabularyIOAdapter(unittest.TestCase):
         vocabulary_size = 10000
 
         # Set up the adapter
-        adapter_instance = VocabularyIOAdapter.setup(embedding_dim, vocabulary_size)
+        adapter_instance = VocabularyIOAdapter.create_state(embedding_dim, vocabulary_size)
 
         # Create two separate sample cases with a batch dimension of 1 (with weights)
         sample_1 = torch.randint(0, vocabulary_size, (1, 10, 10))
@@ -226,7 +226,7 @@ class TestVocabularyIOAdapter(unittest.TestCase):
         embedding_dim = 128
         vocabulary_size = 10000
 
-        adapter_instance = VocabularyIOAdapter.setup(embedding_dim, vocabulary_size)
+        adapter_instance = VocabularyIOAdapter.create_state(embedding_dim, vocabulary_size)
 
         # Create a mock embeddings tensor
         embeddings = torch.randn(2, 10, embedding_dim)
@@ -243,7 +243,7 @@ class TestVocabularyIOAdapter(unittest.TestCase):
         embedding_dim = 128
         vocabulary_size = 10000
         config = {"embedding_dim": embedding_dim, "vocabulary_size": vocabulary_size}
-        adapter_instance = registry.setup("vocabulary_adapter", config)
+        adapter_instance = registry.create_state("vocabulary_adapter", config)
 
         # Ensure the adapter is properly initialized and works as expected
         self.assertIsInstance(adapter_instance, VocabularyIOAdapter)
@@ -268,7 +268,7 @@ class TestRMSImageIOAdapter(unittest.TestCase):
 
     def test_setup(self):
         # Test the setup function
-        adapter_instance = RMSImageIOAdapter.setup(
+        adapter_instance = RMSImageIOAdapter.create_state(
             input_channels=self.input_channels,
             embedding_dim=self.embedding_dim,
             normalize=self.normalize,
@@ -288,7 +288,7 @@ class TestRMSImageIOAdapter(unittest.TestCase):
 
     def test_embed_input(self):
         # Test the embed_input function
-        adapter_instance = RMSImageIOAdapter.setup(
+        adapter_instance = RMSImageIOAdapter.create_state(
             input_channels=self.input_channels,
             embedding_dim=self.embedding_dim,
             normalize=self.normalize,
@@ -310,7 +310,7 @@ class TestRMSImageIOAdapter(unittest.TestCase):
 
     def test_create_distribution(self):
         # Test the create_distribution function
-        adapter_instance = RMSImageIOAdapter.setup(
+        adapter_instance = RMSImageIOAdapter.create_state(
             input_channels=self.input_channels,
             embedding_dim=self.embedding_dim,
             normalize=self.normalize,
@@ -339,7 +339,7 @@ class TestRMSImageIOAdapter(unittest.TestCase):
             "normalize": self.normalize,
             "max_image_value": self.max_image_value
         }
-        adapter_instance = registry.setup("rms_image_adapter", config)
+        adapter_instance = registry.create_state("rms_image_adapter", config)
 
         # Ensure the adapter is properly initialized and works as expected
         self.assertIsInstance(adapter_instance, RMSImageIOAdapter)
@@ -403,7 +403,7 @@ class TestControllerIOAdapter(unittest.TestCase):
 
         self.embedding_dim = 16
         self.logit_size = 12  # Logit size should be sufficient for the schemas
-        self.adapter_instance = ControllerIOAdapter.setup(
+        self.adapter_instance = ControllerIOAdapter.create_state(
             embedding_dim=self.embedding_dim,
             logit_size=self.logit_size,
             schemas=self.schemas
@@ -446,7 +446,7 @@ class TestControllerIOAdapter(unittest.TestCase):
         }
 
         with self.assertRaises(AssertionError):
-            ControllerIOAdapter.setup(
+            ControllerIOAdapter.create_state(
                 embedding_dim=self.embedding_dim,
                 logit_size=self.logit_size,
                 schemas=invalid_schemas
@@ -457,7 +457,7 @@ class TestControllerIOAdapter(unittest.TestCase):
         invalid_logit_size = 2  # Too small for the schema requirements
 
         with self.assertRaises(ValueError):
-            ControllerIOAdapter.setup(
+            ControllerIOAdapter.create_state(
                 embedding_dim=self.embedding_dim,
                 logit_size=invalid_logit_size,
                 schemas=self.schemas

@@ -466,7 +466,8 @@ class VirtualParameter(nn.Module):
                                               Defaults to `False`.
         :return: An instance of the `VirtualParameter` class.
         """
-        parameter = torch.zeros([*shape, bank_size], device=device,
+
+        parameter = torch.zeros(tuple([*shape, bank_size]), device=device,
                                 dtype=dtype)
         if init is not None:
             init(parameter)
@@ -496,6 +497,7 @@ class VirtualParameter(nn.Module):
 
     def forward(self,
                 bank_spec: SelectionSpec,
+                sum: bool = True
                 ) -> torch.Tensor:
         """
         Returns a superposition of parameters based on the provided
@@ -513,8 +515,11 @@ class VirtualParameter(nn.Module):
             - `selection_index`: The indices of the selected banks. (..., selected)
             - `selection_probabilities`: The probabilities for weighting
                                          the selected banks. (..., selected)
+        :param sum: A flag. Almost always should be true. If false, an extra
+           dimension will bereturned
         :return: A tensor containing the weighted combination of selected
-                 parameters. Shape: (..., *shape)
+                 parameters. Shape: (..., *shape).
+                 Appendum: However, if sum is false, will be (..., *shape, selected)
         """
 
         # Automatically convert the dtype of the selection spec if allowed
@@ -534,13 +539,16 @@ class VirtualParameter(nn.Module):
         parameter = parameter[bank_spec.selection_index]  # (..., *shape, bank_selected)
         parameter = parameter.movedim(-self.parameter.dim(), -1)
 
-        # Set up the probabilities to broadcast across the parameter tensor
-        probabilities = bank_spec.selection_probabilities  # (..., bank_selected)
-        for _ in self.shape:
-            probabilities = probabilities.unsqueeze(-2)
 
         # Perform the kernel superposition and return the result
-        parameter = torch.sum(parameter * probabilities, dim=-1)  # (..., *shape)
+        if sum:
+            # Set up the probabilities to broadcast across the parameter tensor
+            probabilities = bank_spec.selection_probabilities  # (..., bank_selected)
+            for _ in self.shape:
+                probabilities = probabilities.unsqueeze(-2)
+
+            parameter = torch.sum(parameter * probabilities, dim=-1)  # (..., *shape)
+
         return parameter
 
 

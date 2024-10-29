@@ -189,19 +189,22 @@ class SavableState(ABC):
     """
 
     @abstractmethod
-    def save_state(self) -> TensorTree:
+    def save_state(self) -> Tuple[TensorTree, Optional[Any]]:
         """
         Saves the state feature as a tensortree, making it
         accessable to many classes and features
-        :return: The tensortree containing the state
+        :return:
+            - The tensortree containing the state to be processed
+            - The bypass features.
         """
 
     @abstractmethod
-    def load_state(self, pytree: TensorTree) -> 'SavableState':
+    def load_state(self, pytree: TensorTree, bypass: Any) -> 'SavableState':
         """
         The reverse of the above. Loads the state from
         a given pytree.
         :param pytree: The pytree to load from
+        :param bypass: The bypass to load, if any
         :return: A setup instance.
         """
 
@@ -240,7 +243,9 @@ def parallel_pytree_map(func: Callable[..., Any], *pytrees: Any) -> Any:
     elif all(isinstance(pytree, SavableState) for pytree in pytrees):
         # Convert to pytrees, and update state
         template = pytrees[0]
-        return template.load_state(parallel_pytree_map(func, *(state.save_state() for state in pytrees)))
+        _, bypass = template.save_state()
+        updated_state = parallel_pytree_map(func, *(state.save_state()[0] for state in pytrees))
+        return template.load_state(updated_state, bypass)
     else:
         # These are leaves, apply the function to them
         return func(*pytrees)

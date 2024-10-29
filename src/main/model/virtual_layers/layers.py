@@ -1,5 +1,7 @@
-from typing import Optional
+import textwrap
+from typing import Optional, Tuple
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -57,7 +59,8 @@ class VirtualLinear(VirtualLayer):
                                                 device=device
                                                 )
 
-    def forward(self, tensor: torch.Tensor, selection: SelectionSpec) -> torch.Tensor:
+    def forward(self,
+                tensor: torch.Tensor, selection: SelectionSpec) -> torch.Tensor:
         """
         Commences the forward process for the virtual linear layer.
         :param tensor: The input tensor to process. Shape: (batch_size, in_features)
@@ -199,13 +202,15 @@ class VirtualFeedforward(VirtualLayer):
                  d_model: int,
                  d_hidden: int,
                  bank_size: int,
-                 dropout: float,
+                 submodule_dropout: float,
+                 device: torch.device = torch.device("cpu"),
+                 dtype: torch.dtype = torch.float32,
                  ):
         super().__init__(bank_size)
-        self.ff1 = VirtualLinear(d_model, d_hidden, bank_size)
-        self.ff2 = VirtualLinear(d_hidden, d_model, bank_size)
+        self.ff1 = VirtualLinear(d_model, d_hidden, bank_size, device=device, dtype=dtype)
+        self.ff2 = VirtualLinear(d_hidden, d_model, bank_size, device=device, dtype=dtype)
         self.activation = torch.relu
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(submodule_dropout)
     def forward(self,
                 tensor: torch.Tensor,
                 selection: SelectionSpec
@@ -220,4 +225,46 @@ class VirtualFeedforward(VirtualLayer):
         tensor = self.ff1(tensor, selection)
         tensor = self.dropout(self.activation(tensor))
         tensor = self.ff2(tensor, selection)
+        return tensor
+
+class VirtualAdvancedLinear(VirtualLayer):
+    """
+    A small helper around virtual linear.
+    It allows the declaration of arbitrary
+    shape as target input, and arbitrary
+    shape as output
+    """
+    def __init__(self,
+                 in_shape: Tuple[int, ...],
+                 out_shape: Tuple[int, ...],
+                 bank_size: int,
+                 dtype: torch.dtype = torch.float32,
+                 device: torch.device = torch.device("cpu"),
+                 ):
+        super().__init__(bank_size)
+
+        self.in_shape = torch.Size(in_shape)
+        self.out_shape = torch.Size(out_shape)
+
+        self.projector = VirtualLinear(self.in_shape.numel(), self.out_shape.numel(), bank_size,
+                                       dtype=dtype, device=device
+                                       )
+    def forward(self, tensor: torch.Tensor, selection: SelectionSpec)->torch.Tensor:
+        """
+        Run the linear process, and include flattening and reshaping
+        :param tensor: The tensor. Shape (..., *in_shape)
+        :param selection: The selection
+        :return: The output. Shape (..., *out_shape)
+        """
+        in_length = len(self.in_shape)
+        if tensor.shape[-in_length:] != self.in_shape:
+            msg = f"""
+            Tensor had ending shape of {tensor.shape[-in_length:]}.
+            However, constructor specified {self.in_shape}.
+            """
+            msg = textwrap.dedent(msg)
+            raise ValueError(msg)
+        tensor = tensor.flatten(-in_length, -1)
+        tensor = self.projector(tensor, selection)
+        tensor = tensor.unflatten(dim=-1, sizes=self.out_shape)
         return tensor

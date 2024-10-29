@@ -4,7 +4,7 @@ Implementation file for the large gated attention memory
 
 import torch
 from torch import nn
-from src.main.model.transformer_primitives import DeepMemoryUnit
+from src.main.model.deep_memories.abstract import DeepMemoryUnit
 from src.main.model.virtual_layers import SelectionSpec, VirtualLinear, VirtualState
 from typing import Optional, Tuple
 

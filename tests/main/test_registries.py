@@ -6,6 +6,7 @@ from src.main.model.registry import (is_type_hint, is_same_type_hint, is_sub_typ
                                      InterfaceRegistry)
 from abc import ABC, abstractmethod
 
+
 class TestHelperFunctions(unittest.TestCase):
     """
     Test some very important registry helper functions
@@ -55,6 +56,21 @@ class TestHelperFunctions(unittest.TestCase):
         self.assertTrue(is_sub_type_hint(Union[int, str], int))  # int is part of Union[int, str]
         self.assertTrue(is_sub_type_hint(Union[int, str], str))  # str is part of Union[int, str]
         self.assertFalse(is_sub_type_hint(Union[int, str], float))  # float is not part of Union[int, str]
+
+        # Test subclass behavior
+        class Test:
+            pass
+
+        class Subtest(Test):
+            pass
+
+        class Other:
+            pass
+
+        self.assertTrue(is_sub_type_hint(Test, Test))
+        self.assertTrue(is_sub_type_hint(Test, Subtest))
+        self.assertFalse(is_sub_type_hint(Test, Other))
+
 
         # Test Optional (which is Union[T, None])
         self.assertTrue(is_sub_type_hint(Optional[int], None))  # None is valid for Optional[int]

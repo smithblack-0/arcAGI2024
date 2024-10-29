@@ -2,7 +2,7 @@ import unittest
 import torch
 import numpy as np
 
-from src.main.helper_functions import sinusoidal_positional_encoding, eval_legendre, pope_positional_encoding, \
+from src.main.pos_encoding import sinusoidal_positional_encoding, eval_legendre, pope_positional_encoding, \
     PositionalEncodings
 
 

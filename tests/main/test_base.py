@@ -1,6 +1,7 @@
+import copy
 import unittest
 import torch
-from typing import Any
+from typing import Any, Tuple
 from src.main.model.base import SavableState, TensorTree, parallel_pytree_map
 
 
@@ -12,11 +13,11 @@ class MySavableState(SavableState):
     def __init__(self, tensor: torch.Tensor):
         self.tensor = tensor
 
-    def save_state(self) -> TensorTree:
+    def save_state(self) -> Tuple[TensorTree, None]:
         # Simply return the tensor itself as the state
-        return self.tensor
+        return self.tensor, None
 
-    def load_state(self, pytree: TensorTree) -> 'MySavableState':
+    def load_state(self, pytree: TensorTree, bypass: None) -> 'MySavableState':
         # Restore from the given pytree, which should be a tensor
         self.tensor = pytree
         return self
@@ -65,8 +66,8 @@ class TestParallelPytreeMapWithSavableState(unittest.TestCase):
         state1 = MySavableState(tensor1)
         state2 = MySavableState(tensor2)
 
-        nested_structure1 = {'a': [state1, torch.tensor([7.0, 8.0])], 'b': (torch.tensor([9.0]), state1)}
-        nested_structure2 = {'a': [state2, torch.tensor([1.0, 2.0])], 'b': (torch.tensor([3.0]), state2)}
+        nested_structure1 = {'a': [copy.deepcopy(state1), torch.tensor([7.0, 8.0])], 'b': (torch.tensor([9.0]), state1)}
+        nested_structure2 = {'a': [copy.deepcopy(state2), torch.tensor([1.0, 2.0])], 'b': (torch.tensor([3.0]), state2)}
 
         # Function to add two tensors
         def add_tensors(x, y):

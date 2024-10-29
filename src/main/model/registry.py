@@ -100,6 +100,7 @@ def is_sub_type_hint(origin_hint: Any,
     if is_same_type_hint(origin_hint, subhint):
         return True
 
+
     # They were not the same type hints. However, the origin could be made up of
     # a Union, which then matches somewhere when taken apart.
     if get_origin(origin_hint) is Union:
@@ -107,6 +108,7 @@ def is_sub_type_hint(origin_hint: Any,
             if is_sub_type_hint(item, subhint):
                 return True
         return False
+
 
 
     # It was not a union. But it COULD still be a generic, with unions inside of them.
@@ -121,8 +123,14 @@ def is_sub_type_hint(origin_hint: Any,
         # are of different types at this location
         return False
 
+
     if origin is None and origin_hint != subhint:
-        # These were concrete. They did not match. False
+        # These were concrete. They did not match. We still need
+        # to check if they are subclasses
+        if subhint is None:
+            return False
+        if issubclass(subhint, origin_hint):
+            return True
         return False
 
     args1 = get_args(origin_hint)
@@ -397,19 +405,6 @@ class AbstractClassSchemaEnforcer:
         constructor_signature = get_constructor_spec(cls_implementation)
         expected_signature = self.constructor_signature
 
-        for name, parameter in expected_signature.parameters.items():
-
-            if name not in constructor_signature.parameters:
-                raise TypeError(f"Implementation constructor missing parameter '{name}'")
-
-            type_hint = constructor_signature.parameters[name].annotation
-            if not is_sub_type_hint(parameter.annotation, type_hint):
-                msg = f"""
-                Types did not match for parameter '{name}' in constructor.
-                Abstract Interface: '{parameter.annotation}'
-                Implementation: '{type_hint}'
-                """
-                raise TypeError(textwrap.dedent(msg))
 
     def validate_method_specification(self, cls_implementation: Type[nn.Module], method_name: str):
         """
@@ -787,9 +782,6 @@ class InterfaceRegistry(Generic[RegisteredType]):
             if not isinstance(registry, InterfaceRegistry):
                 msg = f"Issue on registry indirection named '{name}'. The indirection value was not a TorchLayerRegistry."
                 raise TypeError(msg)
-            if name not in schema_enforcer.constructor_schema.parameters:
-                msg = f"Indirection registry of name '{name}' was not found among constructor arguments"
-                raise TypeError(msg)
 
 
         # Setup and otherwise store intake details
@@ -797,6 +789,7 @@ class InterfaceRegistry(Generic[RegisteredType]):
         self.interface_validation = AbstractClassSchemaEnforcer(abstract_layer)
         self.registry: Dict[str, ImplementationBuilder] = {}
         self.indirections = registry_indirections
+        self.name = registry_name
 
     def register_class(self,
                        name: str,
@@ -835,7 +828,7 @@ class InterfaceRegistry(Generic[RegisteredType]):
         args = getattr(type_hint, '__args__', ())
         return origin is Union and type(None) in args
 
-    def build(self, name: str = "Default", **params: Dict[str, Any]) -> RegisteredType:
+    def build(self, name: str = "Default", **params: Any) -> RegisteredType:
         """
         Instantiates a registered class using the provided parameters. If a parameter is missing
         and marked as optional, it will be set to `None`. If the parameter requires indirection
@@ -850,33 +843,49 @@ class InterfaceRegistry(Generic[RegisteredType]):
         :raises TypeError: If params have wrong type.
         """
         if name not in self.registry:
-            raise KeyError(f"Class '{name}' is not registered.")
+            msg = f"""
+            Class of name '{name}' is not registered, and thus cannot be 
+            built. Current options are:
+            
+            {self.registry.keys()}
+            """
+            msg = textwrap.dedent(msg)
+            raise KeyError(msg)
 
         implementation_builder = self.registry[name]
         required_params = implementation_builder.constructor_types
 
+        constructor_args = {}
+
         # Perform standardization. Handle any builder indirection or
         # optional cases.
-        constructor_args = {}
         for param_name, param_type in required_params.items():
 
             # If dealing with something marked as optional, it may be missing. That is
-            # okay
-            if param_name not in params:
+            # okay. It may also be an indirection marked as default. That is also okay.
+            if param_name not in params and param_name not in self.indirections:
                 if self.is_optional_type(param_type):
                     # Optional means none. We can insert that
                     constructor_args[param_name] = None
                 else:
                     # Not recoverable.
-                    raise ValueError(f"Missing required parameter '{param_name}' for class '{name}'.")
+                    msg = f"""
+                    Missing required parameter '{param_name}' for class '{name}' on
+                    registry named '{self.name}'
+                    """
+                    msg = textwrap.dedent(msg)
+                    raise ValueError(msg)
 
             # Sometimes, we might be dealing with builder indirection. When
             # it is detected, we can run the indirection.
             elif param_name in self.indirections:
                 subbuilder = self.indirections[param_name]
-                if not isinstance(params[param_name], subbuilder.layer_abstract_type):
+                lookup_object_maybe_is_instance = "Default" if param_name not in params else params[param_name]
+                if not isinstance(lookup_object_maybe_is_instance, subbuilder.layer_abstract_type):
+                    build_directive = lookup_object_maybe_is_instance
                     try:
-                        constructor_args[param_name] = subbuilder.build(params[param_name], **params)
+                        # It was not an instance. Try running
+                        constructor_args[param_name] = subbuilder.build(build_directive, **params)
                     except Exception as e:
                         raise RuntimeError(f"Error while building with indirection for {param_name}") from e
                 else:
