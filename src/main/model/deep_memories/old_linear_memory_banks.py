@@ -371,7 +371,7 @@ class WriteState(nn.Module):
         state.update_(matrix, normalizer)
 
 
-@deep_memory_registry.register("LinearKernelMemoryBank")
+@deep_memory_registry.register("LinearKernelMemoryBankOld")
 class LinearKernelMemoryBank(DeepMemoryUnit):
     """
     The linear kernel memory bank is designed to provide
@@ -420,7 +420,6 @@ class LinearKernelMemoryBank(DeepMemoryUnit):
 
     def __init__(self,
                  d_model: int,
-                 d_mem: int,
                  mem_d_value: int,
                  num_memories: int,
                  bank_size: int,

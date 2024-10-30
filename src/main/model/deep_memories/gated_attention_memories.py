@@ -119,14 +119,14 @@ class GatedAttentionMemories(DeepMemoryUnit):
     def forward(self,
                 tensor: torch.Tensor,
                 bank_selection: SelectionSpec,
-                state: Optional[torch.Tensor] = None,
+                memories: Optional[torch.Tensor] = None,
                 ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Process the input tensor through the memory mechanism. This includes reading from the memory
         and updating the memory with the new tensor.
 
         :param tensor: The input tensor to process. Shape: (..., d_model)
-        :param state: The current state of memory, or None to initialize a new memory.
+        :param memories: The current state of memory, or None to initialize a new memory.
                       Shape: (..., num_memories, d_model)
         :param bank_selection: The selected banks. Used for writing only. Invokes given virtual layer.
         :return:
@@ -134,11 +134,11 @@ class GatedAttentionMemories(DeepMemoryUnit):
             - The updated memory state. Shape: (..., num_memories, d_model)
         """
         # Standardization. If the state is none, set it up
-        if state is None:
-            state = self.memory_default + torch.zeros_like(tensor).unsqueeze(-2)
+        if memories is None:
+            memories = self.memory_default + torch.zeros_like(tensor).unsqueeze(-2)
 
         # Read, write
 
-        memory_read = self.read_from_memories(tensor, state)
-        state = self.write_new_memories(tensor, state, bank_selection)
-        return memory_read, state
+        memory_read = self.read_from_memories(tensor, memories)
+        memories = self.write_new_memories(tensor, memories, bank_selection)
+        return memory_read, memories

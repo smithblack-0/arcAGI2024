@@ -367,7 +367,7 @@ class LinearExpertMemories(DeepMemoryUnit):
     def forward(self,
                 tensor: torch.Tensor,
                 bank_selection: SelectionSpec,
-                state: Optional[Memory] = None
+                memories: Optional[Memory] = None
                 ) -> Tuple[torch.Tensor, Memory]:
         """
         Runs the linear expert memory mechanism, including
@@ -375,15 +375,15 @@ class LinearExpertMemories(DeepMemoryUnit):
 
         :param tensor: The tensor to process. Shape (..., d_model)
         :param bank_selection: The bank configuration. Shape is (..., banks)
-        :param state: The memory state. May be none
+        :param memories: The memory state. May be none
         :return:
             - The tensor response. Same shape
             - The new memory state
         """
 
         # Standardize shape
-        if state is None:
-            state = self.make_memories(tensor.shape[:-1], device=tensor.device, dtype=tensor.dtype)
+        if memories is None:
+            memories = self.make_memories(tensor.shape[:-1], device=tensor.device, dtype=tensor.dtype)
 
         # Create the projections
 
@@ -393,7 +393,7 @@ class LinearExpertMemories(DeepMemoryUnit):
 
         # Make the selection.
 
-        memory_selection = self.select_memories(queries, state.get_addresses())
+        memory_selection = self.select_memories(queries, memories.get_addresses())
 
         # Now perform attention.
         #
@@ -401,7 +401,7 @@ class LinearExpertMemories(DeepMemoryUnit):
         # easily find what the update was by taking the difference
         # between the original and new state
 
-        attention_state = state.get_state(memory_selection)
+        attention_state = memories.get_state(memory_selection)
         output, new_state = self.rla(queries, keys, values, attention_state)
         update_state = map(lambda x, y: x - y, new_state, attention_state)
 
@@ -410,8 +410,8 @@ class LinearExpertMemories(DeepMemoryUnit):
         # The
 
         matrix_update, normalizer_update = update_state
-        state.update_state(matrix_update, normalizer_update, memory_selection)
+        memories.update_state(matrix_update, normalizer_update, memory_selection)
 
         # We are done. Return
 
-        return output, state
+        return output, memories

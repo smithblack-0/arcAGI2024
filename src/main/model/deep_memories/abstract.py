@@ -42,20 +42,22 @@ class DeepMemoryUnit(VirtualLayer, ABC):
         Creates the state of the memory unit. Uses batch
         shape to do so.
         :param batch_shape: The shape of the batch
-        :return: The setup memory state.
+        :return:
+            - The setup memory state.
         """
     @abstractmethod
     def forward(self,
                 tensor: torch.Tensor,
                 selection: SelectionSpec,
-                state: AbstractMemoryState
+                memories: AbstractMemoryState,
                 ) -> torch.Tensor:
         """
         Implementation for the deep memory unit. Based on the tensor, and the
         memstate, produces a new tensor and a new memstate.
         :param tensor: The tensor to use to access and update the mem state. Shape (..., d_model)
         :param selection: The linear kernel selection spec.
-        :param state: The memory state.  Implementation dependent
+        :param memories: The memory state.  Implementation dependent
+
         :return:
         - The response tensor. Shape (..., d_model)
         - Memory is updated indirectly.

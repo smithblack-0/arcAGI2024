@@ -1,7 +1,7 @@
 import unittest
 import torch
-from src.main.model.deep_memories.linear_memory_banks import (LinearKernelMemoryBank,
-                                                              CreateState, ReadState, WriteState, MemoryState)
+from src.main.model.deep_memories.old_linear_memory_banks import (LinearKernelMemoryBank,
+                                                                  CreateState, ReadState, WriteState, MemoryState)
 from src.main.model.virtual_layers import SelectionSpec
 from src.main.model.deep_memories.abstract import deep_memory_registry
 class TestLinearKernelMemoryBank(unittest.TestCase):

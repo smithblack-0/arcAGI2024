@@ -150,15 +150,17 @@ class AbstractSupportStack(SavableState, ABC):
         """
 
     @abstractmethod
-    def pop(self) -> Dict[str, TensorTree]:
+    def pop(self, name: Optional[str] = None) ->  Union[Dict[str, TensorTree], TensorTree] :
         """
         Gets an expression of the stored stack, in terms of the
         various kwargs that were defined. Return something that
         is differentiable and lacking stack dimension.
-
+        :param name: If provided, only the indicated
+                     kwarg will be popped
         :return: The expressed version of the stack.
             - No stack dimension.
             - Exact shape depends on original pytree setup
+            - With name, may just be tensortree.
         """
 
     @abstractmethod

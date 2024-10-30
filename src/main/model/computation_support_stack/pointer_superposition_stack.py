@@ -1,4 +1,4 @@
-from typing import Any, Tuple, Optional, Dict
+from typing import Any, Tuple, Optional, Dict, Union
 
 import torch
 from torch import nn
@@ -167,11 +167,13 @@ class PointerSuperpositionStack(AbstractSupportStack):
         self.stack = parallel_pytree_map(erase_stack, self.stack, self.defaults)
         self.pointers = new_pointers
 
-    def pop(self) -> Dict[str, TensorTree]:
+    def pop(self, name: Optional[str] = None) -> Union[Dict[str, TensorTree], TensorTree] :
         """
         Get the current expression of the stack by weighting with probabilistic pointers.
-
+        :param name: If provided, only the indicated
+             kwarg will be popped
         :return: Storage consisting of the expressed stack contents.
+                 Will be either all the kwargs, or onlu the name indicated
         """
         def weighted_sum(stack_case: torch.Tensor) -> torch.Tensor:
             pointers = self.pointers
@@ -179,6 +181,8 @@ class PointerSuperpositionStack(AbstractSupportStack):
                 pointers = pointers.unsqueeze(-1)
             weighted_stack = stack_case * pointers
             return weighted_stack.sum(dim=0)
+        if name is not None:
+            return parallel_pytree_map(weighted_sum, self.stack[name])
         return parallel_pytree_map(weighted_sum, self.stack)
 
     def push(self, batch_mask: Optional[torch.Tensor], **states):

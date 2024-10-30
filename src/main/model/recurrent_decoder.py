@@ -182,23 +182,31 @@ class DeepRecurrentDecoderV1(RecurrentDecoderInterface):
             # the memory and stack states. Both are stored in the
             # bottlenecked state.
 
-            memory_state = self.deep_memory_unit.create_state(batch_shape)
+            memory_state, mem_access_state = self.deep_memory_unit.create_state(batch_shape)
             stack_state = self.stack_controller.create_state(batch_shape,
                                                              self.stack_depth,
-                                                             embedding=bottleneck_embedding)
+                                                             embedding=bottleneck_embedding,
+                                                             mem_access_state=mem_access_state)
 
             # Store
-            recurrent_state = {"memory_state": memory_state, "stack_state": stack_state}
+            recurrent_state = {"memory_state": memory_state,
+                               "stack_state": stack_state,
+                               }
 
         # Create act state, including the embedding accumulator
         # and the internal state accumulator.
         #
         # Also, create default selection state and bottleneck
         # state for the process to work with.
+
+
+
         act_state = self.act_controller.create_state(embedding.shape[:-1],
                                                      embedding=embedding,
                                                      recurrent_state=recurrent_state)
         selection_state = None  # This is temporary state that is implementation dependent.
+        mem_access_state = recurrent_state["stack_state"].pop("mem_access_state") # Get the state to resume with.
+
 
         # Run core process.
         #
@@ -210,28 +218,37 @@ class DeepRecurrentDecoderV1(RecurrentDecoderInterface):
             layer_selection, selection_state = self.virtual_layer_controller(embedding, selection_state)
             bottleneck_embedding = self.bottlneck_projector(embedding, selection_state)
 
-            # Get memory and stack state
+            # Get memory and stack state, then get results off
+            # of stack
             memory_state, stack_state = recurrent_state.values()
+
 
             # Run deep memory access and update.
             # Remember, memory state is updated by side effect!
-            mem_result = self.deep_memory_unit(bottleneck_embedding, layer_selection, recurrent_state)
+            mem_result, mem_access_state = self.deep_memory_unit(bottleneck_embedding,
+                                                                 layer_selection,
+                                                                 recurrent_state,
+                                                                 mem_access_state)
             bottleneck_embedding = self.memory_layernorm(bottleneck_embedding + self.dropout(mem_result))
 
-            # Run computation stack access and update.
-            # Remember that this updates stack_state by side effect!
-            stack_result = self.stack_controller(bottleneck_embedding,
-                                                 act_state.halted_batches,
-                                                 stack_state,
-                                                 embedding=bottleneck_embedding,
-                                                 )
-            bottleneck_embedding = self.stack_layernorm(bottleneck_embedding + self.dropout(stack_result))
 
             # Run feedforward access
             ff_result = self.feedforward(bottleneck_embedding, layer_selection)
             bottleneck_embedding = self.feedforward_layernorm(bottleneck_embedding + self.dropout(ff_result))
 
-            # Unbottlneck the embedding and integrate the results
+
+            # Run computation stack update.
+            # Remember that this updates stack_state by side effect!
+            stack_outputs = self.stack_controller(bottleneck_embedding,
+                                                 act_state.halted_batches,
+                                                 stack_state,
+                                                 embedding=bottleneck_embedding,
+                                                 mem_access_state=mem_access_state
+                                                 )
+            stack_embedding, mem_access_state = stack_outputs.values()
+            bottleneck_embedding = self.stack_layernorm(bottleneck_embedding + self.dropout(stack_embedding))
+
+            # Unbottleneck the embedding and integrate the results
 
             embedding_update = self.unbottleneck_projector(bottleneck_embedding, selection_state)
             embedding = self.main_layernorm(embedding + self.dropout(embedding_update))

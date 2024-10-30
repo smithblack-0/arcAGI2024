@@ -1,2 +1,2 @@
 from .abstract import DeepMemoryUnit, deep_memory_registry
-from . import linear_memory_banks
+from . import old_linear_memory_banks
