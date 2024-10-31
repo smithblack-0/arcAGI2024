@@ -2,7 +2,7 @@ import unittest
 import torch
 from src.old.finite_state_machines import (IntOperand, NotMatchingOperand,
                                            MatchingOperand, FSMOperator)
-from src.main.CBTensors.channel_bound_tensors import CBTensor, CBTensorSpec
+from src.old.CBTensors import CBTensor, CBTensorSpec
 from src.old.finite_state_machines import (IntStateTrigger, MatchingCasesTrigger,
                                            IntakeMachine)
 

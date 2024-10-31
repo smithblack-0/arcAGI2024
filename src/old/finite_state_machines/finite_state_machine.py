@@ -31,14 +31,13 @@ FSM Flow:
 
 import torch
 from torch import nn
-from torch.nn import Parameter
 
 from .finite_state_operators import (FSMOperator, MatchingOperand, NotMatchingOperand,
-                                     IntOperand, TriggerOperand, ActionOperand,
-                                     WriteData, CountUpWithRegroup)
-from src.main.CBTensors import CBTensor, CBTensorSpec
+                                     IntOperand, WriteData, CountUpWithRegroup)
+from src.old.CBTensors import CBTensor, CBTensorSpec
 from abc import ABC, abstractmethod
-from typing import List, Dict, Union, Tuple, Any, Optional
+from typing import List
+
 
 class IntakeMachine(nn.Module):
     """

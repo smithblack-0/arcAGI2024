@@ -1,5 +1,5 @@
 import math
-from typing import Optional, Tuple, List, Callable, Any
+from typing import Optional, Tuple, List, Callable, Any, Dict
 
 import torch
 from dataclasses import dataclass
@@ -36,29 +36,68 @@ class MemoryState(AbstractMemoryState):
         - Part of the linear attention process. See papers for details
         - Stores memories as heads, of shape (..., num_memories, d_address)
 
+    Metrics:
+
+    write_probability_mass:
+        - Total probability mass associated with the write actions
+        - Shape (..., num_memories, d_address)
+    erase_probability_mass: Total probability mass associated with the erase actions
+        - Total erasure and decay probability that has been executed
+        - Shape (..., num_memories, d_address
+
     """
     def __init__(self,
                  matrix: torch.Tensor,
                  normalizer: torch.Tensor,
+                 write_probability_mass: torch.Tensor,
+                 erase_probability_mass: torch.Tensor,
                  ):
         self.matrix = matrix
         self.normalizer = normalizer
-
+        self.write_probability_mass = write_probability_mass
+        self.erase_probability_mass = erase_probability_mass
+    def get_statistics(self)->Dict[str, torch.Tensor]:
+        """
+        Returns relevant memory access metrics
+        """
+        statistics = {}
+        statistics["write_probability_mass"] = self.write_probability_mass
+        statistics["erase_probability_mass"] = self.erase_probability_mass
+        return statistics
 
     # Save and load contracts
-    def save_state(self) -> Tuple[TensorTree, Optional[Any]]:
-        return (self.matrix, self.normalizer), None
+    def save_state(self) -> Tuple[TensorTree, None]:
+        """
+        Saves the state into a pytree
+        :return:
+        """
+        save_state = (
+            self.matrix,
+            self.normalizer,
+            self.write_probability_mass,
+            self.erase_probability_mass,
+        )
+
+        return save_state, None
     @classmethod
-    def load_state(cls, pytree: TensorTree, bypass: Any) -> 'MemoryState':
+    def load_state(cls, pytree: TensorTree, bypass: None) -> 'MemoryState':
+        """
+        Loads the class from the pytree
+        """
         return cls(*pytree)
 
     # Update and get contracts
     def update_(self,
                 matrix: torch.Tensor,
                 normalizer: torch.Tensor,
+                write_probabilities: torch.tensor,
+                erase_probabilities: torch.tensor,
                 ):
+
         self.matrix = matrix
         self.normalizer = normalizer
+        self.write_probability_mass = self.write_probability_mass + write_probabilities
+        self.erase_probability_mass = self.erase_probability_mass + erase_probabilities
 
     def get(self) ->Tuple[torch.Tensor, torch.Tensor]:
         return self.matrix, self.normalizer
@@ -100,8 +139,14 @@ class CreateState(nn.Module):
         normalizer = torch.zeros([*batch_shape, self.num_memories, self.d_address],
                              dtype=self.dtype, device=self.device)
 
+        # Setup the statistics containers
+        write_probability_mass = torch.zeros([*batch_shape, self.num_memories, self.d_address],
+                                             dtype=self.dtype, device=self.device)
+        erase_probability_mass = torch.zeros([*batch_shape, self.num_memories, self.d_address],
+                                             dtype=self.dtype, device=self.device)
 
-        return MemoryState(matrix, normalizer)
+
+        return MemoryState(matrix, normalizer, write_probability_mass, erase_probability_mass)
 
 class LinearAttention(nn.Module):
     """
@@ -132,7 +177,7 @@ class LinearAttention(nn.Module):
         """
         query = self.activation(query)
         numerator = torch.matmul(query, matrix)
-        denominator = torch.sum(normalizer.unsqueeze(-2)*query, dim=-2, keepdim=True)
+        denominator = torch.matmul(query, normalizer.unsqueeze(-1)) + 1e-9
         return numerator / denominator
 
     def make_kernel(self,
@@ -178,7 +223,6 @@ class LinearAttention(nn.Module):
 class ReadMemory(nn.Module):
     """
     Reads the memory using the provided query.
-
     Memory is encoded in terms of two levels.
     First, there is the num_memories feature.
     Second, there are the matrix and normalizer we
@@ -224,7 +268,7 @@ class ReadMemory(nn.Module):
 
         # Define access and read queries.
         self.access_query_projector = nn.Linear(d_model, d_address*num_read_heads, dtype=dtype, device=device)
-        self.read_query_projector = nn.Linear(d_memory, d_address*num_read_heads, dtype=dtype, device=device)
+        self.read_query_projector = nn.Linear(d_model, d_address*num_read_heads, dtype=dtype, device=device)
 
         # Define the head merging projector
         self.merge_head_projector = nn.Linear(d_memory*num_read_heads, d_model, dtype=dtype, device=device)
@@ -256,10 +300,10 @@ class ReadMemory(nn.Module):
         # access query will be: (..., num_heads, d_address)
         # read query will be: (..., num_heads, d_address)
 
-        access_query = self.make_access_query(query)
+        access_query = self.access_query_projector(query)
         access_query = access_query.unflatten(dim=-1, sizes=[self.num_read_heads, self.d_address])
 
-        read_query = self.make_read_query(query)
+        read_query = self.read_query_projector(query)
         read_query = read_query.unflatten(dim=-1, sizes=[self.num_read_heads, self.d_address])
 
         # Flatten the matrix, and set aside it's shape. This makes
@@ -276,9 +320,10 @@ class ReadMemory(nn.Module):
         # (..., num_heads, d_address, d_memory)
         matrix = matrix.unflatten(dim=-1, sizes=[self.d_address, self.d_memory])
 
-        # Run read against the kernel
+        # Run read against the kernel. We perform a linear attn process,
+        #
         # (..., num_heads, d_memory)
-        response = self.linear_attn.read_from_kernel(read_query, matrix, normalizer)
+        response = self.linear_attn.read_from_kernel(read_query.unsqueeze(-2), matrix, normalizer).squeeze(-2)
 
         # Merge the heads
         response = self.merge_head_projector(response.flatten(-2, -1))
@@ -365,13 +410,26 @@ class WriteMemory(nn.Module):
         - The erase probabilities. Shape (..., num_memories, d_address). This being zero tries to avoid erasing
         - The address interpolation rates. Shape (..., num_memories, d_address). Updates cannot happen faster than this,
                                    and this will force a certain amount of decay when writing.
-        - The memory interpolation rates. Shape (..., num_memories, d_address, d_memory)
         """
 
         # Create the write probability, and the erase probabilities
         write_probability = torch.sigmoid(self.write_logits(key)) # (..., num_memories, 1)
         erase_probability = torch.sigmoid(self.erase_logits(key)) # (..., num_memories, d_address)
         interpolation_factor = torch.sigmoid(self.interpolation_logits) # (num_memories, d_address)
+
+        # The write probability must sum up to something greater than or equal
+        # to one. If you are not committing at least one unit of probability among
+        # all memories, we normalize.
+        #
+        # This is designed to prevent dead gradients by ensuring each write has to end
+        # up somewhere.
+
+        cumulative_probability = write_probability.sum(dim=-2, keepdim=True) + 1e-6
+        needs_normalization = cumulative_probability < 1.0
+        write_probability = torch.where(needs_normalization,
+                                        write_probability/cumulative_probability,
+                                        write_probability)
+
 
         return write_probability, erase_probability, interpolation_factor
 
@@ -403,8 +461,8 @@ class WriteMemory(nn.Module):
         values = values.unflatten(dim=-1, sizes=[self.num_write_heads, self.d_memory]) # ( ..., num_heads, d_memory)
 
         # Transfer using linear attention. Bind to addresses
+        value = self.linear_attn(addresses, key, values) # (..., num_memories, d_memory)
         key = self.linear_attn(addresses, key, key) # (..., num_memories, d_addresses)
-        value = self.linear_attn(addresses, values, values) # (..., num_memories, d_memory)
 
         # Create kernel update. Unsqueeze to fit linear attn mechanism format.
         #
@@ -423,13 +481,14 @@ class WriteMemory(nn.Module):
         # max ensures that at 100% write, we cannot go below
         # a certain level of erasure. This is intentional,
         # and ensures the model will accumulate a weighted average.
+        # (..., num_memories, d_address)
 
-        erase_factor = write_probabilities*torch.max(erase_probability, interpolation_factor)
-
+        erase_factor = write_probabilities*torch.max(erase_probability, interpolation_factor) #
         # Create the write factor. This is the other part of the
         # update interpolation. The write probabilities, times
         # the interpolation factor, determines how quickly or strongly
         # we can update
+        # (..., num_memories, d_address)
 
         write_factor = write_probabilities*interpolation_factor
 
@@ -440,8 +499,9 @@ class WriteMemory(nn.Module):
         matrix = matrix*(1-erase_factor.unsqueeze(-1)) + matrix_update*write_factor.unsqueeze(-1)
 
         # Integrate the updates.
-        memory.update_(matrix, normalizer)
+        memory.update_(matrix, normalizer, write_factor, erase_factor)
 
+@deep_memory_registry.register("FastLinearMemory")
 class FastLinearMemory(DeepMemoryUnit):
     """
     A linear transformer fast memory system. It is designed to contain

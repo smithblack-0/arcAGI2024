@@ -10,7 +10,7 @@ from PyQt5.QtCore import QTimer
 from PyQt5.QtGui import QFont
 from typing import Any, Dict
 
-from src.data_tools.data_gui.events import DataSelectionSignals, Events, EventBus
+from src.old.data_tools.data_gui.events import DataSelectionSignals, Events, EventBus
 
 class IOAdapter:
     """

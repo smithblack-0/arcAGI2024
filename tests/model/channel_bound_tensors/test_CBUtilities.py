@@ -1,8 +1,8 @@
 import unittest
 import torch
-from src.main.CBTensors.channel_bound_tensors import CBTensor
-from src.main.CBTensors.channel_bound_spec import CBTensorSpec
-from src.main.CBTensors.channel_bound_utilities import CBIndirectionLookup, CBReplaceOnMatch
+from src.old.CBTensors import CBTensor
+from src.old.CBTensors import CBTensorSpec
+from src.old.CBTensors import CBIndirectionLookup, CBReplaceOnMatch
 
 
 class TestCBIndirectionLookup(unittest.TestCase):

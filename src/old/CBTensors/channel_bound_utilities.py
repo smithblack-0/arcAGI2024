@@ -3,8 +3,8 @@ from typing import Union, Dict, List
 import torch
 from torch import nn
 
-from src.main.CBTensors.channel_bound_spec import CBTensorSpec
-from src.main.CBTensors.channel_bound_tensors import CBTensor
+from src.old.CBTensors.channel_bound_spec import CBTensorSpec
+from src.old.CBTensors import CBTensor
 
 
 class CBIndirectionLookup(nn.Module):

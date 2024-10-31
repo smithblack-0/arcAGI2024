@@ -27,9 +27,9 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
 from PyQt5.QtGui import QFont
 from PyQt5.QtCore import Qt
 
-from src.data_tools.data_gui.events import Events, EventBus
-from src.data_tools.data_gui.cell_editors import BlockCellEditor
-from src.data_tools.data_gui.mytypes import Zones
+from src.old.data_tools.data_gui.events import Events, EventBus
+from src.old.data_tools.data_gui.cell_editors import BlockCellEditor
+from src.old.data_tools.data_gui.mytypes import Zones
 
 
 class PaletteWidget(QFrame):

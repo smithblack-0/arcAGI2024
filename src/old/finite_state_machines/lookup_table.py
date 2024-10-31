@@ -3,8 +3,7 @@
 from typing import Tuple, Dict, Any, List
 
 import torch
-from ..config import states, modes, mode_dims, vocabularies
-from src.main.CBTensors import CBTensor, CBTensorSpec, CBIndirectionLookup
+from src.old.CBTensors import CBTensorSpec, CBIndirectionLookup
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 

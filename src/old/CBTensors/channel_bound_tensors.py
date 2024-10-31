@@ -2,7 +2,7 @@ import textwrap
 import torch
 from typing import List, Dict, Optional, Tuple, TypeVar, Any, Union, Callable
 
-from src.main.CBTensors.channel_bound_spec import CBTensorSpec
+from src.old.CBTensors.channel_bound_spec import CBTensorSpec
 
 NestedList = TypeVar('NestedList')
 

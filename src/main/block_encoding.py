@@ -7,8 +7,8 @@ integer-based token form.
 import torch
 from torch.nn import functional as F
 from transformers import PreTrainedTokenizer
-from src.main.CBTensors.channel_bound_tensors import CBTensor
-from src.main.CBTensors.channel_bound_spec import CBTensorSpec
+from src.old.CBTensors import CBTensor
+from src.old.CBTensors import CBTensorSpec
 from typing import Any, Tuple
 from abc import ABC, abstractmethod
 

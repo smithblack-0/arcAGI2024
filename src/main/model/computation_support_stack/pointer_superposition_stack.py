@@ -31,7 +31,6 @@ class PointerSuperpositionStack(AbstractSupportStack):
                  pointer_prob_mass: torch.Tensor,
                  stack: Dict[str, TensorTree],
                  defaults: Dict[str, TensorTree],
-                 post_init_flag: bool = False
                  ):
         # Super initialization
         stack_depth = pointers.shape[0]
@@ -47,9 +46,6 @@ class PointerSuperpositionStack(AbstractSupportStack):
         self.defaults = defaults
         self.stack = stack
 
-        # Store flag
-        self.post_init_flag = post_init_flag
-
     def save_state(self) -> Tuple[TensorTree, Optional[Any]]:
         """
         Saves the state to be in terms of a tensor tree
@@ -58,13 +54,19 @@ class PointerSuperpositionStack(AbstractSupportStack):
             - Tensor Tree: The internal state
             - Bypass: The bypass features
         """
+        # Note that it is the case that the upstream
+        # storage mechanisms expect batch dimensions to be
+        # common. As a result, we move the stack dimension
+        # to the end. This is undone on load.
+
         save_package = (
             self.pointers,
             self.pointer_prob_masses,
             self.defaults,
             self.stack
         )
-        return save_package, self.post_init_flag
+        save_package = parallel_pytree_map(lambda x : x.movedim(0, -1), save_package)
+        return save_package, None
 
     @classmethod
     def load_state(cls, pytree: TensorTree, bypass: Any) -> 'PointerSuperpositionStack':
@@ -74,7 +76,13 @@ class PointerSuperpositionStack(AbstractSupportStack):
         :param bypass: The flag
         :return: A setup instance
         """
-        return cls(*pytree, bypass)
+        # Note it is the case that the save mechanism
+        # returned a pytree where the stack dimension came
+        # last. We move it back to the front, like the
+        # rest of the code expecex
+
+        save_package = parallel_pytree_map(lambda x: x.movedim(-1, 0), pytree)
+        return cls(*save_package)
     def get_statistics(self) -> Dict[str, torch.Tensor]:
         """
         Returns some important tensor statistics.

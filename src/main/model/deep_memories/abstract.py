@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Generic, Any, Optional, Tuple, TypeVar
+from typing import Generic, Any, Optional, Tuple, TypeVar, Dict
 
 import torch
 from src.main.model.base import SavableState
@@ -13,11 +13,20 @@ class AbstractMemoryState(SavableState):
     It guarantees the implementation of
     saving and loading for the state.
     """
+
+    @abstractmethod
+    def get_statistics(self)->Dict[str, Any]:
+        """
+        Gets a set of relevant statistics.
+        :return:
+        """
+    @abstractmethod
     def update_(self, *args: Any, **kwargs: Any):
         """
         In place update of abstract memory state. Implementation
         specific.
         """
+    @abstractmethod
     def get(self)->Any:
         """
         Implementation specific expression of the memory.

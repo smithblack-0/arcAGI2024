@@ -67,4 +67,4 @@ def edit_file(file: str):
 
     sys.exit(app.exec_())
 
-edit_file(r"C:\Users\chris\PycharmProjects\arcAGI2024\data\block_zone\converted_data.json")
+edit_file(r"/data/block_zone/converted_data.json")

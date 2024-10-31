@@ -292,7 +292,7 @@ class AbstractBankSelector(nn.Module, ABC):
         self.dropout = DropoutLogits(control_dropout)
 
     @abstractmethod
-    def forward(self, *args: Any, **kwargs: Any) -> Tuple[SelectionSpec, Any]:
+    def forward(self, embedding: torch.Tensor, state: Optional[torch.Tensor]) -> Tuple[SelectionSpec, Any]:
         """
         Abstract definition of the forward mechanism. This method accepts arbitrary content
         (args and kwargs) and returns a `SelectionSpec` along with any updated recurrent state.
@@ -352,13 +352,14 @@ class LinearBankSelector(AbstractBankSelector):
         super().__init__(top_k, top_p, rand, control_dropout)
         self.projector = nn.Linear(d_embedding, bank_size)
 
-    def forward(self, embedding: torch.Tensor) -> Tuple[SelectionSpec, None]:
+    def forward(self, embedding: torch.Tensor, state: None) -> Tuple[SelectionSpec, None]:
         """
         Generates logits for selecting parameter banks based on the provided embedding
         and processes them into a `SelectionSpec` using the configured sparse selection
         mechanisms (top-k, top-p, or random sampling).
 
         :param embedding: The embedding to process for selecting banks.
+        :param state: Unused
         :return:
             - The `SelectionSpec` containing the selected indices and probabilities.
             - `None` as there is no recurrent state in this implementation.

@@ -17,7 +17,7 @@ from torch import nn
 # Registry imports
 from typing import Tuple, Any, Optional, Dict
 from abc import ABC, abstractmethod
-from .virtual_layers import VirtualFeedforward, AbstractBankSelector, selector_registry, VirtualLinear
+from src.main.model.virtual_layers import VirtualFeedforward, AbstractBankSelector, selector_registry, VirtualLinear
 from src.main.model.computation_support_stack import (stack_controller_registry,
                                                       AbstractStackController,
                                                       AbstractSupportStack)
@@ -51,8 +51,10 @@ class RecurrentDecoderInterface(nn.Module, ABC):
     the registry design, allowing easily swappable
     components.
     """
+
     def __init__(self):
         super().__init__()
+
     @abstractmethod
     def forward(self,
                 embedding: torch.Tensor,
@@ -69,10 +71,11 @@ class RecurrentDecoderInterface(nn.Module, ABC):
             - The statistics banks for various processes, usable for metrics or training.
         """
 
-registry_indirection = {"act_controller" : act_controller_registry,
-                        "stack_controller" : stack_controller_registry,
-                        "virtual_layer_controller" : selector_registry,
-                        "deep_memory_unit" : deep_memory_registry,
+
+registry_indirection = {"act_controller": act_controller_registry,
+                        "stack_controller": stack_controller_registry,
+                        "virtual_layer_controller": selector_registry,
+                        "deep_memory_unit": deep_memory_registry,
                         }
 recurrent_decoder_registry = InterfaceRegistry[RecurrentDecoderInterface]("RecurrentDecoder",
                                                                           RecurrentDecoderInterface,
@@ -80,7 +83,7 @@ recurrent_decoder_registry = InterfaceRegistry[RecurrentDecoderInterface]("Recur
 
 
 @recurrent_decoder_registry.register("DeepRecurrentDecoderV1")
-class DeepRecurrentDecoderV1(RecurrentDecoderInterface):
+class DeepRecurrentDecoder(RecurrentDecoderInterface):
     """
     The recurrent decoder mechanism. Sets up and
     manages recurrent state in order to decode
@@ -101,8 +104,9 @@ class DeepRecurrentDecoderV1(RecurrentDecoderInterface):
     def __init__(self,
                  # Some final parameters
                  d_embedding: int,
-                 d_model: int,
+                 d_bottleneck: int,
                  bank_size: int,
+                 stack_depth: int,
                  direct_dropout: float,
                  submodule_dropout: float,
                  device: torch.device,
@@ -127,6 +131,11 @@ class DeepRecurrentDecoderV1(RecurrentDecoderInterface):
         """
         super().__init__()
 
+        # Store constructor args
+        self.d_embedding = d_embedding
+        self.d_bottleneck = d_bottleneck
+        self.stack_depth = stack_depth
+
         # Store controllers
         self.act_controller = act_controller
         self.stack_controller = stack_controller
@@ -134,22 +143,23 @@ class DeepRecurrentDecoderV1(RecurrentDecoderInterface):
 
         # Store computational layers
         self.deep_memory_unit = deep_memory_unit
-        self.feedforward = VirtualFeedforward(d_model, d_model*2,
+        self.feedforward = VirtualFeedforward(d_bottleneck, d_bottleneck * 2,
                                               bank_size, submodule_dropout,
                                               device=device,
                                               dtype=dtype)
 
         # Create embedding layernorm features and dropout
 
-        self.memory_layernorm = nn.LayerNorm(d_model)
-        self.feedforward_layernorm = nn.LayerNorm(d_model)
-        self.stack_layernorm = nn.LayerNorm(d_model)
+        self.memory_layernorm = nn.LayerNorm(d_bottleneck)
+        self.feedforward_layernorm = nn.LayerNorm(d_bottleneck)
+        self.stack_layernorm = nn.LayerNorm(d_bottleneck)
         self.dropout = nn.Dropout(direct_dropout)
 
         # Create the bottleneck projector.
-        self.bottlneck_projector = VirtualLinear(d_embedding, d_model, bank_size, device=device, dtype=dtype)
-        self.unbottleneck_projector = VirtualLinear(d_model, d_embedding, bank_size, device=device, dtype=dtype)
-        self.main_layernorm = nn.LayerNorm(d_model)
+        self.bottlneck_projector = VirtualLinear(d_embedding, d_bottleneck, bank_size, device=device, dtype=dtype)
+        self.unbottleneck_projector = VirtualLinear(d_bottleneck, d_embedding, bank_size, device=device, dtype=dtype)
+        self.bottleneck_layernorm = nn.LayerNorm(d_bottleneck)
+        self.main_layernorm = nn.LayerNorm(d_embedding)
 
     def forward(self,
                 embedding: torch.Tensor,
@@ -171,22 +181,21 @@ class DeepRecurrentDecoderV1(RecurrentDecoderInterface):
 
         # Handle setup if the recurrent state was not passed in.
 
-
         if recurrent_state is None:
             # Get the batch shape
             batch_shape = embedding.shape[:-1]
-            bottleneck_embedding = torch.zeros([*embedding.shape[:-1], self.d_model],
+            bottleneck_embedding = torch.zeros([*embedding.shape[:-1], self.d_bottleneck],
                                                device=embedding.device, dtype=embedding.dtype)
 
             # Setup the important recurrent states. These are principally
             # the memory and stack states. Both are stored in the
             # bottlenecked state.
 
-            memory_state, mem_access_state = self.deep_memory_unit.create_state(batch_shape)
+            memory_state = self.deep_memory_unit.create_state(batch_shape)
             stack_state = self.stack_controller.create_state(batch_shape,
                                                              self.stack_depth,
-                                                             embedding=bottleneck_embedding,
-                                                             mem_access_state=mem_access_state)
+                                                             bottleneck_embedding=bottleneck_embedding
+                                                             )
 
             # Store
             recurrent_state = {"memory_state": memory_state,
@@ -199,14 +208,10 @@ class DeepRecurrentDecoderV1(RecurrentDecoderInterface):
         # Also, create default selection state and bottleneck
         # state for the process to work with.
 
-
-
         act_state = self.act_controller.create_state(embedding.shape[:-1],
                                                      embedding=embedding,
                                                      recurrent_state=recurrent_state)
         selection_state = None  # This is temporary state that is implementation dependent.
-        mem_access_state = recurrent_state["stack_state"].pop("mem_access_state") # Get the state to resume with.
-
 
         # Run core process.
         #
@@ -216,41 +221,36 @@ class DeepRecurrentDecoderV1(RecurrentDecoderInterface):
             # Then reduce the embedding down to its bottlenecked version
             # for fast computation
             layer_selection, selection_state = self.virtual_layer_controller(embedding, selection_state)
-            bottleneck_embedding = self.bottlneck_projector(embedding, selection_state)
+            bottleneck_embedding = self.bottlneck_projector(embedding, layer_selection)
 
             # Get memory and stack state, then get results off
             # of stack
             memory_state, stack_state = recurrent_state.values()
 
-
             # Run deep memory access and update.
             # Remember, memory state is updated by side effect!
-            mem_result, mem_access_state = self.deep_memory_unit(bottleneck_embedding,
-                                                                 layer_selection,
-                                                                 recurrent_state,
-                                                                 mem_access_state)
+            mem_result = self.deep_memory_unit(bottleneck_embedding,
+                                               layer_selection,
+                                               memory_state)
             bottleneck_embedding = self.memory_layernorm(bottleneck_embedding + self.dropout(mem_result))
-
 
             # Run feedforward access
             ff_result = self.feedforward(bottleneck_embedding, layer_selection)
             bottleneck_embedding = self.feedforward_layernorm(bottleneck_embedding + self.dropout(ff_result))
 
-
             # Run computation stack update.
             # Remember that this updates stack_state by side effect!
             stack_outputs = self.stack_controller(bottleneck_embedding,
-                                                 act_state.halted_batches,
-                                                 stack_state,
-                                                 embedding=bottleneck_embedding,
-                                                 mem_access_state=mem_access_state
-                                                 )
-            stack_embedding, mem_access_state = stack_outputs.values()
+                                                  stack_state,
+                                                  act_state.halted_batches,
+                                                  bottleneck_embedding=bottleneck_embedding,
+                                                  )
+            stack_embedding, = stack_outputs.values()
             bottleneck_embedding = self.stack_layernorm(bottleneck_embedding + self.dropout(stack_embedding))
 
             # Unbottleneck the embedding and integrate the results
 
-            embedding_update = self.unbottleneck_projector(bottleneck_embedding, selection_state)
+            embedding_update = self.unbottleneck_projector(bottleneck_embedding, layer_selection)
             embedding = self.main_layernorm(embedding + self.dropout(embedding_update))
 
             # Run the act update. Since it was updated indirectly, I can
@@ -274,33 +274,33 @@ class DeepRecurrentDecoderV1(RecurrentDecoderInterface):
         # Return the result.
         return embedding, recurrent_state, statistics
 
+
 def build_recurrent_decoder_v1(
-            # Fairly universal parameters
-            d_embedding: int,
-            d_model: int,
-            bank_size: int,
+        # Fairly universal parameters
+        d_embedding: int,
+        d_bottleneck: int,
+        bank_size: int,
+        stack_depth: int,
 
+        direct_dropout: float,
+        submodule_dropout: float,
+        control_dropout: float,
 
-            direct_dropout: float,
-            submodule_dropout: float,
-            control_dropout: float,
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = torch.device('cpu'),
 
+        # More specific details. Selects the variation
+        deep_memory_variant: str = "LinearKernelMemoryBank",
+        act_variant: str = "Default",
+        support_stack_variant: str = "Default",
+        virtual_layer_controller_variant: str = "Linear",
 
-            dtype: torch.dtype = torch.float32,
-            device: torch.device = torch.device('cpu'),
+        # Extra parameters may be required to support the
+        # variation. If you are getting an error, you probably
+        # need to provide the extra parameters here.
 
-            # More specific details. Selects the variation
-            deep_memory_variant: str = "LinearKernelMemoryBank",
-            act_variant: str = "Default",
-            support_stack_variant: str = "Default",
-            virtual_layer_controller_variant: str = "Linear",
-
-            # Extra parameters may be required to support the
-            # variation. If you are getting an error, you probably
-            # need to provide the extra parameters here.
-
-            **variant_context: Any
-            )->DeepRecurrentDecoderV1:
+        **variant_context: Any
+) -> DeepRecurrentDecoderV1:
     """
     Builds a deep recurrent decoder, the first variant. We basically need to
     specify a bunch of commonly used information, then variants on the various submodules
@@ -310,6 +310,7 @@ def build_recurrent_decoder_v1(
     :param d_embedding: The size of the embeddings dimension for any embeddings we want to process
     :param d_model: The internal model width. This can be different the
     :param bank_size: The size of the virtual layer bank. This is where you get most of your parameters.
+    :param stack_depth: How deep the storage stack is.
 
     Dropout variants. There are three variants. Direct dropout
     is intended to be dropout which is applied directly during computation,
@@ -348,25 +349,25 @@ def build_recurrent_decoder_v1(
     # Create common context feature to interface
     # with builder.
     construction_context = {
-        "d_embedding" : d_embedding,
-        "d_model" : d_model,
-        "bank_size" : bank_size,
+        "d_embedding": d_embedding,
+        "d_bottleneck": d_bottleneck,
+        "bank_size": bank_size,
+        "stack_depth": stack_depth,
 
-        "direct_dropout" : direct_dropout,
-        "submodule_dropout" : submodule_dropout,
-        "control_dropout" : control_dropout,
+        "direct_dropout": direct_dropout,
+        "submodule_dropout": submodule_dropout,
+        "control_dropout": control_dropout,
 
-        "dtype" : dtype,
-        "device" : device,
+        "dtype": dtype,
+        "device": device,
     }
     construction_context.update(variant_context)
-
 
     # Go manually build the deep memory subunit.
     #
     # Provide a descriptive error message on failure.
     try:
-        deep_memory_unit = deep_memory_registry.build(deep_memory_variant, **construction_context)
+        deep_memory_unit = deep_memory_registry.build(deep_memory_variant, d_model=d_bottleneck, **construction_context)
     except Exception as err:
         msg = f"""
         Failed to build the deep memory unit. If a parameter is indicated 
@@ -379,7 +380,10 @@ def build_recurrent_decoder_v1(
     # Go manually build the virtual layer controller.
     # Provide a descriptive error message on failure.
     try:
-        virtual_layer_controller = selector_registry.build(virtual_layer_controller_variant, **construction_context)
+        virtual_layer_controller = selector_registry.build(virtual_layer_controller_variant,
+                                                           d_model = d_bottleneck,
+                                                           **construction_context)
+
     except Exception as err:
         msg = f"""
         Failed to build the virtual layer selector. If a parameter is indicated 
@@ -391,7 +395,9 @@ def build_recurrent_decoder_v1(
 
     # Go manually build the act controller
     try:
-        act_controller = act_controller_registry.build(act_variant, **construction_context)
+        act_controller = act_controller_registry.build(act_variant,
+                                                       d_model = d_bottleneck,
+                                                       **construction_context)
     except Exception as err:
         msg = f"""
         Failed to build the computation time controller. If a parameter is indicated 
@@ -403,7 +409,9 @@ def build_recurrent_decoder_v1(
 
     # Go manually build the stack controller
     try:
-        stack_controller = stack_controller_registry.build(support_stack_variant, **construction_context)
+        stack_controller = stack_controller_registry.build(support_stack_variant,
+                                                           d_model = d_bottleneck,
+                                                           **construction_context)
     except Exception as err:
         msg = f"""
         Failed to build the stack controller. If a parameter is indicated 

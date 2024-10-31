@@ -1,5 +1,4 @@
-from typing import Dict, List, Optional
-from src.main.CBTensors.channel_bound_tensors import CBTensorSpec
+from typing import List
 from dataclasses import dataclass
 
 

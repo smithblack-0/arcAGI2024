@@ -5,12 +5,12 @@ from typing import Optional, Callable
 
 from PyQt5.QtWidgets import (QApplication, QWidget, QTextEdit, QScrollArea, QGridLayout, QLabel, QLineEdit, QSizePolicy)
 from PyQt5.QtCore import Qt, QSize
-from src.data_tools.data_gui.mytypes import Block, Blocks
+from src.old.data_tools.data_gui.mytypes import Block, Blocks
 
 #import copy
 from typing import Dict, Any
 from PyQt5.QtWidgets import QFrame, QVBoxLayout, QPushButton, QHBoxLayout
-from src.data_tools.data_gui.events import Events, EventBus
+from src.old.data_tools.data_gui.events import Events, EventBus
 
 
 class AbstractCell(QFrame):

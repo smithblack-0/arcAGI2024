@@ -1,7 +1,7 @@
 import unittest
 import torch
-from src.main.CBTensors.channel_bound_tensors import CBTensor  # Replace 'your_module' with your actual module
-from src.main.CBTensors.channel_bound_spec import CBTensorSpec
+from src.old.CBTensors import CBTensor  # Replace 'your_module' with your actual module
+from src.old.CBTensors import CBTensorSpec
 
 
 class TestCBTensorValidation(unittest.TestCase):

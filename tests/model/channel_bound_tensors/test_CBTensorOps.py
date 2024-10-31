@@ -1,6 +1,6 @@
 import unittest
 import torch
-from src.main.CBTensors.channel_bound_tensors import CBTensor, CBTensorSpec  # Replace with your actual module
+from src.old.CBTensors import CBTensor, CBTensorSpec  # Replace with your actual module
 
 
 class TestCBTensorConcatOperator(unittest.TestCase):

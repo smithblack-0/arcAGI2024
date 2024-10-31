@@ -1,7 +1,7 @@
 import unittest
 import torch
-from src.main.model.deep_memories.old_linear_memory_banks import (LinearKernelMemoryBank,
-                                                                  CreateState, ReadState, WriteState, MemoryState)
+from src.main.model.deep_memories.simple_linear_memories import (LinearKernelMemoryBank,
+                                                                 CreateState, ReadState, WriteState, MemoryState)
 from src.main.model.virtual_layers import SelectionSpec
 from src.main.model.deep_memories.abstract import deep_memory_registry
 class TestLinearKernelMemoryBank(unittest.TestCase):
@@ -102,3 +102,35 @@ class TestLinearKernelMemoryBank(unittest.TestCase):
         self.assertEqual(matrix.shape, expected_matrix_shape)
         self.assertEqual(normalizer.shape, expected_normalizer_shape)
 
+
+
+
+class TestCreateState(unittest.TestCase):
+
+    def setUp(self):
+        self.d_address = 16
+        self.d_memory = 64
+        self.num_memories = 10
+        self.device = torch.device('cpu')
+        self.dtype = torch.float32
+        self.batch_shape = torch.Size([2])
+        self.create_state = CreateState(self.d_address, self.d_memory, self.num_memories,
+                                        dtype=self.dtype, device=self.device)
+
+    def test_initialization_shapes(self):
+        state = self.create_state(self.batch_shape)
+
+        # Check shapes
+        self.assertEqual(state.matrix.shape, (2, self.num_memories, self.d_address, self.d_memory))
+        self.assertEqual(state.normalizer.shape, (2, self.num_memories, self.d_address))
+
+    def test_dtype_and_device(self):
+        state = self.create_state(self.batch_shape)
+
+        # Check dtype and device
+        self.assertEqual(state.matrix.dtype, self.dtype)
+        self.assertEqual(state.normalizer.device, self.device)
+
+
+if __name__ == '__main__':
+    unittest.main()

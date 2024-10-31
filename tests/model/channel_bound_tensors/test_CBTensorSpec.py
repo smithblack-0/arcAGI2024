@@ -1,5 +1,5 @@
 import unittest
-from src.main.CBTensors.channel_bound_spec import CBTensorSpec
+from src.old.CBTensors import CBTensorSpec
 
 
 ### Behavioral test suite
