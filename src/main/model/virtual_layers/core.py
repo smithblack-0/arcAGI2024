@@ -521,35 +521,35 @@ class VirtualParameter(nn.Module):
                  parameters. Shape: (..., *shape).
                  Appendum: However, if sum is false, will be (..., *shape, selected)
         """
+        with torch.profiler.record_function("CollapseParameter"):
+            # Automatically convert the dtype of the selection spec if allowed
+            if self.allow_dynamic_type_conversion and bank_spec.dtype != self.dtype:
+                bank_spec = bank_spec.to(dtype=self.dtype)
+            elif bank_spec.dtype != self.dtype:
+                msg = f"""
+                SelectionSpec dtype {bank_spec.dtype} does not match 
+                parameter dtype {self.dtype}. Enable dynamic conversion
+                by setting allow_dynamic_type_conversion=True.
+                """
+                msg = textwrap.dedent(msg)
+                raise TypeError(msg)
 
-        # Automatically convert the dtype of the selection spec if allowed
-        if self.allow_dynamic_type_conversion and bank_spec.dtype != self.dtype:
-            bank_spec = bank_spec.to(dtype=self.dtype)
-        elif bank_spec.dtype != self.dtype:
-            msg = f"""
-            SelectionSpec dtype {bank_spec.dtype} does not match 
-            parameter dtype {self.dtype}. Enable dynamic conversion
-            by setting allow_dynamic_type_conversion=True.
-            """
-            msg = textwrap.dedent(msg)
-            raise TypeError(msg)
-
-        # Extract the selected banks using advanced indexing
-        parameter = self.parameter.movedim(-1, 0)  # (*shape, bank)
-        parameter = parameter[bank_spec.selection_index]  # (..., *shape, bank_selected)
-        parameter = parameter.movedim(-self.parameter.dim(), -1)
+            # Extract the selected banks using advanced indexing
+            parameter = self.parameter.movedim(-1, 0)  # (*shape, bank)
+            parameter = parameter[bank_spec.selection_index]  # (..., *shape, bank_selected)
+            parameter = parameter.movedim(-self.parameter.dim(), -1)
 
 
-        # Perform the kernel superposition and return the result
-        if sum:
-            # Set up the probabilities to broadcast across the parameter tensor
-            probabilities = bank_spec.selection_probabilities  # (..., bank_selected)
-            for _ in self.shape:
-                probabilities = probabilities.unsqueeze(-2)
+            # Perform the kernel superposition and return the result
+            if sum:
+                # Set up the probabilities to broadcast across the parameter tensor
+                probabilities = bank_spec.selection_probabilities  # (..., bank_selected)
+                for _ in self.shape:
+                    probabilities = probabilities.unsqueeze(-2)
 
-            parameter = torch.sum(parameter * probabilities, dim=-1)  # (..., *shape)
+                parameter = torch.sum(parameter * probabilities, dim=-1)  # (..., *shape)
 
-        return parameter
+            return parameter
 
 
 class VirtualBuffer(nn.Module):

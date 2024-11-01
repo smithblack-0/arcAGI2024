@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from torch import nn
 from torch.nn import functional as F
 
-from src.main.model.base import TensorTree
+from src.main.model.base import TensorTree, DeviceDtypeWatch
 from src.main.model.deep_memories.abstract import DeepMemoryUnit, deep_memory_registry, AbstractMemoryState
 from src.main.model.virtual_layers import (DropoutLogits, VirtualLinear, VirtualAdvancedLinear,
                                            VirtualMakeHeads, VirtualMergeHeads, AbstractBankSelector,
@@ -112,19 +112,26 @@ class CreateState(nn.Module):
     """
     Creates the default attention state when requested
     """
+    @property
+    def device(self)->torch.device:
+        return self.__metainfo.device
+
+    @property
+    def dtype(self)->torch.dtype:
+        return self.__metainfo.dtype
+
     def __init__(self,
                  d_address: int,
                  d_memory: int,
                  num_memories: int,
-                 dtype: torch.dtype,
-                 device: torch.device
+                 dtype: Optional[torch.dtype] = None,
+                 device: Optional[torch.device] = None,
                  ):
         super().__init__()
         self.d_address = d_address
         self.d_memory = d_memory
         self.num_memories = num_memories
-        self.dtype = dtype
-        self.device = device
+        self.__metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
 
 
     def forward(self, batch_shape: torch.Size) -> MemoryState:
@@ -235,6 +242,13 @@ class ReadMemory(nn.Module):
     down to something without a memory dimension. Step 2
     then reads the contents of that kernel.
     """
+    @property
+    def device(self)->torch.device:
+        return self.__metainfo.device
+
+    @property
+    def dtype(self)->torch.dtype:
+        return self.__metainfo.dtype
     def __init__(self,
                  d_model: int,
                  d_address: int,
@@ -260,8 +274,7 @@ class ReadMemory(nn.Module):
         self.d_memory = d_memory
         self.num_read_heads = num_read_heads
         self.linear_kernel_activation = linear_kernel_activation
-        self.dtype = dtype
-        self.device = device
+        self.__metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
 
         # Define linear attention mechanism.
         self.linear_attn = LinearAttention(linear_kernel_activation)
@@ -354,6 +367,14 @@ class WriteMemory(nn.Module):
 
 
     """
+
+    @property
+    def device(self) -> torch.device:
+        return self.__metainfo.device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.__metainfo.dtype
     def __init__(self,
                  d_model: int,
                  d_address: int,
@@ -371,8 +392,7 @@ class WriteMemory(nn.Module):
         self.d_memory = d_memory
         self.num_write_heads = num_write_heads
         self.linear_kernel_activation = linear_kernel_activation
-        self.dtype = dtype
-        self.device = device
+        self.__metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
 
         # Create the linear attn mechanism.
 
@@ -524,6 +544,14 @@ class FastLinearMemory(DeepMemoryUnit):
     A linear attention mechanism is used to ensure all of this
     happens very fast, and with few parameters.
     """
+
+    @property
+    def device(self) -> torch.device:
+        return self.__metainfo.device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.__metainfo.dtype
     def __init__(self,
                 d_model: int,
                 d_address: int,
@@ -550,15 +578,11 @@ class FastLinearMemory(DeepMemoryUnit):
         """
 
         # Defaults
-        if dtype is None:
-            dtype = torch.float32
-        if device is None:
-            device = torch.device('cpu')
         if linear_kernel_activation is None:
             linear_kernel_activation = F.elu
 
 
-        super().__init__(bank_size)
+        super().__init__(bank_size, d_model)
 
         # Setup
         self.addresses = VirtualParameter.create(bank_size, [num_memories, d_address],
@@ -569,7 +593,7 @@ class FastLinearMemory(DeepMemoryUnit):
                                         device=device, dtype=dtype)
         self.memory_writer = WriteMemory(d_model, d_address, d_memory, num_write_heads, num_memories,
                                          linear_kernel_activation, dtype=dtype, device=device)
-
+        self.__metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
     def create_state(self,
                      batch_shape: torch.Size
                      ) -> MemoryState:

@@ -171,6 +171,50 @@ class DropoutLogits(nn.Module):
 
         return logits
 
+class DeviceDtypeWatch(nn.Module):
+    """
+    Initialized with, and subsequently watches,
+    the device and dtype. Responds properly
+    when .to is invoked
+
+    Should be used to store and lookup
+    device and dtype information.
+    """
+    @property
+    def device(self)->torch.device:
+        return self.watch.device
+
+    @property
+    def dtype(self)->torch.dtype:
+        return self.watch.dtype
+
+    @device.setter
+    def device(self, value: torch.device):
+        self.watch.to(device=value)
+
+    @dtype.setter
+    def dtype(self, value: torch.dtype):
+        self.watch.to(dtype=value)
+
+    def __init__(self,
+                 device: Optional[torch.device] = None,
+                 dtype: Optional[torch.dtype] = None,
+                 ):
+
+
+        # Standardize
+        if device is None:
+            device = torch.device('cpu')
+        if dtype is None:
+            dtype = torch.float32
+        super().__init__()
+
+        # Setup watch buffer. This is completely
+        # empty, but will automatically respond
+        # when .to is used
+        watch = torch.empty([0], dtype=dtype, device=device)
+        self.register_buffer("watch", watch)
+
 
 class SavableState(ABC):
     """
@@ -186,6 +230,8 @@ class SavableState(ABC):
     around and used to initialize the subsequent
     state. Nontensor features, such as a common threshold,
     can be initializes using the class.
+
+    It also promises to have statistics and metrics
     """
 
     @abstractmethod

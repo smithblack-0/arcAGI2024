@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Generic, Any, Optional, Tuple, TypeVar, Dict
 
 import torch
-from src.main.model.base import SavableState
+from src.main.model.base import SavableState, DeviceDtypeWatch
 from src.main.model.virtual_layers import VirtualLayer, SelectionSpec
 from src.main.model.registry import InterfaceRegistry
 
@@ -38,11 +38,22 @@ class DeepMemoryUnit(VirtualLayer, ABC):
     device designed to hold memories over an
     extremely long term duration.
     """
+    @property
+    def device(self)->torch.device:
+        return self.__metainfo.device
 
+    @property
+    def dtype(self)->torch.dtype:
+        return self.__metainfo.dtype
     def __init__(self,
-                 bank_size: int
+                 bank_size: int,
+                 d_model: int,
+                 device: Optional[torch.device] = None,
+                 dtype: Optional[torch.dtype] = None
                  ):
         super().__init__(bank_size)
+        self.d_model = d_model
+        self.__metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
     @abstractmethod
     def create_state(self,
                      batch_shape: torch.Size

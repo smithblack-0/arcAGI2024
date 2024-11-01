@@ -5,7 +5,7 @@ from typing import TypeVar, Generic, Optional, Any, Tuple, Dict, Union, List, Ca
 import torch
 from torch import nn
 
-from src.main.model.base import TensorTree, SavableState
+from src.main.model.base import TensorTree, SavableState, DeviceDtypeWatch
 from src.main.model.registry import InterfaceRegistry
 BatchShapeType = Union[Tuple[int, ...], List[int], torch.Size]
 
@@ -134,7 +134,7 @@ class AbstractSupportStack(SavableState, ABC):
         """
 
     @abstractmethod
-    def adjust_stack(self, controls: Tuple[torch.Tensor, ...], batch_mask: Optional[torch.Tensor]):
+    def adjust_stack(self, controls: Tuple[torch.Tensor, ...]):
         """
         Adjusts the stack to account for the directives from the broader model.
         Responsible for handling this in a differentiable manner.
@@ -143,10 +143,6 @@ class AbstractSupportStack(SavableState, ABC):
             - Implementation dependent.
             - Presumably, one of them is action probabilities or action logits of 
               shape (...batch_shape, 3)
-        :param batch_mask:
-            - Optional
-            - Indicates adjustments to not make, presumably due to halting.
-
         """
 
     @abstractmethod
@@ -164,22 +160,16 @@ class AbstractSupportStack(SavableState, ABC):
         """
 
     @abstractmethod
-    def push(self, batch_mask: Optional[torch.Tensor], **states):
+    def push(self,**states):
         """
         Pushes new state information onto the stack for the setup
         kwarg accumulator. It will be inserted based on the current
         stack configuration.
-        :param batch_mask:
-            - Optional
-            - Indicates adjustments to not make, presumably due to halting.
-            - Shape (...batch_shape)
-            - True means mask
         :param states: The state information to integrate into the stack
         """
 
     def __call__(self,
                  controls: Tuple[torch.Tensor, ...],
-                 batch_mask: Optional[torch.Tensor] = None,
                  **updates: TensorTree
                  ) -> Dict[str, TensorTree]:
         """
@@ -188,17 +178,12 @@ class AbstractSupportStack(SavableState, ABC):
             - Implementation dependent.
             - Presumably, one of them is action probabilities or action logits of 
               shape (...batch_shape, 3)
-        :param batch_mask:
-            - Optional
-            - Indicates adjustments to not make, presumably due to halting.
-            - Shape (...batch_shape)
-            - True means mask
         :param updates: tensor pytrees whose updates we need to integrate
         :return: The extracted stack state. 
         """
-        self.adjust_stack(controls, batch_mask)  # Adjust position
+        self.adjust_stack(controls)  # Adjust position
         read = self.pop()  # Read
-        self.push(batch_mask, **updates)  # Write
+        self.push(**updates)  # Write
         return read
 
 
@@ -213,13 +198,19 @@ class AbstractStackFactory(nn.Module, ABC):
     stack depth, and default stack contents.
     """
 
+    @property
+    def device(self)->torch.device:
+        return self.__metainfo.device
+
+    @property
+    def dtype(self)->torch.dtype:
+        return self.__metainfo.dtype
     def __init__(self,
                  dtype: torch.dtype,
                  device: torch.device
                  ):
         super().__init__()
-        self.dtype = dtype
-        self.device = device
+        self.__metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
 
     def is_tensor_sane(self,
                        tensor: Any,
@@ -281,10 +272,22 @@ class AbstractControlGates(nn.Module, ABC):
     abstract stack, from an embedding with a width
     of d_model.
     """
+    @property
+    def device(self)->torch.device:
+        return self.__metainfo.device
 
-    def __init__(self, d_model: int):
+    @property
+    def dtype(self)->torch.dtype:
+        return self.__metainfo.dtype
+
+    def __init__(self,
+                 d_model: int,
+                 device: Optional[torch.device] = None,
+                 dtype: Optional[torch.dtype] = None
+                 ):
         super().__init__()
         self.d_model = d_model
+        self.__metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
 
     @abstractmethod
     def forward(self, control_embedding: torch.Tensor) -> Tuple[torch.Tensor, ...]:
@@ -336,21 +339,17 @@ class AbstractStackController(nn.Module, ABC):
     def forward(self,
                 control_embedding: torch.Tensor,
                 stack_state: AbstractSupportStack,
-                batch_mask: Optional[torch.Tensor] = None,
                 **tracked_states: TensorTree
                 ) -> Dict[str, TensorTree]:
         """
         Runs an abstract stack update.
         :param control_embedding: The control embedding to use
-        :param batch_mask: Used to indicate, for example, if we want certain batches to halt
-                           because of ACT processes. Can be left as none, denying that masking
-                           from happening
         :param stack_state: The stack state to use
         :param tracked_states: The tracked state
         :return: The resulting tensors, fetched from the stack. the stack is indirectly updated.
         """
         controls = self.control_gate(control_embedding)
-        read = stack_state(controls, batch_mask, **tracked_states)
+        read = stack_state(controls, **tracked_states)
         return read
 
 stack_controller_registry = InterfaceRegistry[AbstractStackController]("StackController", AbstractStackController)

@@ -96,10 +96,8 @@ class TestPointerSuperpositionStack(unittest.TestCase):
             'layer1': torch.randn(*self.batch_shape, self.d_model, dtype=self.dtype, device=self.device),
             'layer2': torch.randn(*self.batch_shape, self.d_model, dtype=self.dtype, device=self.device)
         }
-        batch_mask = torch.zeros(self.batch_shape, dtype=torch.bool, device=self.device)
-
         # Perform push
-        stack.push(batch_mask, **new_tensors)
+        stack.push(**new_tensors)
 
         # Check if the stack updated correctly
         for name, expression in new_tensors.items():
@@ -112,14 +110,13 @@ class TestPointerSuperpositionStack(unittest.TestCase):
         """
         # Create random inputs
         embedding = torch.randn(*self.batch_shape, self.d_model, dtype=self.dtype, device=self.device)
-        batch_mask = torch.zeros(self.batch_shape, dtype=torch.bool, device=self.device)
         tensors = {
             'layer1': torch.randn(*self.batch_shape, self.d_model, dtype=self.dtype, device=self.device),
             'layer2': torch.randn(*self.batch_shape, self.d_model, dtype=self.dtype, device=self.device)
         }
 
         stack = self.stack_controller.create_state(self.batch_shape, self.stack_depth, **tensors)
-        expressions = self.stack_controller(embedding, stack, batch_mask, **tensors)
+        expressions = self.stack_controller(embedding, stack, **tensors)
 
         for name, expression in expressions.items():
             self.assertEqual(expression.shape, torch.Size([*self.batch_shape, self.d_model]))
@@ -151,33 +148,32 @@ class TestPointerSuperpositionStack(unittest.TestCase):
 
         # Insert an entry into the first slot. Then check if it was
         # actually written correctly
-        stack.push(torch.tensor([False, False, True]), test_tensor=torch.Tensor([1.0, 1.0, 1.0]))
+        stack.push(test_tensor=torch.Tensor([1.0, 1.0, 2.0]))
         expected = base.clone()
-        expected[0] = torch.tensor([1.0, 1.0, 0.0])
+        expected[0] = torch.tensor([1.0, 1.0, 2.0])
         self.assertTrue(torch.all(stack.stack["test_tensor"] == expected))
 
         # Manually change it so that I am pointing at
         # position 1. Insert. 2. Read back. Ensure it is there
-        batch_mask = torch.tensor([False, False, True])
         update = torch.Tensor([2.0, 2.0, 2.0])
 
         control = enstack, sharpening
-        stack.adjust_stack(control, batch_mask)
-        stack.push(batch_mask, test_tensor=update)
-        expected[1] = torch.tensor([2.0, 2.0, 0.0])
+        stack.adjust_stack(control)
+        stack.push(test_tensor=update)
+        expected[1] = torch.tensor([2.0, 2.0, 2.0])
         self.assertTrue(torch.all(stack.stack["test_tensor"] == expected))
-        self.assertTrue(torch.allclose(stack.pop()["test_tensor"], torch.tensor([2.0, 2.0, 0.0])))
+        self.assertTrue(torch.allclose(stack.pop()["test_tensor"], torch.tensor([2.0, 2.0, 2.0])))
 
         # Run a no op. Verify it does not change the position or contents of the stack
         control = no_op, sharpening
-        stack.adjust_stack(control, batch_mask)
+        stack.adjust_stack(control)
         self.assertTrue(torch.all(stack.stack["test_tensor"] == expected))
-        self.assertTrue(torch.allclose(stack.pop()["test_tensor"], torch.tensor([2.0, 2.0, 0.0])))
+        self.assertTrue(torch.allclose(stack.pop()["test_tensor"], torch.tensor([2.0, 2.0, 2.0])))
 
         # Run a destack. Ensure it erases. Ensure we end up pointing back at the
         # top.
         control = destack, sharpening
-        stack.adjust_stack(control, batch_mask)
+        stack.adjust_stack(control)
         expected[1] = 0.0
         self.assertTrue(torch.all(stack.stack["test_tensor"] == expected))
-        self.assertTrue(torch.allclose(stack.pop()["test_tensor"], torch.tensor([1.0, 1.0, 0.0])))
+        self.assertTrue(torch.allclose(stack.pop()["test_tensor"], torch.tensor([1.0, 1.0, 2.0])))

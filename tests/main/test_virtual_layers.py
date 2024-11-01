@@ -1322,8 +1322,9 @@ class TestLinearBankSelector(unittest.TestCase):
 
     def test_dense_mode(self):
         """Test dense mode selection without sparse criteria (top_k, top_p, rand)."""
-        selector = LinearBankSelector(d_embedding=self.d_model, bank_size=self.bank_size)
-        selection_spec, _ = selector(self.embedding)
+        selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size)
+        state = selector.create_state([self.batch_size])
+        selection_spec, _ = selector(self.embedding, state)
 
         # Verify that all banks are selected in dense mode
         self.assertEqual(selection_spec.selection_index.shape[-1], self.bank_size, "Dense mode should select all banks")
@@ -1332,7 +1333,7 @@ class TestLinearBankSelector(unittest.TestCase):
     def test_top_k_selection(self):
         """Test top-k sparse selection with k < bank_size."""
         top_k = 3
-        selector = LinearBankSelector(d_embedding=self.d_model, bank_size=self.bank_size, top_k=top_k)
+        selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size, top_k=top_k)
         selection_spec, _ = selector(self.embedding)
 
         # Ensure exactly top_k indices are selected per batch element
@@ -1344,7 +1345,7 @@ class TestLinearBankSelector(unittest.TestCase):
     def test_top_p_selection(self):
         """Test top-p (nucleus) selection with cumulative probability threshold."""
         top_p = 0.7
-        selector = LinearBankSelector(d_embedding=self.d_model, bank_size=self.bank_size, top_p=top_p)
+        selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size, top_p=top_p)
         selection_spec, _ = selector(self.embedding)
 
         # Check that the number of selected banks varies and is limited by cumulative probability
@@ -1356,7 +1357,7 @@ class TestLinearBankSelector(unittest.TestCase):
     def test_random_selection(self):
         """Test random selection mode with num < bank_size."""
         rand = 4
-        selector = LinearBankSelector(d_embedding=self.d_model, bank_size=self.bank_size, rand=rand)
+        selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size, rand=rand)
         selection_spec, _ = selector(self.embedding)
 
         # Confirm that exactly rand indices are selected randomly
@@ -1370,8 +1371,11 @@ class TestLinearBankSelector(unittest.TestCase):
         top_k = 3
         top_p = 0.5
         rand = 2
-        selector = LinearBankSelector(d_embedding=self.d_model, bank_size=self.bank_size, top_k=top_k, top_p=top_p,
+
+        selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size, top_k=top_k, top_p=top_p,
                                       rand=rand)
+
+
         selection_spec, _ = selector(self.embedding)
 
         # Check the number of selected indices, ensuring sparse integration works
@@ -1382,7 +1386,7 @@ class TestLinearBankSelector(unittest.TestCase):
         """Verify dropout does not affect mode but may introduce zeroed probabilities in sparse selections."""
         top_k = 3
         dropout_rate = 0.5
-        selector = LinearBankSelector(d_embedding=self.d_model, bank_size=self.bank_size, top_k=top_k,
+        selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size, top_k=top_k,
                                       control_dropout=dropout_rate)
         selection_spec, _ = selector(self.embedding)
 
@@ -1392,7 +1396,7 @@ class TestLinearBankSelector(unittest.TestCase):
 
     def test_dynamic_mode_adjustment(self):
         """Test dynamic adjustment of top_k, top_p, and rand values."""
-        selector = LinearBankSelector(d_embedding=self.d_model, bank_size=self.bank_size)
+        selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size)
 
         # Initially dense mode
         self.assertTrue(selector.is_dense, "Should be dense mode when all sparse options are zero")

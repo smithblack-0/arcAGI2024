@@ -4,7 +4,7 @@ from typing import TypeVar, Generic, Optional, Any, Tuple, Dict
 import torch
 from torch import nn
 
-from src.main.model.base import TensorTree
+from src.main.model.base import TensorTree, DeviceDtypeWatch
 from src.main.model.registry import InterfaceRegistry
 
 class AbstractACT(ABC):
@@ -100,15 +100,20 @@ class AbstractACTFactory(nn.Module):
     This factory pledges to create adaptive computation time
     instances when requested.
     """
+    @property
+    def device(self)->torch.device:
+        return self.metainfo.device
 
+    @property
+    def dtype(self)->torch.dtype:
+        return self.metainfo.dtype
 
     def __init__(self,
                  device: Optional[torch.device] = None,
                  dtype: Optional[torch.dtype] = None,
                  ):
         super().__init__()
-        self.device = device
-        self.dtype = dtype
+        self.metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
 
     @abstractmethod
     def forward(self,
@@ -165,12 +170,14 @@ class ACTController(nn.Module):
     def __init__(self,
                  d_model: int,
                  act_factory: AbstractACTFactory,
+                 device: torch.device,
+                 dtype: torch.dtype
                  ):
 
         super().__init__()
 
         # Setup the probability projector
-        self.probability_projector = nn.Linear(d_model, 1)
+        self.probability_projector = nn.Linear(d_model, 1, device=device, dtype=dtype)
 
         # store the factory
         self.act_factory = act_factory

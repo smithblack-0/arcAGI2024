@@ -29,6 +29,14 @@ class VirtualLinear(VirtualLayer):
     superpositions. See torch.nn.Linear for more details.
     """
 
+    @property
+    def device(self) -> torch.device:
+        return self.weights.device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.weights.dtype
+
     def __init__(self,
                  in_features: int,
                  out_features: int,
@@ -103,6 +111,13 @@ class VirtualMakeHeads(VirtualLayer):
         num_banks (int): Number of virtual banks for layer superposition.
     """
 
+    @property
+    def device(self) -> torch.device:
+        return self.projection.device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.projection.dtype
     def __init__(self,
                  d_model: int,
                  d_head: int,
@@ -156,6 +171,13 @@ class VirtualMergeHeads(VirtualLayer):
         num_banks (int): Number of virtual banks for layer superposition.
     """
 
+    @property
+    def device(self) -> torch.device:
+        return self.projection.device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.projection.dtype
     def __init__(self,
                  d_model: int,
                  d_head: int,
@@ -198,6 +220,14 @@ class VirtualFeedforward(VirtualLayer):
     exact configuration. Consists of two levels with
     an activation in between.
     """
+
+    @property
+    def device(self) -> torch.device:
+        return self.ff1.device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.ff1.dtype
     def __init__(self,
                  d_model: int,
                  d_hidden: int,
@@ -234,6 +264,13 @@ class VirtualAdvancedLinear(VirtualLayer):
     shape as target input, and arbitrary
     shape as output
     """
+
+    @property
+    def device(self) -> torch.device:
+        return self.projector.device
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.projector.dtype
     def __init__(self,
                  in_shape: Tuple[int, ...],
                  out_shape: Tuple[int, ...],

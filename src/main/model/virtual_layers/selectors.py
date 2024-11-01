@@ -3,8 +3,8 @@ from typing import Optional, Any, Tuple, Dict
 
 import torch
 from torch import nn
-
-from src.main.model.virtual_layers import SelectionSpec, DropoutLogits
+from src.main.model.base import DeviceDtypeWatch, TensorTree
+from src.main.model.virtual_layers import SelectionSpec, DropoutLogits, virtual_state_scatter
 from src.main.model import registry
 
 # Some general helper layers. Maybe I should put these elsewhere?
@@ -254,11 +254,24 @@ class AbstractBankSelector(nn.Module, ABC):
         probabilities = torch.softmax(final_logits, dim=-1)
         return SelectionSpec(final_index, probabilities)
 
+    @property
+    def device(self) -> torch.device:
+        return self.__metainfo.device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.__metainfo.dtype
+
+
     def __init__(self,
+                 d_model: int,
+                 bank_size: int,
                  top_k: Optional[int] = None,
                  top_p: Optional[float] = None,
                  rand: Optional[int] = None,
-                 control_dropout: Optional[float] = None
+                 control_dropout: Optional[float] = None,
+                 device: Optional[torch.device] = None,
+                 dtype: Optional[torch.dtype] = None,
                  ):
         """
         The abstract bank selection process cna be defined here
@@ -268,10 +281,14 @@ class AbstractBankSelector(nn.Module, ABC):
         Do note that not providing any specification for k, p, or rand puts
         us in dense mode, in which we do not reduce at all.
 
+        :param d_model: Dimension of what feedforward embeddign is invoked with
+        :param bank_size: How big the virtual layer bank is.
         :param top_k: The top k logits are included.
         :param top_p: Nucleus sampling is done to get the top p logits
         :param rand: This many logits are randomly selected
         :param control_dropout: The dropout rate to apply to the logits
+        :param device: The device to run the model on.
+        :param dtype: The dtype to run the model on.
         """
         super().__init__()
 
@@ -286,21 +303,37 @@ class AbstractBankSelector(nn.Module, ABC):
             control_dropout = 0.0
 
         # Setup
+        self.d_model = d_model
+        self.bank_size = bank_size
         self.top_k = top_k
         self.top_p = top_p
         self.rand = rand
         self.dropout = DropoutLogits(control_dropout)
-
+        self.__metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
     @abstractmethod
-    def forward(self, embedding: torch.Tensor, state: Optional[torch.Tensor]) -> Tuple[SelectionSpec, Any]:
+    def create_state(self, batch_shape: torch.Tensor)->Any:
+        """
+        Creates any required recurrent state.
+        :param batch_shape: The batch shape under consideration
+        :return: The setup recurrent state
+        """
+    @abstractmethod
+    def get_statistics(self, state: Any)->Dict[str, torch.Tensor]:
+        """
+        Creates a collection of batch selector statistics.
+        :param state: The state under consideration
+        :return: The statistics to extract.
+        """
+    @abstractmethod
+    def forward(self, embedding: torch.Tensor, state: Any) -> Tuple[SelectionSpec, Any]:
         """
         Abstract definition of the forward mechanism. This method accepts arbitrary content
         (args and kwargs) and returns a `SelectionSpec` along with any updated recurrent state.
 
         ---- Parameters ----
 
-        :param args: Positional arguments to be used in the concrete implementation.
-        :param kwargs: Keyword arguments to be used in the concrete implementation.
+        :param embedding: The embedding to use when selecting banks
+        :param state: Any relevant recurrent state.
         :return: A tuple containing:
             - `SelectionSpec`: A structure that defines the selected bank indices and the associated probabilities.
             - `state`: The recurrent state, passed along for future calls. Will be invoked as kwargs
@@ -331,28 +364,58 @@ class LinearBankSelector(AbstractBankSelector):
     """
 
     def __init__(self,
-                 d_embedding: int,
+                 d_model: int,
                  bank_size: int,
                  top_k: Optional[int] = None,
                  top_p: Optional[float] = None,
                  rand: Optional[int] = None,
-                 control_dropout: Optional[float] = None
+                 control_dropout: Optional[float] = None,
+                 device: Optional[torch.device] = None,
+                 dtype: Optional[torch.dtype] = None,
                  ):
         """
         Initializes the `LinearBankSelector` with the given embedding size, bank size,
         and selection configuration.
 
-        :param d_embedding: The size of the embeddings that will be provided.
+        :param d_model: The size of the embeddings that will be provided.
         :param bank_size: The size of the bank selection to create.
         :param top_k: The number of top logits selected (optional, defaults to 0).
         :param top_p: The probability mass to select by (optional, defaults to 0.0).
         :param rand: The number of random logits to include (optional, defaults to 0).
         :param control_dropout: Logit dropout rate (optional, defaults to 0.0).
+        :param device: The device to run the model on.
+        :param dtype: The dtype to run the model on.
         """
-        super().__init__(top_k, top_p, rand, control_dropout)
-        self.projector = nn.Linear(d_embedding, bank_size)
+        super().__init__(d_model,
+                         bank_size,
+                         top_k,
+                         top_p,
+                         rand,
+                         control_dropout,
+                         device=device,
+                         dtype=dtype)
+        self.projector = nn.Linear(d_model, bank_size, device=device, dtype=dtype)
 
-    def forward(self, embedding: torch.Tensor, state: None) -> Tuple[SelectionSpec, None]:
+    def create_state(self, batch_shape: torch.Tensor) ->torch.Tensor:
+        """
+        We simply create an accumulator to hold probability
+        mass regarding selections.
+        :param batch_shape: The batch shape
+        :return: The statistic accumulator
+        """
+        return torch.zeros([*batch_shape, self.bank_size], dtype=self.dtype, device=self.device)
+
+    def get_statistics(self, state: torch.Tensor)->Dict[str, torch.Tensor]:
+        """
+        We return the accumulator we have been working with
+        :param state: The state
+        :return: The state
+        """
+        statistics = {}
+        statistics["cumulative_probability_mass"] = state
+        return statistics
+
+    def forward(self, embedding: torch.Tensor, state: torch.Tensor) -> Tuple[SelectionSpec, torch.Tensor]:
         """
         Generates logits for selecting parameter banks based on the provided embedding
         and processes them into a `SelectionSpec` using the configured sparse selection
@@ -364,8 +427,21 @@ class LinearBankSelector(AbstractBankSelector):
             - The `SelectionSpec` containing the selected indices and probabilities.
             - `None` as there is no recurrent state in this implementation.
         """
+        # Perform selection process
         logits = self.projector(embedding)
-        return self.select_logits(logits), None
+        selection = self.select_logits(logits)
+
+        # Perform statistics process. Create probabilities, and
+        # add them to accumulator
+        probabilities = torch.zeros_like(state)
+        probabilities = virtual_state_scatter(probabilities,
+                                              torch.ones_like(selection.selection_probabilities),
+                                              selection,
+                                              dim=-1,
+                                              superposition=False
+                                              )
+        state = state + probabilities
+        return selection, state
 
 @selector_registry.register("PseudoMarkovBankSelector")
 class PseudoMarkovBankSelector(AbstractBankSelector):
@@ -398,27 +474,36 @@ class PseudoMarkovBankSelector(AbstractBankSelector):
     """
 
     def __init__(self,
-                 d_embedding: int,
+                 d_model: int,
                  bank_size: int,
                  top_k: Optional[int] = None,
                  top_p: Optional[float] = None,
                  rand: Optional[int] = None,
-                 control_dropout: Optional[float] = None
+                 control_dropout: Optional[float] = None,
+                 device: Optional[torch.device] = None,
+                 dtype: Optional[torch.dtype] = None,
                  ):
         """
         Initializes the layer with the given embedding size, bank size,
         and selection configuration.
 
-        :param d_embedding: The size of the embeddings that will be provided.
+        :param d_model: The size of the embeddings that will be provided.
         :param bank_size: The size of the bank selection to create.
         :param top_k: The number of top logits selected (optional, defaults to 0).
         :param top_p: The probability mass to select by (optional, defaults to 0.0).
         :param rand: The number of random logits to include (optional, defaults to 0).
         :param control_dropout: Logit dropout rate (optional, defaults to 0.0).
+        :param device: The device to run the model on.
+        :param dtype: The dtype to run the model on.
         """
-        super().__init__(top_k, top_p, rand, control_dropout)
-        self.d_model = d_embedding
-        self.bank_size = bank_size
+        super().__init__(d_model,
+                         bank_size,
+                         top_k,
+                         top_p,
+                         rand,
+                         control_dropout,
+                         device=device,
+                         dtype=dtype)
 
         # This bears a little explanation. It turns out
         # running a probability distribution through a linear
@@ -427,13 +512,30 @@ class PseudoMarkovBankSelector(AbstractBankSelector):
         # can just use a linear projection for that.
         #
         # The embedding projector just works like normal, though.
-        self.projector = nn.Linear(d_embedding, bank_size)
-        self.markov_biases = nn.Linear(bank_size, bank_size)
+        self.projector = nn.Linear(d_model, bank_size, device=device, dtype=dtype)
+        self.markov_biases = nn.Linear(bank_size, bank_size, device=device, dtype=dtype)
 
+    def create_state(self, batch_shape: torch.Tensor) ->Tuple[torch.Tensor, torch.Tensor]:
+        """
+        We setup the probabilities, and start us at the
+        first position.
+        :param batch_shape: The batch shape
+        :return: The setup markov state
+        """
+        state = torch.zeros([*batch_shape, self.bank_size], device=self.device, dtype=self.dtype)
+        state[..., 0] = 1.0
+
+        probabilities = torch.zeros_like(state)
+        return state, probabilities
+
+    def get_statistics(self, state: Tuple[torch.Tensor, torch.Tensor]) ->Dict[str, torch.Tensor]:
+        statistics = {}
+        statistics["cumulative_probability_mass"] = state[1]
+        return statistics
     def forward(self,
                 tensor: torch.Tensor,
-                state: Optional[torch.Tensor] = None
-                ) -> Tuple[SelectionSpec, Dict[str, torch.Tensor]]:
+                state: Tuple[torch.Tensor, torch.Tensor]
+                ) -> Tuple[SelectionSpec, torch.Tensor]:
         """
         Runs the forward method for the pseudo markov process
         :param tensor: The tensor to build local influences from. Shape (..., d_model)
@@ -444,15 +546,10 @@ class PseudoMarkovBankSelector(AbstractBankSelector):
               Shape (..., bank_size).
         :return:
             - The SelectionSpec
-            - The dict with state in it
+            - The markov probabilities
         """
-
-        # Standardize data. If state was never setup,
-        # it becomes a probability distribution set to
-        # 1 at the first element
-        if state is None:
-            state = torch.zeros([*tensor.shape[:-1], self.bank_size], device=tensor.device, dtype=tensor.dtype)
-            state[..., 0] = 1.0
+        # unpack
+        state, cumulative_statistic = state
 
         # Compute the logits. Then combine them with the transition biases.
         # Some options will likely become impossible due to the transition
@@ -461,6 +558,12 @@ class PseudoMarkovBankSelector(AbstractBankSelector):
         logits = self.projector(tensor)
         logits = logits + self.markov_biases(state)
 
-        # Activate and store the state. Get the selection. Return results
-        state = {"state": torch.softmax(logits, dim=-1)}
-        return self.select_logits(logits), state
+        # Activate and store the state. Get the selection.=
+        selection = self.select_logits(logits)
+        probabilities = torch.zeros_like(cumulative_statistic)
+        probabilities[selection.selection_index] = selection.selection_probabilities
+        cumulative_statistic += probabilities
+
+        # Return
+
+        return  selection, (probabilities, cumulative_statistic)

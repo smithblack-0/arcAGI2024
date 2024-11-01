@@ -3,7 +3,7 @@ from typing import Any, Tuple, Optional, Dict, Union
 import torch
 from torch import nn
 from torch.nn import functional as F
-from src.main.model.base import TensorTree, parallel_pytree_map, DropoutLogits
+from src.main.model.base import TensorTree, parallel_pytree_map, DropoutLogits, DeviceDtypeWatch
 from src.main.model.computation_support_stack.abstract import (stack_controller_registry,
                                                                AbstractSupportStack,
                                                                AbstractControlGates,
@@ -46,6 +46,7 @@ class PointerSuperpositionStack(AbstractSupportStack):
         self.defaults = defaults
         self.stack = stack
 
+
     def save_state(self) -> Tuple[TensorTree, Optional[Any]]:
         """
         Saves the state to be in terms of a tensor tree
@@ -65,7 +66,7 @@ class PointerSuperpositionStack(AbstractSupportStack):
             self.defaults,
             self.stack
         )
-        save_package = parallel_pytree_map(lambda x : x.movedim(0, -1), save_package)
+        save_package = parallel_pytree_map(lambda x : x.movedim(0, -1).clone(), save_package)
         return save_package, None
 
     @classmethod
@@ -95,7 +96,6 @@ class PointerSuperpositionStack(AbstractSupportStack):
 
     def adjust_stack(self,
                      controls: Tuple[torch.Tensor, torch.Tensor],
-                     batch_mask: torch.Tensor,
                      ) -> torch.Tensor:
         """
         Adjust the stack using information extracted from the
@@ -105,7 +105,6 @@ class PointerSuperpositionStack(AbstractSupportStack):
         :param controls: The control tensors
             - Action probabiilities of shape (..., 3)
             - sharpening factor of shape (..., 1)
-        :param batch_mask: Indicator for whether to update the stack and statistics for this batch.
         """
         actions_probabilities, sharpening = controls
 
@@ -157,19 +156,15 @@ class PointerSuperpositionStack(AbstractSupportStack):
 
             # Set up all broadcasting
             sub_erase_probabilities = erasure_probabilities
-            mask_case = batch_mask
             while sub_erase_probabilities.dim() < stack_case.dim():
                 sub_erase_probabilities = sub_erase_probabilities.unsqueeze(-1)
-                mask_case = mask_case.unsqueeze(-1)
 
             # Perform the interpolation, and return the update.
-            # Do not update where masked.
             update = stack_case * (1 - sub_erase_probabilities) + default_case * sub_erase_probabilities
-            return torch.where(~mask_case, update, stack_case)
-
+            return update
         # Compute the updated statistics
         updated_prob_mass = self.pointer_prob_masses + new_pointers
-        self.pointer_prob_masses = torch.where(~batch_mask, updated_prob_mass, self.pointer_prob_masses)
+        self.pointer_prob_masses = updated_prob_mass
 
         # Commit results, and return.
         self.stack = parallel_pytree_map(erase_stack, self.stack, self.defaults)
@@ -193,7 +188,7 @@ class PointerSuperpositionStack(AbstractSupportStack):
             return parallel_pytree_map(weighted_sum, self.stack[name])
         return parallel_pytree_map(weighted_sum, self.stack)
 
-    def push(self, batch_mask: Optional[torch.Tensor], **states):
+    def push(self, **states):
         """
         Sets the current stack level using an interpolation of probabilities.
         :param batch_mask: Tensor that indicates whether to update the stack for this batch.
@@ -215,18 +210,16 @@ class PointerSuperpositionStack(AbstractSupportStack):
             # the mask case to match.
 
             tensor_case = tensor_case.unsqueeze(0)
-            mask_case = batch_mask
             pointers = self.pointers
             while pointers.dim() < tensor_case.dim():
                 pointers = pointers.unsqueeze(-1)
-                mask_case = mask_case.unsqueeze(-1)
 
             # Perform the interpolation, and only return an update where
             # valid
             update = stack_case * (1 - pointers) + tensor_case * pointers
-            return torch.where(~mask_case, update, stack_case)
+            return update
 
-        # Incorporate update. Do not change masked
+        # Incorporate update.
         self.stack = parallel_pytree_map(update_stack, self.stack, states)
 
 
@@ -243,14 +236,14 @@ class GateControls(AbstractControlGates):
                  device: torch.device,
                  control_dropout: float
                  ):
-        super().__init__(d_model)
+        super().__init__(d_model, device=device, dtype=dtype)
 
         # Setup projectors
         self.action_projector = nn.Linear(d_model, 3, dtype=dtype, device=device)
         self.focus_projector = nn.Linear(d_model, 1, dtype=dtype, device=device)
 
         # Setup dropout
-        self.dropout_logits =DropoutLogits(control_dropout)
+        self.dropout_logits = DropoutLogits(control_dropout)
 
     def forward(self, control_embedding: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -287,10 +280,6 @@ class StackFactory(AbstractStackFactory):
                  ):
 
         super().__init__(dtype, device)
-
-        # Store information
-        self.dtype = dtype
-        self.device = device
     def forward(self,
                 batch_shape: BatchShapeType,
                 stack_depth: int,
