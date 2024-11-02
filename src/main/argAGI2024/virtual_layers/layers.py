@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from src.main.model.virtual_layers import VirtualLayer, VirtualParameter, SelectionSpec
+from .core import VirtualLayer, VirtualParameter, SelectionSpec
 
 ###
 # Write code for a few different virtual layers, and their

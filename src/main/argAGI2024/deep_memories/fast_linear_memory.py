@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from torch import nn
 from torch.nn import functional as F
 
-from src.main.model.base import TensorTree, DeviceDtypeWatch
-from src.main.model.deep_memories.abstract import DeepMemoryUnit, deep_memory_registry, AbstractMemoryState
-from src.main.model.virtual_layers import (DropoutLogits, VirtualLinear, VirtualAdvancedLinear,
+from ..base import TensorTree, DeviceDtypeWatch
+from .abstract import DeepMemoryUnit, deep_memory_registry, AbstractMemoryState
+from ..virtual_layers import (DropoutLogits, VirtualLinear, VirtualAdvancedLinear,
                                            VirtualMakeHeads, VirtualMergeHeads, AbstractBankSelector,
                                            virtual_state_select, virtual_state_scatter, VirtualParameter,
                                            SelectionSpec)
@@ -259,7 +259,7 @@ class ReadMemory(nn.Module):
                  device: torch.device
                  ):
         """
-        :param d_model: The size of the core model dimensions
+        :param d_model: The size of the core argAGI2024 dimensions
         :param d_address: The size of the address logits to assign to each memory slot
         :param d_memory: The storage available in each memory slot.
         :param num_read_heads: The number of heads to read with at once
@@ -360,7 +360,7 @@ class WriteMemory(nn.Module):
        However, we do something more advanced.
     3: Relevancy filtering and gatekeeping. Based on the key, we create write and erase probabilities.
        Based on some additional clever code, we place limits on how strong an update can be, and force
-       a little bit of erasure to happen whenever writing. Together these allow the model to flexibly store
+       a little bit of erasure to happen whenever writing. Together these allow the argAGI2024 to flexibly store
        information while not overflowing the memory.
     4: Interpolation. Using computed probabilities, a weighed combination of the original and update state are
        stored.
@@ -423,7 +423,7 @@ class WriteMemory(nn.Module):
                                            key: torch.Tensor
                                            )->Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Creates the raw probabilities that will be used by the model
+        Creates the raw probabilities that will be used by the argAGI2024
         :param key: The moved key. Shape (..., num_memories, d_address)
         :return:
         - The write probability. Shape (..., num_memories, 1). This being zero means no change
@@ -500,7 +500,7 @@ class WriteMemory(nn.Module):
         # Observe that with minimal erase probability, the
         # max ensures that at 100% write, we cannot go below
         # a certain level of erasure. This is intentional,
-        # and ensures the model will accumulate a weighted average.
+        # and ensures the argAGI2024 will accumulate a weighted average.
         # (..., num_memories, d_address)
 
         erase_factor = write_probabilities*torch.max(erase_probability, interpolation_factor) #
@@ -531,7 +531,7 @@ class FastLinearMemory(DeepMemoryUnit):
     Gates are used to control when and how updates happen. However,
     some degree of update is forced to happen somewhere.
 
-    Internally, d_addresses gives the model things
+    Internally, d_addresses gives the argAGI2024 things
     it can attempt to find using address dot product
     attention, while d_memory is what can be stored in
     that space. Generally, d_address should be much less that
@@ -565,7 +565,7 @@ class FastLinearMemory(DeepMemoryUnit):
                 device: Optional[torch.device] = None,
                 ):
         """
-        :param d_model: The model dimensionality
+        :param d_model: The argAGI2024 dimensionality
         :param d_address: The address dimensionality. Should generally be much smaller. Think d_head
         :param d_memory: The memory storage space. Can be quite a bit larger.
         :param num_read_heads: The number of read heads. 4-8 is fine.

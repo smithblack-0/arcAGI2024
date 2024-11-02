@@ -30,7 +30,7 @@ class AbstractComputationalCore(nn.Module, ABC):
     within an ACT loop, and will be invoked
     multiple times, hence the virtual layers.
 
-    This contains a recurrent model, that is
+    This contains a recurrent argAGI2024, that is
     expected to
     """
     @property
@@ -84,7 +84,7 @@ class CoreAdapter:
     the bottleneck process.
 
     Generally, for reasons of computational efficiency,
-    the core model should have a considerably reduced
+    the core argAGI2024 should have a considerably reduced
     computational width to the embedding size, and
     is convered between by a bottleneck process.
     """
@@ -105,6 +105,7 @@ class CoreAdapter:
                             dtype: torch.dtype,
                             control_dropout: float,
                             selector_varient: str,
+                            dense_mode: bool ,
                             **selector_details: Dict[str, Any]
                             )->'CoreAdapter':
         """
@@ -128,13 +129,6 @@ class CoreAdapter:
             - Some implementations may require more.
         :return: A setup core adapter
         """
-        if len(selector_details) == 0:
-            msg = """
-            No selector details were provided. This places model in dense mode, which 
-            is not recommended.
-            """
-            msg = textwrap.dedent(msg)
-            warnings.warn(msg)
 
         bottleneck = VirtualLinear(d_embedding, d_core, bank_size, dtype=dtype, device=device)
         unbottleneck = VirtualLinear(d_core, d_embedding, bank_size, dtype=dtype, device=device)
@@ -144,6 +138,7 @@ class CoreAdapter:
                                            bank_size = bank_size,
                                            dtype=dtype,
                                            device=device,
+                                           dense_mode=dense_mode,
                                            **selector_details
                                            )
         return cls(bottleneck, unbottleneck, selector)
@@ -179,7 +174,7 @@ class CoreAdapter:
             raise ValueError(msg)
         if bottleneck_projector.out_features != unbottleneck_projector.in_features:
             msg = f"""
-            Bottleneck and unbottleneck projectors do not interface with the same d_core model
+            Bottleneck and unbottleneck projectors do not interface with the same d_core argAGI2024
             width. 
             
             The bottleneck projector interfaced with a width of: {bottleneck_projector.out_features}.
@@ -217,7 +212,7 @@ class CoreAdapter:
     def get_statistics(self, state: Any)->Dict[str, torch.Tensor]:
         """
         Gets a set of statistics based on the recurrent state related
-        to how the model is processing things
+        to how the argAGI2024 is processing things
         :param state: The state to examine
         :return: The gathered statistics
         """
@@ -248,7 +243,7 @@ class CoreAdapter:
 
     def bottleneck(self, embedding: torch.Tensor, selection: SelectionSpec)->torch.Tensor:
         """
-        Reduces the embedding down to the model core dimensions.
+        Reduces the embedding down to the argAGI2024 core dimensions.
         :param embedding: The embedding to reduce with. (..., d_embedding)
         :param selection: The layer selection
         :return: The tensor in the d_core dimensionality. (..., d_core)
@@ -266,7 +261,7 @@ class CoreAdapter:
 
 class Model(nn.Module):
     """
-    The recurrent portion of the model.
+    The recurrent portion of the argAGI2024.
     """
     def create_state(self, batch_shape: torch.Size)->Tuple[Any, Any]:
         """
@@ -301,7 +296,7 @@ class Model(nn.Module):
                 state: Tuple[Any, Any]
                 )->Tuple[torch.Tensor, Any, Dict[str, torch.Tensor]]:
         """
-        Core reccurrent step of the model. Accepts only recurrenly
+        Core reccurrent step of the argAGI2024. Accepts only recurrenly
         specified tensor collections. Will be invoked over and over again.
         :param embedding: The recurrent embedding to process. Shape (..., d_embedding)
         :param state: The recurrent state.
@@ -310,7 +305,7 @@ class Model(nn.Module):
         - The new recurrent state. Shape (..., d_embedding)
         - The act statistics.
         """
-        # Unbind and setup the model for processing. This includes
+        # Unbind and setup the argAGI2024 for processing. This includes
         # taking apart the state info, and setting up the act mechanism.
         batch_shape = embedding.shape[:-1]
         adapter_state, core_state = state
@@ -365,7 +360,8 @@ class Model(nn.Module):
         # Run chunk
         response_embeddings = []
         act_accumulator = []
-        for recurrent_embedding in chunk.unbind(-2):
+        for i, recurrent_embedding in enumerate(chunk.unbind(-2)):
+            print("item in chunk: %s" % i )
             response, state, act_statistics = self.recurrent_core(recurrent_embedding, state)
             response_embeddings.append(response)
             act_accumulator.append(act_statistics)
@@ -392,7 +388,7 @@ class Model(nn.Module):
                 state: Optional[Any] = None,
                 )->Tuple[torch.Tensor, Any, Dict[str, Any]]:
         """
-        Forward method for the model core
+        Forward method for the argAGI2024 core
         :param embeddings: The recurrent embedding to process. Shape (..., d_embedding)
         :param state: The recurrent state.
         :return:
@@ -412,7 +408,8 @@ class Model(nn.Module):
         chunk_statistics = []
         embedding_responses = []
         chunks = torch.split(embeddings, self.chunk_size, dim=-2)
-        for chunk in chunks:
+        for i, chunk in enumerate(chunks):
+            print("chunk %s" % i)
             embedding_response, state, statistics = checkpoint.checkpoint(self.run_chunk,
                                                                           chunk,
                                                                           state,

@@ -7,13 +7,13 @@ from torch import nn
 # Registry imports
 from typing import Tuple, Any, Optional, Dict
 from abc import ABC, abstractmethod
-from src.main.model.virtual_layers import VirtualFeedforward, AbstractBankSelector, selector_registry, VirtualLinear, \
+from ..virtual_layers import VirtualFeedforward, AbstractBankSelector, selector_registry, VirtualLinear, \
     SelectionSpec
-from src.main.model.computation_support_stack import (stack_controller_registry,
+from ..computation_support_stack import (stack_controller_registry,
                                                       AbstractStackController,
                                                       AbstractSupportStack,)
-from src.main.model.deep_memories import deep_memory_registry, DeepMemoryUnit, AbstractMemoryState
-from src.main.model.adaptive_computation_time import act_controller_registry
+from ..deep_memories import deep_memory_registry, DeepMemoryUnit, AbstractMemoryState
+from ..adaptive_computation_time import act_controller_registry
 
 class ComputationalCore(AbstractComputationalCore):
     """
@@ -121,6 +121,7 @@ def build_recurrent_decoder_v1(
         layer_controller_details: Dict[str, Any],
 
         # Default dtype, device
+        dense_mode: bool = True,
         dtype: torch.dtype = torch.float32,
         device: torch.device = torch.device('cpu')
         )->Model:
@@ -129,7 +130,7 @@ def build_recurrent_decoder_v1(
 
     Universal:
     :param d_embedding: The width of incoming embeddings
-    :param d_core: The width of the model core. usually much less
+    :param d_core: The width of the argAGI2024 core. usually much less
     :param bank_size: How many virtual layers to use
     :param stack_depth: How deep the stack should be
     :param chunk_size: Size of the recurrent chunks. Influences how much memory
@@ -149,7 +150,7 @@ def build_recurrent_decoder_v1(
     Final
     :param dtype: The dtype
     :param device: The device
-    :return: A setup model
+    :return: A setup argAGI2024
     """
 
     # Create the stack controller
@@ -188,7 +189,8 @@ def build_recurrent_decoder_v1(
                                                 dtype=dtype,
                                                 control_dropout=control_dropout,
                                                 selector_varient=layer_controller_variant,
-                                                selector_details=layer_controller_details)
+                                                dense_mode=dense_mode,
+                                                **layer_controller_details)
 
     # Create the act controller
     act_controller = act_controller_registry.build("Default",
@@ -197,7 +199,7 @@ def build_recurrent_decoder_v1(
                                                    dtype=dtype,
                                                    threshold=0.99,
                                                    )
-    # Create the model
+    # Create the argAGI2024
     return Model(act_controller,
                  adapter,
                  comp_core,

@@ -3,13 +3,14 @@ from typing import Any, Tuple, Optional, Dict, Union
 import torch
 from torch import nn
 from torch.nn import functional as F
-from src.main.model.base import TensorTree, parallel_pytree_map, DropoutLogits, DeviceDtypeWatch
-from src.main.model.computation_support_stack.abstract import (stack_controller_registry,
-                                                               AbstractSupportStack,
-                                                               AbstractControlGates,
-                                                               AbstractStackController,
-                                                               AbstractStackFactory,
-                                                               BatchShapeType)
+from ..base import TensorTree, parallel_pytree_map, DropoutLogits, DeviceDtypeWatch
+from .abstract import (stack_controller_registry,
+                       AbstractSupportStack,
+                       AbstractControlGates,
+                       AbstractStackController,
+                       AbstractStackFactory,
+                       BatchShapeType)
+
 
 class PointerSuperpositionStack(AbstractSupportStack):
     """
@@ -18,7 +19,7 @@ class PointerSuperpositionStack(AbstractSupportStack):
     weighted by probabilistic pointers, allowing smooth transitions between subroutine states.
 
     The stack accumulates decisions about enstack (push), destack (pop), or no-op at each level based on
-    action probabilities provided by the external model. It tracks statistics on these transitions over
+    action probabilities provided by the external argAGI2024. It tracks statistics on these transitions over
     time for further analysis. Multiple things can be tracked in parallel
 
     Updates for stack adjustment, statistics accumulation, and embeddings are controlled using a `batch_mask`.
@@ -26,6 +27,7 @@ class PointerSuperpositionStack(AbstractSupportStack):
     that batch, while a value of `0` allows updates. This is useful for controlling when updates occur
     during adaptive computation, especially when some batches need to be skipped.
     """
+
     def __init__(self,
                  pointers: torch.Tensor,
                  pointer_prob_mass: torch.Tensor,
@@ -46,7 +48,6 @@ class PointerSuperpositionStack(AbstractSupportStack):
         self.defaults = defaults
         self.stack = stack
 
-
     def save_state(self) -> Tuple[TensorTree, Optional[Any]]:
         """
         Saves the state to be in terms of a tensor tree
@@ -66,7 +67,7 @@ class PointerSuperpositionStack(AbstractSupportStack):
             self.defaults,
             self.stack
         )
-        save_package = parallel_pytree_map(lambda x : x.movedim(0, -1).clone(), save_package)
+        save_package = parallel_pytree_map(lambda x: x.movedim(0, -1).clone(), save_package)
         return save_package, None
 
     @classmethod
@@ -84,6 +85,7 @@ class PointerSuperpositionStack(AbstractSupportStack):
 
         save_package = parallel_pytree_map(lambda x: x.movedim(-1, 0), pytree)
         return cls(*save_package)
+
     def get_statistics(self) -> Dict[str, torch.Tensor]:
         """
         Returns some important tensor statistics.
@@ -162,6 +164,7 @@ class PointerSuperpositionStack(AbstractSupportStack):
             # Perform the interpolation, and return the update.
             update = stack_case * (1 - sub_erase_probabilities) + default_case * sub_erase_probabilities
             return update
+
         # Compute the updated statistics
         updated_prob_mass = self.pointer_prob_masses + new_pointers
         self.pointer_prob_masses = updated_prob_mass
@@ -170,7 +173,7 @@ class PointerSuperpositionStack(AbstractSupportStack):
         self.stack = parallel_pytree_map(erase_stack, self.stack, self.defaults)
         self.pointers = new_pointers
 
-    def pop(self, name: Optional[str] = None) -> Union[Dict[str, TensorTree], TensorTree] :
+    def pop(self, name: Optional[str] = None) -> Union[Dict[str, TensorTree], TensorTree]:
         """
         Get the current expression of the stack by weighting with probabilistic pointers.
         :param name: If provided, only the indicated
@@ -178,12 +181,14 @@ class PointerSuperpositionStack(AbstractSupportStack):
         :return: Storage consisting of the expressed stack contents.
                  Will be either all the kwargs, or onlu the name indicated
         """
+
         def weighted_sum(stack_case: torch.Tensor) -> torch.Tensor:
             pointers = self.pointers
             while pointers.dim() < stack_case.dim():
                 pointers = pointers.unsqueeze(-1)
             weighted_stack = stack_case * pointers
             return weighted_stack.sum(dim=0)
+
         if name is not None:
             return parallel_pytree_map(weighted_sum, self.stack[name])
         return parallel_pytree_map(weighted_sum, self.stack)
@@ -223,11 +228,10 @@ class PointerSuperpositionStack(AbstractSupportStack):
         self.stack = parallel_pytree_map(update_stack, self.stack, states)
 
 
-
 class GateControls(AbstractControlGates):
     """
     Computes the control features
-    needed to implement the model.
+    needed to implement the argAGI2024.
     """
 
     def __init__(self,
@@ -278,8 +282,8 @@ class StackFactory(AbstractStackFactory):
                  dtype: Optional[torch.dtype] = None,
                  device: Optional[torch.device] = None
                  ):
-
         super().__init__(dtype, device)
+
     def forward(self,
                 batch_shape: BatchShapeType,
                 stack_depth: int,
@@ -298,9 +302,9 @@ class StackFactory(AbstractStackFactory):
         # and the pointer probability masses
 
         pointers = torch.zeros([stack_depth, *batch_shape],
-                                    device=self.device, dtype=self.dtype)
+                               device=self.device, dtype=self.dtype)
         pointer_prob_masses = torch.zeros([stack_depth, *batch_shape],
-                                               device=self.device, dtype=self.dtype)
+                                          device=self.device, dtype=self.dtype)
         pointers[0] = 1.0
 
         # The stack, and the default values, also need to be setup.
@@ -314,6 +318,7 @@ class StackFactory(AbstractStackFactory):
         stack = parallel_pytree_map(lambda x: x.clone(), defaults)
         return PointerSuperpositionStack(pointers, pointer_prob_masses, stack, defaults)
 
+
 @stack_controller_registry.register("Default")
 class StackController(AbstractStackController):
     """
@@ -321,6 +326,7 @@ class StackController(AbstractStackController):
     setup and usage mechanisms. We extend initialization
     to make sure we can create the needed factories
     """
+
     def __init__(self,
                  d_model: int,
                  dtype: torch.dtype,
@@ -330,4 +336,3 @@ class StackController(AbstractStackController):
         stack_factory = StackFactory(dtype, device)
         gate_controls = GateControls(d_model, dtype, device, control_dropout)
         super().__init__(gate_controls, stack_factory)
-

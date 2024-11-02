@@ -1,8 +1,8 @@
 import unittest
 import torch
-from src.main.model.deep_memories.fast_linear_memory import (CreateState, LinearAttention,
-                                                             ReadMemory, WriteMemory, FastLinearMemory)
-from src.main.model.virtual_layers import SelectionSpec
+from src.main.argAGI2024.deep_memories.fast_linear_memory import (CreateState, LinearAttention,
+                                                                  ReadMemory, WriteMemory, FastLinearMemory)
+from src.main.argAGI2024.virtual_layers import SelectionSpec
 
 class TestCreateState(unittest.TestCase):
 

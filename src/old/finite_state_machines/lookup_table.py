@@ -60,7 +60,7 @@ def create_voculary_length_fsm_lookup_table(
     table = CBIndirectionLookup(input_spec, output_spec)
 
     # Bind mode select vocabulary size to it. There will be num_mode vocabulary
-    # options, allowing the model to choose the generative mode.
+    # options, allowing the argAGI2024 to choose the generative mode.
 
     num_modes = len(modes)
     table.register(input_pattern={"state" : states["mode_select"], "mode" : 0, "submode": 0},
@@ -70,7 +70,7 @@ def create_voculary_length_fsm_lookup_table(
     for mode in modes:
 
         # Bind the shape select vocabulary to the lookup table. This will later allow the
-        # model to predict it's block size. The various submodes will be advanced through
+        # argAGI2024 to predict it's block size. The various submodes will be advanced through
         # by other finite state processes.
         shape_select = states["shape_select"]
         for i, dim in enumerate(shapes_vocab_lengths[mode]):

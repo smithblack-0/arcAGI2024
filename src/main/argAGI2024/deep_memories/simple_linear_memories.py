@@ -5,12 +5,12 @@ from dataclasses import dataclass
 from torch import nn
 from torch.nn import functional as F
 
-from src.main.model.base import TensorTree
-from src.main.model.deep_memories.abstract import DeepMemoryUnit, deep_memory_registry, AbstractMemoryState
-from src.main.model.virtual_layers import (DropoutLogits, VirtualLinear,
-                                           VirtualMakeHeads, VirtualMergeHeads,
+from src.main.argAGI2024.base import TensorTree
+from src.main.argAGI2024.deep_memories.abstract import DeepMemoryUnit, deep_memory_registry, AbstractMemoryState
+from src.main.argAGI2024.virtual_layers import (DropoutLogits, VirtualLinear,
+                                                VirtualMakeHeads, VirtualMergeHeads,
 
-                                           SelectionSpec)
+                                                SelectionSpec)
 
 
 # Define the memory state
@@ -324,7 +324,7 @@ class WriteState(nn.Module):
         # decay in the matrix is only possible if it is being accessed as a key through the
         # normalizer.
         #
-        # This produces behavior where the model, if writing to a key, has a chance to both
+        # This produces behavior where the argAGI2024, if writing to a key, has a chance to both
         # be influenced by the overall decay rate for that key slot, then by the decay
         # rates for the values in the key slot.
 
@@ -376,9 +376,9 @@ class LinearKernelMemoryBank(DeepMemoryUnit):
     """
     The linear kernel memory bank is designed to provide
     extremely long term memory building capability and
-    dynamic adaptation of the model.
+    dynamic adaptation of the argAGI2024.
 
-    Think of the idea of allowing the model to read
+    Think of the idea of allowing the argAGI2024 to read
     a database of languages, and it learns how to
     interpret them, and you are not too far off.
 
@@ -408,7 +408,7 @@ class LinearKernelMemoryBank(DeepMemoryUnit):
     integrated.
 
     This write gate also pairs with an erase gate to nicely mean
-    that the model can choose to erase a memory unit, and that
+    that the argAGI2024 can choose to erase a memory unit, and that
     writing has a minumum amount of erasure that must happen.
     This prevents the cells from accumulating exceptionally
     large values.

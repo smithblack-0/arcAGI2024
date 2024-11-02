@@ -41,7 +41,7 @@ class SelectionSpec:
     """
     A specification for selecting and weighting different virtual layers
     (previously referred to as "banks") in the context of a virtualized
-    model architecture.
+    argAGI2024 architecture.
 
     This structure encapsulates both the indices of the virtual layers involved
     in the computation and the associated probabilities or weights that define
@@ -68,6 +68,14 @@ class SelectionSpec:
     The actual interpretation—how selections affect the underlying data—depends on the
     implementation of the layer that uses the spec.
 
+    ---- Dense selection ----
+
+    An alternative mode of operation is to operate in a dense selection mode.
+
+    In this mode, selection probabilities across the entire selection domain
+    are provided, selection indices can be none, and downstream code does
+    a dense, matmul based process to handle superposition.
+
     ---- Fields ----
     selection_index (torch.Tensor):
         An integer tensor containing the indices of the virtual layers selected
@@ -76,6 +84,7 @@ class SelectionSpec:
         - Shape: (..., num_selected_virtual_layers).
         The shape can vary depending on how many dimensions the selection applies to.
         Batch dimensions are explicitly handled, while data dimensions are broadcast as needed.
+        - May be none in dense mode, or may be provided.
 
     selection_probabilities (torch.Tensor):
         A tensor containing the probabilities or weights that determine how
@@ -113,8 +122,9 @@ class SelectionSpec:
         return self.selection_probabilities.device
 
     def __init__(self,
-                 selection_index: torch.Tensor,
+                 selection_index: Optional[torch.Tensor],
                  selection_probabilities: torch.Tensor,
+                 dense_mode: bool = False,
                  ):
         """
         Initializes a `SelectionSpec` object.
@@ -123,28 +133,48 @@ class SelectionSpec:
         :param selection_index: A tensor containing the indices of the selected virtual layers.
                                 Must be of dtype `torch.long`.
         :param selection_probabilities: A floating-point tensor with probabilities or weights
-                                        corresponding to the selected indices.
+                                        corresponding to the selected indices. Or across the
+                                        entire selection space if in dense mode
+        :param dense_mode: Whether the selection space is dense or sparse. If sparse,
+                           selection index will be required, while if dense it will not.
+
         ---- Raises ----
         - ValueError: If the tensors are on different devices or their shapes do not match.
         - TypeError: If the selection indices are not of dtype `torch.long` or the probabilities
                      are not floating-point tensors.
         """
         # Validation
-        if selection_index.device != selection_probabilities.device:
-            msg = f"""
-            'selection_index' was on device {selection_index.device} while
-            'selection_probabilities' was on device {selection_probabilities.device}.
-            Must be same device
-            """
-            msg = textwrap.dedent(msg)
-            raise ValueError(msg)
+        if not dense_mode:
+            if selection_index is None:
+                msg = f"""
+                'selection_index' may only be none when 'dense_mode' is true
+                """
+                msg = textwrap.dedent(msg)
+                raise ValueError(msg)
 
-        if selection_index.dtype != torch.long:
-            msg = f"""
-            'selection_index' must be of dtype long, got {selection_index.dtype}
-            """
-            msg = textwrap.dedent(msg)
-            raise TypeError(msg)
+            if selection_index.device != selection_probabilities.device:
+                msg = f"""
+                'selection_index' was on device {selection_index.device} while
+                'selection_probabilities' was on device {selection_probabilities.device}.
+                Must be same device
+                """
+                msg = textwrap.dedent(msg)
+                raise ValueError(msg)
+            if selection_index.dtype != torch.long:
+                msg = f"""
+                'selection_index' must be of dtype long, got {selection_index.dtype}
+                """
+                msg = textwrap.dedent(msg)
+                raise TypeError(msg)
+
+            if selection_index.shape != selection_probabilities.shape:
+                msg = f"""
+                'selection_probabilities" had shape {selection_probabilities.shape},
+                while 'selection_index' had shape {selection_index.shape}. Must
+                be the same
+                """
+                msg = textwrap.dedent(msg)
+                raise ValueError(msg)
 
         if not torch.is_floating_point(selection_probabilities):
             msg = f"""
@@ -154,18 +184,11 @@ class SelectionSpec:
             msg = textwrap.dedent(msg)
             raise TypeError(msg)
 
-        if selection_index.shape != selection_probabilities.shape:
-            msg = f"""
-            'selection_probabilities" had shape {selection_probabilities.shape},
-            while 'selection_index' had shape {selection_index.shape}. Must
-            be the same
-            """
-            msg = textwrap.dedent(msg)
-            raise ValueError(msg)
 
         # Storage
         self.selection_index = selection_index
         self.selection_probabilities = selection_probabilities
+        self.dense_mode = dense_mode
 
     def to(self,
            dtype: Optional[torch.dtype] = None,
@@ -204,7 +227,11 @@ class SelectionSpec:
             raise TypeError(msg)
 
         # Move tensors: `selection_index` stays as long, `selection_probabilities` migrates
-        index = self.selection_index.to(dtype=torch.long, device=device)
+        if self.selection_index is not None:
+            index = self.selection_index.to(dtype=torch.long, device=device)
+        else:
+            index = None
+
         probabilities = self.selection_probabilities.to(dtype=dtype, device=device)
 
         return SelectionSpec(index, probabilities)
@@ -231,6 +258,16 @@ def virtual_state_select(state: torch.Tensor,
     and returns them separately along the specified dimension. It does not
     use the probabilities to weight them.
 
+    ---- Dense mode ----
+
+    When responding to dense mode, the behavior changes a bit. First, when
+    superposition is True, we collapse everything using a single matmul
+    or similar process.
+
+    Meanwhile, superposition is False will, on account of being dense,
+    just return the same state tensor that is passed in, mirroring how
+    sparse mode works.
+
     ---- Parameters ----
     :param state:
         - A tensor representing the current state from which virtual layers
@@ -247,6 +284,7 @@ def virtual_state_select(state: torch.Tensor,
           (tensor of shape: (...batch, selected)).
         - `selection_probabilities`: Probabilities or weights for each
           selected virtual layer (tensor of shape: (...batch, selected)).
+        - dense_mode: Whether operating in sparse or dense mode.
 
     :param dim:
         - The dimension of the `state` tensor that represents the "virtual layer"
@@ -276,25 +314,52 @@ def virtual_state_select(state: torch.Tensor,
     # Unpack selection tuple
     indices = selection.selection_index
     probabilities = selection.selection_probabilities
+    dense_mode = selection.dense_mode
+
+    # If dense is true AND superposition is false, we just return what is given
+    # so that the user can run a parallel ensemble. This saves a bit of compute time.
+    if not superposition and dense_mode:
+        return state
+
+
 
     # Move the selection dim to the end of the state tensor
     state = state.movedim(dim, -1)  # (...batch, ..., options)
 
-    # Ensure indices has the correct number of dimensions
-    while indices.dim() < state.dim():
-        indices = indices.unsqueeze(-2)
-        probabilities = probabilities.unsqueeze(-2)
+    # dense/sparse pathway branching occurs. In dense branch,
+    # we ignore the indexes, expand the probabilites to match,
+    # then perform the superposition.
+    #
+    # The main difference between the pathways is one will
+    # perform an index select, while another will not. But
+    # both will end with something that needs a matmul.
+    if dense_mode:
+        # Ensure probabilities has the right number
+        # of dimensions for broadcast
+        assert probabilities.shape[-1] == state.shape[-1]
+        while probabilities.dim() < state.dim():
+            probabilities = probabilities.unsqueeze(-2) # (..., ...., options)
+        selected_state = state
+    else:
+        # Ensure indices has the correct number of dimensions
+        while indices.dim() < state.dim():
+            indices = indices.unsqueeze(-2)
+            probabilities = probabilities.unsqueeze(-2)
 
-    # Expand indices to match the state tensor, excluding the last dimension
-    indices = indices.broadcast_to(*state.shape[:-1], indices.shape[-1])  # (...batch, ..., selections)
+        # Expand indices to match the state tensor, excluding the last dimension
+        indices = indices.broadcast_to(*state.shape[:-1], indices.shape[-1])  # (...batch, ..., selections)
 
-    # Perform gather on the last dimension (which used to be dim)
-    selected_state = state.gather(-1, indices)  # (...batch, ..., selections)
+        # Perform gather on the last dimension (which used to be dim)
+        selected_state = state.gather(-1, indices)  # (...batch, ..., selections)
 
     # If requested, reduce and form the superposition.
     # Else, restore original shape
     if superposition:
-        selected_state = torch.sum(selected_state * probabilities, dim=-1)
+        # Unsqueeze the last dimension of probabilities to make it a column vector
+        # This prepares it for matrix multiplication with selected_state
+        probabilities = probabilities.unsqueeze(-1)
+        selected_state = selected_state.unsqueeze(-2)
+        selected_state = torch.matmul(selected_state, probabilities).squeeze(-1).squeeze(-1)
     else:
         selected_state = selected_state.movedim(-1, dim)
 
@@ -335,6 +400,7 @@ def virtual_state_scatter(state: torch.Tensor,
                                      num_selected).
         - These control both the locations in `state` to update and the strength
           of the update from `substate`.
+        - Dense mode operates a little bit differently. selection_index is not used.
 
     :param dim: The dimension of `state` where the updates occur.
         - This is the axis in `state` where substate values will be inserted,
@@ -358,6 +424,17 @@ def virtual_state_scatter(state: torch.Tensor,
     - **Gather and Interpolate**: The function gathers values from `state` at
       the specified indices, interpolates between them and `substate` using the
       probabilities, and scatters the updated values back into `state`.
+
+    - **Dense vs sparse**: Depending on how the selection spec is configured,
+                           this can operate either in a sparse or a dense
+                           mode.
+
+                           in sparse mode, we expect the selection spec, and
+                           the substate, to be based on advanced index extractions
+                           of state.
+
+                           In dense mode, we expect them to be exactly the same
+                           state.
 
     ---- Key Notes ----
     - The `state` tensor can contain extra batch or data dimensions, and this
@@ -388,34 +465,50 @@ def virtual_state_scatter(state: torch.Tensor,
 
     indices = selection.selection_index
     probabilities = selection.selection_probabilities
-
-    # If in a superposition, the indicated dimension was actually squeeze away
-    # earlier. Restore it. This is essentially data standardization.
+    dense_mode = selection.dense_mode
 
     # Move the selection dim to the end of the state tensor for easier processing
     state = state.movedim(dim, -1)  # (...batch, ..., options)
-    substate = substate.movedim(dim, -1)  #(...batch, ..., selections
+    substate = substate.movedim(dim, -1)  # (...batch, ..., selections)
 
-    # Ensure indices has the correct number of dimensions for broadcasting
-    while indices.dim() < state.dim():
-        indices = indices.unsqueeze(-2)
-        probabilities = probabilities.unsqueeze(-2)
+    # Branch case for sparse vs dense behavior. The branches are
+    # VERY different here.
+    #
+    # In the sparse case, we gather, interpolate,
+    # then scatter the results.
+    #
+    # The dense case, meanwhile, can just proceed directly to interpolation
+    # without having to scatter back into it.
+    if dense_mode:
+        # Unsqueeze the probabilities to have sufficient dimensions for interpolation
+        assert probabilities.shape[-1] == state.shape[-1]
+        while probabilities.dim() < state.dim():
+            probabilities = probabilities.unsqueeze(-2)
 
-    # Expand indices  to match the state tensor
-    indices = indices.broadcast_to(*state.shape[:-1], indices.shape[-1])  # (...batch, ..., selections)
+        # Perform interpolation between initial and new state based on selection
+        # probabilities
 
-    # Gather the current state values at the specified indices
-    gathered_state = state.gather(-1, indices)  # (...batch, ..., selections)
+        state = state*(1-probabilities) + substate*probabilities
+    else:
+        # Ensure indices has the correct number of dimensions for broadcasting
+        while indices.dim() < state.dim():
+            indices = indices.unsqueeze(-2)
+            probabilities = probabilities.unsqueeze(-2)
 
-    # Perform interpolation between the gathered state and the substate using probabilities
-    interpolated = (1 - probabilities) * gathered_state + probabilities * substate  # (...batch, ..., selections)
+        # Expand indices  to match the state tensor
+        indices = indices.broadcast_to(*state.shape[:-1], indices.shape[-1])  # (...batch, ..., selections)
 
-    # Scatter the interpolated values back into the original state tensor
-    state = state.scatter(-1, indices, interpolated)
+        # Gather the current state values at the specified indices
+        gathered_state = state.gather(-1, indices)  # (...batch, ..., selections)
+
+        # Perform interpolation between the gathered state and the substate using probabilities
+        interpolated = (1 - probabilities) * gathered_state + probabilities * substate  # (...batch, ..., selections)
+
+        # Scatter the interpolated values back into the original state tensor
+        state = state.scatter(-1, indices, interpolated)
 
     # Restore the original dimension order by swapping back
     state = state.movedim(-1, dim)
-
     return state
 
 
@@ -437,6 +530,13 @@ class VirtualParameter(nn.Module):
     The class supports automatic dtype conversion of the selection probabilities
     in the `SelectionSpec` if `allow_dynamic_type_conversion` is enabled. This allows
     the `SelectionSpec` to adapt its dtype to match the parameter's dtype.
+
+    ---- dense mode  vs sparse mode ----
+
+    Additionally, this automatically supports dense and sparse modes in the mode
+    select mechanism. In dense mode, we use a matrix multiplication to reduce
+    the entire thing, while in sparse mode we use vector indexing
+
     """
 
     @classmethod
@@ -497,7 +597,6 @@ class VirtualParameter(nn.Module):
 
     def forward(self,
                 bank_spec: SelectionSpec,
-                sum: bool = True
                 ) -> torch.Tensor:
         """
         Returns a superposition of parameters based on the provided
@@ -515,13 +614,10 @@ class VirtualParameter(nn.Module):
             - `selection_index`: The indices of the selected banks. (..., selected)
             - `selection_probabilities`: The probabilities for weighting
                                          the selected banks. (..., selected)
-        :param sum: A flag. Almost always should be true. If false, an extra
-           dimension will bereturned
         :return: A tensor containing the weighted combination of selected
                  parameters. Shape: (..., *shape).
-                 Appendum: However, if sum is false, will be (..., *shape, selected)
         """
-        with torch.profiler.record_function("CollapseParameter"):
+        with torch.profiler.record_function("MakingVirtualParameter"):
             # Automatically convert the dtype of the selection spec if allowed
             if self.allow_dynamic_type_conversion and bank_spec.dtype != self.dtype:
                 bank_spec = bank_spec.to(dtype=self.dtype)
@@ -534,267 +630,37 @@ class VirtualParameter(nn.Module):
                 msg = textwrap.dedent(msg)
                 raise TypeError(msg)
 
-            # Extract the selected banks using advanced indexing
-            parameter = self.parameter.movedim(-1, 0)  # (*shape, bank)
-            parameter = parameter[bank_spec.selection_index]  # (..., *shape, bank_selected)
-            parameter = parameter.movedim(-self.parameter.dim(), -1)
+            # Dense vs sparse branching. In dense mode, we combine everything
+            # using matrix multiplication, while in sparse mode we instead
+            # extract and combine using vector indexing.
+            if bank_spec.dense_mode:
+                assert bank_spec.selection_probabilities.shape[-1] == self.parameter.shape[-1]
+                probabilities = bank_spec.selection_probabilities
+                parameter = self.parameter  # (*shape, bank)
 
-
-            # Perform the kernel superposition and return the result
-            if sum:
-                # Set up the probabilities to broadcast across the parameter tensor
-                probabilities = bank_spec.selection_probabilities  # (..., bank_selected)
-                for _ in self.shape:
+                # Add sufficient probabilities dimensions we can matmul over
+                # parameter pieces
+                for _ in range(len(self.shape)):
                     probabilities = probabilities.unsqueeze(-2)
 
-                parameter = torch.sum(parameter * probabilities, dim=-1)  # (..., *shape)
+                # Setup, run, squeeze matmul
+                probabilities = probabilities.unsqueeze(-2)
+                parameter = parameter.unsqueeze(-1)
+                parameter = torch.matmul(probabilities, parameter).squeeze(-1).squeeze(-1)
+            else:
+                # Extract the selected banks using advanced indexing
+                parameter = self.parameter.movedim(-1, 0)  # (bank, *shape)
+                parameter = parameter[bank_spec.selection_index]  # (..., bank_selected, *shape)
+                parameter = parameter.movedim(-self.parameter.dim(), -1)
 
+
+                # Add sufficient probabilities dimensions we can matmul over
+                # parameter pieces
+                probabilities = bank_spec.selection_probabilities
+                for _ in range(len(self.shape)):
+                    probabilities = probabilities.unsqueeze(-2)
+                parameter = torch.sum(probabilities*parameter, dim=-1)
             return parameter
-
-
-class VirtualBuffer(nn.Module):
-    """
-    This is an instance of a "virtual buffer", which is a collapsable feature
-    using the virtual selection mechanism. A buffer is internally maintained
-    across a "banks" dimension, and one can ask to instance a version of the
-    buffer or update the buffer again based on the instance.
-
-    The bank dimension is internally maintained as the last dimension, which
-    influences how the selection mechanism operates.
-
-    The class supports automatic dtype conversion of the selection probabilities
-    in the `SelectionSpec` if `allow_dynamic_type_conversion` is enabled. This allows
-    the `SelectionSpec` to adapt its dtype to match the buffer's dtype.
-    """
-
-    buffer: torch.Tensor
-
-    @classmethod
-    def create(cls,
-               bank_size: int,
-               shape: Tuple[int, ...],
-               device: Optional[torch.device] = None,
-               dtype: Optional[torch.dtype] = None,
-               init: Optional[Callable[[torch.Tensor], None]] = None,
-               allow_dynamic_type_conversion: bool = False
-               ) -> 'VirtualBuffer':
-        """
-        Creates and initializes a `VirtualBuffer` with a bank of buffers,
-        according to the given specification.
-
-        :param bank_size: The number of different buffer configurations
-                          in the bank.
-        :param shape: The shape of each individual buffer in the bank.
-        :param device: The device to store the buffer on. Defaults to
-                       the current device.
-        :param dtype: The data type of the buffer. Defaults to `None`,
-                      which means the default dtype is used.
-        :param init: An optional initialization function that takes a
-                     `torch.Tensor` and initializes the buffer in place.
-        :param allow_dynamic_type_conversion: Flag to enable automatic dtype conversion
-                                              for `SelectionSpec` if the dtypes do not match.
-                                              Defaults to `False`.
-        :return: An instance of the `VirtualBuffer` class.
-        """
-        # Bank dimension is now the last dimension of the buffer tensor
-        buffer = torch.zeros([*shape, bank_size], device=device, dtype=dtype)
-        if init is not None:
-            init(buffer)
-        return cls(buffer, allow_dynamic_type_conversion=allow_dynamic_type_conversion)
-
-    def __init__(self, buffer: torch.Tensor, allow_dynamic_type_conversion: bool = False):
-        """
-        Initialize a virtual buffer class. The buffer passed
-        in has its last dimension declared as the bank dimension.
-        Keep that in mind.
-        :param buffer:
-            - The buffer to initialize with
-            - Keep in mind the shape (..., buffer_banks)
-        :param allow_dynamic_type_conversion: Flag to enable automatic dtype conversion
-                                              for `SelectionSpec` if the dtypes do not match.
-                                              Defaults to `False`.
-        """
-        assert buffer.dim() > 0, "No bank dimension was specified."
-
-        super().__init__()
-        self.shape = buffer.shape[:-1]  # All dimensions except the last are the shape
-        self.bank_size = buffer.shape[-1]  # Last dimension is the bank dimension
-        self.device = buffer.device
-        self.dtype = buffer.dtype
-        self.allow_dynamic_type_conversion = allow_dynamic_type_conversion
-        self.register_buffer("buffer", buffer)  # (...batch, ...data, buffer_size)
-
-    def express_buffer(self,
-                       selection: SelectionSpec,
-                       superposition: bool = True
-                       ) -> torch.Tensor:
-        """
-        Expresses the buffer in a way that it becomes nonvirtual.
-
-        If `superposition=True`, the output will be a weighted combination (superposition)
-        of selected buffer values, collapsing the virtual banks into a single buffer
-        based on the selection probabilities.
-
-        If `superposition=False`, the buffer values will remain separated, with each
-        buffer indexed by the selection indices.
-
-        :param selection: A `SelectionSpec` dataclass containing:
-            - `selection_index`: The indices of the selected banks. (..., selected)
-            - `selection_probabilities`: The probabilities for weighting
-                                         the selected banks. (..., selected)
-        :param superposition: Whether or not to superimpose the buffer. Defaults to True.
-            - If True, returns a weighted combination of buffer states based on probabilities.
-            - If False, returns the selected individual buffer states.
-        :return:
-            - If `superposition=True`: Returns the combined buffer of shape (...).
-            - If `superposition=False`: Returns the selected buffers of shape (..., selected).
-        """
-        # Automatically convert the dtype of the selection spec if allowed
-        if self.allow_dynamic_type_conversion and selection.dtype != self.dtype:
-            selection = selection.to(dtype=self.dtype)
-        elif selection.dtype != self.dtype:
-            msg = f"""
-            SelectionSpec dtype {selection.dtype} does not match 
-            buffer dtype {self.dtype}. Enable dynamic conversion
-            by setting allow_dynamic_type_conversion=True.
-            """
-            msg = textwrap.dedent(msg)
-            raise TypeError(msg)
-
-        # Basic sanity checking. The buffer shape and selection shape
-        buffer = self.buffer  # (...batch, ...data, options)
-        return virtual_state_select(buffer, selection, dim=-1, superposition=superposition)
-
-    def update_buffer(self,
-                      expression: torch.Tensor,
-                      selection: SelectionSpec,
-                      superposition: bool = True):
-        """
-        Updates the currently contained buffer based on the given
-        buffer expression, and the selection. Superposition allows
-        handling certain scenarios.
-
-        :param expression: The expression to update the buffer with.
-            - Shape (buffers_selected, ...) if expressed using superposition off.
-            - Shape (...) if expressed using superposition on.
-        :param selection: The selections for the virtual buffer.
-        :param superposition: Whether or not it was expressed with the superposition on.
-        """
-        # Automatically convert the dtype of the selection spec if allowed
-        if self.allow_dynamic_type_conversion and selection.dtype != self.dtype:
-            selection = selection.to(dtype=self.dtype)
-        elif selection.dtype != self.dtype:
-            msg = f"""
-            SelectionSpec dtype {selection.dtype} does not match 
-            buffer dtype {self.dtype}. Enable dynamic conversion
-            by setting allow_dynamic_type_conversion=True.
-            """
-            msg = textwrap.dedent(msg)
-            raise TypeError(msg)
-
-        # Scatter the updated expression into the last dimension (bank dimension)
-        self.buffer = virtual_state_scatter(self.buffer, expression, selection,
-                                            dim=-1, superposition=superposition)
-
-
-class VirtualState:
-    """
-    This is an instance of a "virtual state", which is a collapsable feature
-    using the virtual selection mechanism. Similar to a virtual buffer, a state
-    is internally maintained across a "banks" dimension. One can instance a
-    version of the state or update the state based on the instance.
-
-    Unlike `VirtualBuffer`, `VirtualState` does not register as an `nn.Module`,
-    and stores the state directly as a `torch.Tensor` without being part of the
-    model's module hierarchy. The bank dimension is maintained as the last
-    dimension, which influences how selection operates.
-    """
-
-    @classmethod
-    def create(cls,
-               bank_size: int,
-               shape: Tuple[int, ...],
-               device: Optional[torch.device] = None,
-               dtype: Optional[torch.dtype] = None,
-               init: Optional[Callable[[torch.Tensor], None]] = None
-               ) -> 'VirtualState':
-        """
-        Creates and initializes a `VirtualState` with a bank of states according
-        to the given specification.
-
-        :param bank_size: The number of different state configurations in the bank.
-        :param shape: The shape of each individual state in the bank.
-        :param device: The device to store the state on. Defaults to the current device.
-        :param dtype: The data type of the state. Defaults to `None`, which means the default dtype is used.
-        :param init: An optional initialization function that takes a `torch.Tensor` and
-                     initializes the state in place.
-        :return: An instance of the `VirtualState` class.
-        """
-        # The bank dimension is now the last dimension in the state tensor
-        state = torch.zeros([*shape, bank_size], device=device, dtype=dtype)
-        if init is not None:
-            init(state)
-        return cls(state)
-
-    def __init__(self, state: torch.Tensor):
-        """
-        Initializes a `VirtualState`. The `state` passed in has its last dimension
-        declared as the bank dimension.
-
-        :param state: The tensor representing the virtual state, with the shape
-                      (..., bank_size), where the last dimension is the bank dimension.
-        """
-        assert state.dim() > 0, "No bank dimension was specified."
-
-        self.shape = state.shape[:-1]  # All dimensions except the last are the shape
-        self.bank_size = state.shape[-1]  # Last dimension is the bank dimension
-        self.device = state.device
-        self.dtype = state.dtype
-        self.state = state
-
-    def express_state(self,
-                      selection: SelectionSpec,
-                      superposition: bool = True
-                      ) -> torch.Tensor:
-        """
-        Expresses the state in a way that it becomes nonvirtual.
-
-        If `superposition=True`, the output will be a weighted combination (superposition)
-        of selected state values, collapsing the virtual banks into a single state based on
-        the selection probabilities.
-
-        If `superposition=False`, the state values will remain separated, with each state
-        indexed by the selection indices.
-
-        :param selection: The selection for the state to operate under.
-        :param superposition: Whether or not to superimpose the state. Defaults to True.
-            - If True, returns a weighted combination of state values based on probabilities.
-            - If False, returns the selected individual state values.
-        :return:
-            - If `superposition=True`: Returns the combined state of shape (...).
-            - If `superposition=False`: Returns the selected states of shape (..., selected).
-        """
-        # Express the state using the last dimension as the bank dimension
-        return virtual_state_select(self.state, selection, dim=-1, superposition=superposition)
-
-    def update_state(self,
-                     expression: torch.Tensor,
-                     selection: SelectionSpec,
-                     superposition: bool = True):
-        """
-        Updates the current state based on the given expression and selection.
-        The superposition flag allows handling different scenarios.
-
-        :param expression: The expression to update the state with.
-            - Shape (..., selected, ...) if expressed using superposition=False.
-            - Shape (...) if expressed using superposition=True.
-        :param selection: The selections for the virtual state.
-        :param superposition: Whether or not it was expressed with the superposition on.
-        """
-        # Scatter the expression into the last dimension (bank dimension)
-        self.state = virtual_state_scatter(self.state, expression, selection, dim=-1, superposition=superposition)
-
-
 class VirtualLayer(nn.Module, ABC):
     """
     A layer that promises to implement a virtual

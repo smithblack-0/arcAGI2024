@@ -2,8 +2,8 @@ import unittest
 import torch
 from torch import nn
 
-from src.main.model.computation_support_stack import (stack_controller_registry, AbstractSupportStack,
-                                                      AbstractStackController)
+from src.main.argAGI2024.computation_support_stack import (stack_controller_registry, AbstractSupportStack,
+                                                           AbstractStackController)
 
 class TestPointerSuperpositionStack(unittest.TestCase):
     """
@@ -65,10 +65,8 @@ class TestPointerSuperpositionStack(unittest.TestCase):
         sharpening = torch.ones(*self.batch_shape, device=self.device, dtype=self.dtype)
         controls = action_probabilities, sharpening
 
-        batch_mask = torch.zeros(self.batch_shape, dtype=torch.bool, device=self.device)
-
         # Perform adjustment with various iteration limits
-        stack.adjust_stack(controls, batch_mask)
+        stack.adjust_stack(controls)
         self.assertEqual(stack.pointer_prob_masses.shape, torch.Size([self.stack_depth, *self.batch_shape]))
         self.assertTrue(torch.all(stack.pointer_prob_masses >= 0))
 

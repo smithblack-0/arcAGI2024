@@ -1,10 +1,9 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from src.main.model.base import parallel_pytree_map, TensorTree
+from ..base import parallel_pytree_map, TensorTree
 from typing import Any, Optional, Tuple, Dict, Callable
-from src.main.model.adaptive_computation_time.abstract import (AbstractACT, AbstractACTFactory,
-                                                               act_factory_registry)
+from .abstract import (AbstractACT, AbstractACTFactory, act_factory_registry)
 
 
 class AdaptiveComputationTime(AbstractACT):
@@ -62,11 +61,11 @@ class AdaptiveComputationTime(AbstractACT):
         super().__init__()
 
         # Store core information.
-        self.threshold = threshold
-        self.device = halting_probabilities.dtype
-        self.dtype = halting_probabilities.device
+        self.device = halting_probabilities.device
+        self.dtype = halting_probabilities.dtype
         self.has_halted = has_halted
         self.batch_shape = halting_probabilities.shape
+        self.threshold = torch.tensor(threshold, dtype=self.dtype, device=self.device)
 
         # Store probabilistic information
         self.residual_probabilities = residual_probabilities

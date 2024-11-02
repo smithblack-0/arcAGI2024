@@ -2,8 +2,8 @@ import unittest
 import torch
 from torch import nn
 from typing import Optional, List, Dict, Any, Tuple, Union
-from src.main.model.registry import (is_type_hint, is_same_type_hint, is_sub_type_hint,
-                                     InterfaceRegistry)
+from src.main.argAGI2024.registry import (is_type_hint, is_same_type_hint, is_sub_type_hint,
+                                          InterfaceRegistry)
 from abc import ABC, abstractmethod
 
 

@@ -2,7 +2,7 @@
 Cognition cores are long and fast mechanisms designed
 to repetitively attend and consider the incoming
 latent embeddings. It is the logical heart
-of the model.
+of the argAGI2024.
 """
 
 import torch

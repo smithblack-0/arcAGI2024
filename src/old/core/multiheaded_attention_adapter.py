@@ -2,13 +2,13 @@ from typing import Optional, Tuple
 
 import torch
 from torch import nn, device
-from src.main.model.virtual_layers import BankedLinear, BankSelector
+from src.main.argAGI2024.virtual_layers import BankedLinear, BankSelector
 
 
 
 class RecurrentLinearAttention(nn.Module):
     """Implement fast_transformers.deep_memories.causal_linear_attention as a
-    fixed-dimensional state recurrent model.
+    fixed-dimensional state recurrent argAGI2024.
 
     See fast_transformers.deep_memories.linear_attention and
     fast_transformers.deep_memories.causal_linear_attention for the general concept
@@ -161,7 +161,7 @@ class MultiheadedAttention(nn.Module):
         of processing batched data. All parameters have the same effects
         as their torch equivalent
 
-        :param embed_dim: Total dimensions of the model
+        :param embed_dim: Total dimensions of the argAGI2024
         :param num_heads: Number of heads
         :param dropout: dropout probability
         :param bias: If specified, adds bias to projection layers
@@ -434,9 +434,9 @@ class RecurrentMemoryAttention(nn.Module):
     Implements fast recurrent linear deep_memories as
     a bank of heads that can and will be selected between on the
     fly. Only these heads will be processed, sparsely.
-    Each "head" then becomes a memory slot the model can remember
+    Each "head" then becomes a memory slot the argAGI2024 can remember
     things in. Finally, the number of heads is usually much larger
-    than in a normal model
+    than in a normal argAGI2024
     """
 
     def __init__(self,

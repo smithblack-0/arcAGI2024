@@ -1,7 +1,7 @@
 import unittest
 import torch
 from torch import nn
-from src.main.model.adaptive_computation_time import act_factory_registry, act_controller_registry
+from src.main.argAGI2024.adaptive_computation_time import act_factory_registry, act_controller_registry
 
 
 class TestAdaptiveComputationTime(unittest.TestCase):

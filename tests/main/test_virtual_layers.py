@@ -1,16 +1,16 @@
 import unittest
-from typing import Tuple
+from typing import Tuple, Any, Dict
 
 import torch
 from torch import nn
-from src.main.model.virtual_layers import (DropoutLogits, virtual_state_select, virtual_state_scatter,
-                                           SelectionSpec, VirtualState, VirtualParameter, VirtualBuffer,
-                                           VirtualLayer, VirtualLinear, VirtualMergeHeads, VirtualMakeHeads,
-                                           VirtualFeedforward, AbstractBankSelector, LinearBankSelector,
-                                           PseudoMarkovBankSelector, make_random_selection_mask,
-                                           make_top_k_selection_mask, make_top_p_selection_mask,
-                                           VirtualAdvancedLinear
-                                           )
+from src.main.argAGI2024.virtual_layers import (DropoutLogits, virtual_state_select, virtual_state_scatter,
+                                                SelectionSpec, VirtualParameter,
+                                                VirtualLayer, VirtualLinear, VirtualMergeHeads, VirtualMakeHeads,
+                                                VirtualFeedforward, AbstractBankSelector, LinearBankSelector,
+                                                PseudoMarkovBankSelector, make_random_selection_mask,
+                                                make_top_k_selection_mask, make_top_p_selection_mask,
+                                                VirtualAdvancedLinear
+                                                )
 class TestDropoutLogits(unittest.TestCase):
 
     def test_initialization_default(self):
@@ -279,6 +279,22 @@ class TestVirtualStateSelect(unittest.TestCase):
 
         # compare
         self.assertTrue(torch.allclose(expected_results, actual_results))
+    def test_dense_mode(self):
+        # Test dense mode with superposition on (dense_mode=True, superposition=True)
+        state = torch.randn(2, 5, 3)  # Shape (batch, options, features)
+        probabilities = torch.tensor([[0.2, 0.3, 0.5], [0.4, 0.4, 0.2]])  # Probabilities for all options
+        selection = SelectionSpec(selection_index=None, selection_probabilities=probabilities, dense_mode=True)
+
+        result = virtual_state_select(state, selection, dim=-1, superposition=True)
+
+        # Expected shape after superposition should be (batch, features) with dense_mode
+        self.assertEqual(result.shape, torch.Size([2, 5]))
+
+        # Test dense mode with superposition off (dense_mode=True, superposition=False)
+        result_no_superposition = virtual_state_select(state, selection, dim=-1, superposition=False)
+
+        # Expected shape with dense mode and no superposition should be the same as input state
+        self.assertTrue(torch.equal(result_no_superposition, state))
 
 class TestVirtualStateScatter(unittest.TestCase):
 
@@ -373,7 +389,27 @@ class TestVirtualStateScatter(unittest.TestCase):
 
         # Expected shape should remain the same as the original state
         self.assertEqual(result.shape, state.shape)
+    def test_dense_mode(self):
+        # Test dense mode with superposition on (dense_mode=True, superposition=True)
+        state = torch.randn(2, 5, 3)  # Shape (batch, options, features)
+        substate = torch.randn(2, 5)  # Shape should match the compressed state for dense mode with superposition
 
+        # Full probabilities across all options
+        probabilities = torch.tensor([[0.3, 0.3, 0.4], [0.5, 0.2, 0.3]])  # Probability for each option
+        selection = SelectionSpec(selection_index=None, selection_probabilities=probabilities, dense_mode=True)
+
+        # Apply virtual_state_scatter in dense mode with superposition on
+        result_superposition = virtual_state_scatter(state, substate, selection, dim=-1, superposition=True)
+
+        # Shape should remain the same as state
+        self.assertEqual(result_superposition.shape, state.shape)
+
+        # Test dense mode with superposition off (dense_mode=True, superposition=False)
+        substate_no_superposition = torch.randn(2, 5, 3)  # Shape should match state in dense mode without superposition
+        result_no_superposition = virtual_state_scatter(state, substate_no_superposition, selection, dim=-1, superposition=False)
+
+        # Expected shape should still be the same as state
+        self.assertEqual(result_no_superposition.shape, state.shape)
 class TestVirtualParameter(unittest.TestCase):
 
     def test_virtual_parameter_creation(self):
@@ -484,364 +520,21 @@ class TestVirtualParameter(unittest.TestCase):
 
         # Try
         vp(selection_spec)
-
-class TestVirtualBuffer(unittest.TestCase):
-
-    def test_virtual_buffer_creation(self):
+    def test_dense_mode(self):
         """
-        Test the creation of a VirtualBuffer using the create method.
-        Ensures correct initialization and shape of the buffer.
+        Test the forward method of VirtualParameter in dense mode.
+        Ensures that the correct dense behavior is applied.
         """
-        bank_size = 4
-        shape = (3, 3)
-
-        # Create virtual buffer
-        vb = VirtualBuffer.create(bank_size, shape)
-
-        # Ensure the buffer has the correct shape
-        self.assertEqual(vb.buffer.shape, (*shape, bank_size, ))
-
-    def test_virtual_buffer_custom_init(self):
-        """
-        Test the custom initialization of a VirtualBuffer.
-        Ensures the init function is applied to the buffer.
-        """
-
-        def custom_init(tensor):
-            torch.nn.init.constant_(tensor, 0.5)
-
-        bank_size = 2
-        shape = (2, 2)
-
-        # Create virtual buffer with custom init
-        vb = VirtualBuffer.create(bank_size, shape, init=custom_init)
-
-        # Check that the buffer was correctly initialized to 0.5
-        self.assertTrue(torch.all(vb.buffer == 0.5))
-
-    def test_virtual_buffer_manual_init(self):
-        """
-        Test manually initializing a VirtualBuffer with a buffer tensor.
-        """
-        buffer_bank = torch.tensor([[[0.0, 0.0], [0.0, 0.0]],
-                                    [[1.0, 1.0], [0.0, 0.0]],
-                                    [[2.0, 4.0], [3.0, 1.0]]])
-        vb = VirtualBuffer(buffer_bank)
-        self.assertTrue(torch.allclose(vb.buffer, buffer_bank))
-
-
-    def test_express_buffer_superposition(self):
-        """
-        Test expressing the buffer in superposition mode.
-        Ensures that the correct combination of selected buffers is returned.
-        """
-        buffer_bank = torch.tensor([[[0.0, 1.0, 2.0],[0.0, 1.0, 4.0]],
-                                    [[0.0, 0.0, 3.0], [0.0, 0.0, 1.0]]])
-
-        vb = VirtualBuffer(buffer_bank)
-
-        # Define a SelectionSpec with specific indices and probabilities
-        selection_indices = torch.tensor([0, 2])  # Select banks 0 and 2
-        selection_probabilities = torch.tensor([0.3, 0.7])  # Weights
-        selection_spec = SelectionSpec(selection_index=selection_indices,
-                                       selection_probabilities=selection_probabilities)
-
-        # Express the buffer in superposition mode
-        result = vb.express_buffer(selection_spec, superposition=True)
-
-        # Manual computation of the expected result:
-        expected_result = buffer_bank[..., 0]*0.3 + buffer_bank[..., 2]*0.7
-        self.assertTrue(torch.allclose(result, expected_result, atol=1e-4))
-
-    def test_express_buffer_no_superposition(self):
-        """
-        Test expressing the buffer without superposition.
-        Ensures that the selected buffers are returned separately.
-        """
-        buffer_bank = torch.tensor([[[0.0, 1.0, 2.0],[0.0, 1.0, 4.0]],
-                                    [[0.0, 0.0, 3.0], [0.0, 0.0, 1.0]]])
-        vb = VirtualBuffer(buffer_bank)
-
-        # Define a SelectionSpec with specific indices
-        selection_indices = torch.tensor([0, 2])  # Select banks 0 and 2
-        selection_probabilities = torch.tensor([0.5, 0.5])  # Dummy weights, not used
-        selection_spec = SelectionSpec(selection_index=selection_indices,
-                                       selection_probabilities=selection_probabilities)
-
-        # Express the buffer without superposition
-        result = vb.express_buffer(selection_spec, superposition=False)
-
-        # Manually check the expected result
-        expected_result = [
-            buffer_bank[..., 0],
-            buffer_bank[..., 2],
-
-        ]
-        expected_result = torch.stack(expected_result, dim=-1)
-
-        self.assertTrue(torch.allclose(result, expected_result))
-
-    def test_update_buffer_superposition(self):
-        """
-        Test updating the buffer with a new expression in superposition mode.
-        Ensures that the buffer is correctly updated.
-        """
-        buffer_bank = torch.tensor([[[0.0, 1.0, 2.0],[0.0, 1.0, 4.0]],
-                                    [[0.0, 0.0, 3.0], [0.0, 0.0, 1.0]]])
-        vb = VirtualBuffer(buffer_bank)
-
-        # Define a SelectionSpec with specific indices and probabilities
-        selection_indices = torch.tensor([0, 2])  # Select banks 0 and 2
-        selection_probabilities = torch.tensor([0.3, 0.7])  # Weights
-        selection_spec = SelectionSpec(selection_index=selection_indices,
-                                       selection_probabilities=selection_probabilities)
-
-        # Define a new expression. Notice it is reduced in dimensionality
-        # by one unit.
-        new_expression = torch.tensor([[3.0, 4.0], [7.0, 1.0]])
-
-        # Manually compute the expected updated buffer
-        expected_updated_buffer = buffer_bank.clone()
-        expected_updated_buffer[..., 0] = buffer_bank[...,0]*0.7 + new_expression*0.3
-        expected_updated_buffer[..., 2] = buffer_bank[...,2]*0.3 + new_expression*0.7
-
-        # Update the buffer
-        vb.update_buffer(new_expression, selection_spec, superposition=True)
-
-        self.assertTrue(torch.allclose(vb.buffer, expected_updated_buffer))
-
-    def test_update_buffer_no_superposition(self):
-        """
-        Test updating the buffer with a new expression without superposition.
-        Ensures that the buffer is updated only at the selected indices.
-        """
-        buffer_bank = torch.tensor([[[0.0, 1.0, 2.0],[0.0, 1.0, 4.0]],
-                                    [[0.0, 0.0, 3.0], [0.0, 0.0, 1.0]]])
-        vb = VirtualBuffer(buffer_bank)
-
-        # Define a SelectionSpec with specific indices
-        selection_indices = torch.tensor([0, 2])  # Select banks 0 and 2
-        selection_probabilities = torch.tensor([0.5, 0.5])  # Dummy weights
-        selection_spec = SelectionSpec(selection_index=selection_indices,
-                                       selection_probabilities=selection_probabilities)
-
-        # Define a new expression
-        new_expression = torch.tensor([[[1.5, 3.0], [2.0, 1.0]],
-                                       [[4.5, 5.5], [6.0, 7.0]]])
-
-        # Update the buffer without superposition
-        vb.update_buffer(new_expression, selection_spec, superposition=False)
-
-        # Manually compute the expected updated buffer
-        expected_updated_buffer = buffer_bank.clone()
-        expected_updated_buffer[..., 0] = buffer_bank[..., 0]*0.5 + new_expression[..., 0]*0.5
-        expected_updated_buffer[..., 2] = buffer_bank[..., 2]*0.5 + new_expression[..., 1]*0.5
-
-        self.assertTrue(torch.allclose(vb.buffer, expected_updated_buffer))
-    def test_batch_shape_handling(self):
-        """
-        Test batch shape handling in virtual buffer when expressing and updating.
-        Ensures that batch dimensions are handled correctly.
-        """
-        buffer = torch.randn(3, 4, 6)  # Shape (batch, extra_dim, banks)
-        indices = torch.randint(0, 4, (3, 2))  # Batch shape (batch, extra_dim, selected)
-        probabilities = torch.rand(3, 2)  # Probabilities shape matches the selection
-        selection = SelectionSpec(selection_index=indices, selection_probabilities=probabilities)
-
-        vb = VirtualBuffer(buffer)
-
-        # Express buffer
-        expressed = vb.express_buffer(selection, superposition=True)
-        self.assertEqual((3, 4), expressed.shape)
-
-        # Update buffer
-        vb.update_buffer(expressed, selection, superposition=True)
-        self.assertEqual(vb.buffer.shape, buffer.shape)
-
-        # With superposition off
-        expressed = vb.express_buffer(selection, superposition=False)
-        self.assertEqual((3, 4, 2), expressed.shape)
-
-        vb.update_buffer(expressed, selection, superposition=False)
-        self.assertEqual(vb.buffer.shape, buffer.shape)
-
-
-class TestVirtualState(unittest.TestCase):
-
-    def test_virtual_state_creation(self):
-        """
-        Test the creation of a VirtualState using the create method.
-        Ensures correct initialization and shape of the state.
-        """
-        bank_size = 4
-        shape = (3, 3)
-
-        # Create virtual state
-        vs = VirtualState.create(bank_size, shape)
-
-        # Ensure the state has the correct shape
-        self.assertEqual(vs.state.shape, (*shape, bank_size))
-
-    def test_virtual_state_custom_init(self):
-        """
-        Test the custom initialization of a VirtualState.
-        Ensures the init function is applied to the state.
-        """
-
-        def custom_init(tensor):
-            torch.nn.init.constant_(tensor, 0.5)
-
-        bank_size = 2
-        shape = (2, 2)
-
-        # Create virtual state with custom init
-        vs = VirtualState.create(bank_size, shape, init=custom_init)
-
-        # Check that the state was correctly initialized to 0.5
-        self.assertTrue(torch.all(vs.state == 0.5))
-
-    def test_virtual_state_manual_init(self):
-        """
-        Test manually initializing a VirtualState with a state tensor.
-        """
-        state_bank = torch.tensor([[[0.0, 0.0], [0.0, 0.0]],
-                                   [[1.0, 1.0], [0.0, 0.0]],
-                                   [[2.0, 4.0], [3.0, 1.0]]])
-        vs = VirtualState(state_bank)
-        self.assertTrue(torch.allclose(vs.state, state_bank))
-
-    def test_express_state_superposition(self):
-        """
-        Test expressing the state in superposition mode.
-        Ensures that the correct combination of selected states is returned.
-        """
-        state_bank = torch.tensor([[[0.0, 1.0, 2.0], [0.0, 1.0, 4.0]],
-                                   [[0.0, 0.0, 3.0], [0.0, 0.0, 1.0]]])
-
-        vs = VirtualState(state_bank)
-
-        # Define a SelectionSpec with specific indices and probabilities
-        selection_indices = torch.tensor([0, 2])  # Select banks 0 and 2
-        selection_probabilities = torch.tensor([0.3, 0.7])  # Weights
-        selection_spec = SelectionSpec(selection_index=selection_indices,
-                                       selection_probabilities=selection_probabilities)
-
-        # Express the state in superposition mode
-        result = vs.express_state(selection_spec, superposition=True)
-
-        # Manual computation of the expected result:
-        expected_result = state_bank[..., 0] * 0.3 + state_bank[..., 2] * 0.7
-        self.assertTrue(torch.allclose(result, expected_result, atol=1e-4))
-
-    def test_express_state_no_superposition(self):
-        """
-        Test expressing the state without superposition.
-        Ensures that the selected states are returned separately.
-        """
-        state_bank = torch.tensor([[[0.0, 1.0, 2.0], [0.0, 1.0, 4.0]],
-                                   [[0.0, 0.0, 3.0], [0.0, 0.0, 1.0]]])
-
-        vs = VirtualState(state_bank)
-
-        # Define a SelectionSpec with specific indices
-        selection_indices = torch.tensor([0, 2])  # Select banks 0 and 2
-        selection_probabilities = torch.tensor([0.5, 0.5])  # Dummy weights, not used
-        selection_spec = SelectionSpec(selection_index=selection_indices,
-                                       selection_probabilities=selection_probabilities)
-
-        # Express the state without superposition
-        result = vs.express_state(selection_spec, superposition=False)
-
-        # Manually check the expected result
-        expected_result = torch.stack([state_bank[..., 0], state_bank[..., 2]], dim=-1)
-
-        self.assertTrue(torch.allclose(result, expected_result))
-
-    def test_update_state_superposition(self):
-        """
-        Test updating the state with a new expression in superposition mode.
-        Ensures that the state is correctly updated.
-        """
-        state_bank = torch.tensor([[[0.0, 1.0, 2.0], [0.0, 1.0, 4.0]],
-                                   [[0.0, 0.0, 3.0], [0.0, 0.0, 1.0]]])
-
-        vs = VirtualState(state_bank)
-
-        # Define a SelectionSpec with specific indices and probabilities
-        selection_indices = torch.tensor([0, 2])  # Select banks 0 and 2
-        selection_probabilities = torch.tensor([0.3, 0.7])  # Weights
-        selection_spec = SelectionSpec(selection_index=selection_indices,
-                                       selection_probabilities=selection_probabilities)
-
-        # Define a new expression
-        new_expression = torch.tensor([[3.0, 4.0], [7.0, 1.0]])
-
-        # Manually compute the expected updated state
-        expected_updated_state = state_bank.clone()
-        expected_updated_state[..., 0] = state_bank[..., 0] * 0.7 + new_expression * 0.3
-        expected_updated_state[..., 2] = state_bank[..., 2] * 0.3 + new_expression * 0.7
-
-        # Update the state
-        vs.update_state(new_expression, selection_spec, superposition=True)
-
-        self.assertTrue(torch.allclose(vs.state, expected_updated_state))
-
-    def test_update_state_no_superposition(self):
-        """
-        Test updating the state with a new expression without superposition.
-        Ensures that the state is updated only at the selected indices.
-        """
-        state_bank = torch.tensor([[[0.0, 1.0, 2.0], [0.0, 1.0, 4.0]],
-                                   [[0.0, 0.0, 3.0], [0.0, 0.0, 1.0]]])
-
-        vs = VirtualState(state_bank)
-
-        # Define a SelectionSpec with specific indices
-        selection_indices = torch.tensor([0, 2])  # Select banks 0 and 2
-        selection_probabilities = torch.tensor([0.5, 0.5])  # Dummy weights
-        selection_spec = SelectionSpec(selection_index=selection_indices,
-                                       selection_probabilities=selection_probabilities)
-
-        # Define a new expression
-        new_expression = torch.tensor([[[1.5, 3.0], [2.0, 1.0]],
-                                       [[4.5, 5.5], [6.0, 7.0]]])
-
-        # Update the state without superposition
-        vs.update_state(new_expression, selection_spec, superposition=False)
-
-        # Manually compute the expected updated state
-        expected_updated_state = state_bank.clone()
-        expected_updated_state[..., 0] = state_bank[..., 0] * 0.5 + new_expression[..., 0] * 0.5
-        expected_updated_state[..., 2] = state_bank[..., 2] * 0.5 + new_expression[..., 1] * 0.5
-
-        self.assertTrue(torch.allclose(vs.state, expected_updated_state))
-
-    def test_batch_shape_handling(self):
-        """
-        Test batch shape handling in virtual state when expressing and updating.
-        Ensures that batch dimensions are handled correctly.
-        """
-        state = torch.randn(3, 4, 6)  # Shape (batch, extra_dim, banks)
-        indices = torch.randint(0, 4, (3, 2))  # Batch shape (batch, extra_dim, selected)
-        probabilities = torch.rand(3, 2)  # Probabilities shape matches the selection
-        selection = SelectionSpec(selection_index=indices, selection_probabilities=probabilities)
-
-        vs = VirtualState(state)
-
-        # Express state
-        expressed = vs.express_state(selection, superposition=True)
-        self.assertEqual((3, 4), expressed.shape)
-
-        # Update state
-        vs.update_state(expressed, selection, superposition=True)
-        self.assertEqual(vs.state.shape, state.shape)
-
-        # With superposition off
-        expressed = vs.express_state(selection, superposition=False)
-        self.assertEqual((3, 4, 2), expressed.shape)
-
-        vs.update_state(expressed, selection, superposition=False)
-        self.assertEqual(vs.state.shape, state.shape)
+        # Create virtual parameter with a known parameter bank
+        vp = VirtualParameter.create(3, [2, 4])
+
+        # Define dense selection with probabilities across all banks
+        selection_probabilities = torch.tensor([[0.2, 0.5, 0.3],[0.4, 0.4, 0.2]])  # Weights for dense selection
+        selection_spec = SelectionSpec(selection_index=None, selection_probabilities=selection_probabilities, dense_mode=True)
+
+        # Forward pass through the VirtualParameter
+        result = vp(selection_spec)
+        self.assertEqual(result.shape, torch.Size([2, 2, 4]))
 
 class TestVirtualLinear(unittest.TestCase):
 
@@ -1238,29 +931,39 @@ class TestMakeRandomSelectionMask(unittest.TestCase):
         self.assertFalse(torch.equal(mask1, mask2), "Random selection should vary across calls with the same inputs")
 
 class MockBankSelector(AbstractBankSelector):
-    def forward(self, logits: torch.Tensor) -> Tuple[SelectionSpec, None]:
-        return self.select_logits(logits), None
+    def create_state(self, batch_shape: torch.Tensor) ->Any:
+        return None
+    def get_statistics(self, state: Any) ->Dict[str, torch.Tensor]:
+        return None
+    def forward(self, embedding: torch.Tensor, state: Any) -> Tuple[SelectionSpec, Any]:
+        return self.select_logits(embedding), state
 class TestAbstractBankSelector(unittest.TestCase):
 
     def setUp(self):
         # Define sample logits for testing
         self.logits = torch.randn(2, 10)  # Batch size of 2, 10 logits per instance
 
+    def test_comprehensive_mode(self):
+        """Ensure comprehensive mode is triggered when top_k, top_p, and rand are inactive"""
+        selector = MockBankSelector(10, 10, dense_mode=True)
+        selection_spec, _ = selector(self.logits, None)
+        self.assertTrue(torch.all(selection_spec.selection_probabilities > 0.0))
+
     def test_dense_mode(self):
         """Ensure dense mode is triggered when top_k, top_p, and rand are inactive."""
-        selector = MockBankSelector()
-        selection_spec, _ = selector(self.logits)
+        selector = MockBankSelector(10, 12, dense_mode=True)
+        selection_spec, _ = selector(self.logits, None)
 
         # Verify all logits are included in dense mode, and probabilities sum to 1
-        self.assertEqual(selection_spec.selection_index.shape[-1], self.logits.shape[-1],
+        self.assertEqual(selection_spec.selection_probabilities.shape[-1], self.logits.shape[-1],
                          "Dense mode should include all logits")
         for probs in selection_spec.selection_probabilities:
             self.assertAlmostEqual(probs.sum().item(), 1.0, places=4)
 
     def test_combined_sparse_selection(self):
         """Test combined sparse selection (top_k, top_p, and rand) to check mask integration."""
-        selector = MockBankSelector(top_k=3, top_p=0.8, rand=2)
-        selection_spec, _ = selector(self.logits)
+        selector = MockBankSelector(10, 12, top_k=3, top_p=0.8, rand=2, dense_mode=False)
+        selection_spec, _ = selector(self.logits, None)
 
         # Ensure selection is limited and varies in length
         self.assertTrue(selection_spec.selection_index.shape[-1] <= self.logits.shape[-1],
@@ -1270,46 +973,14 @@ class TestAbstractBankSelector(unittest.TestCase):
         self.assertTrue(torch.all(selection_spec.selection_probabilities >= 0),
                         "Sparse selection logits should have positive probabilities")
 
-    def test_switch_to_dense_mode(self):
-        """Confirm mode switches to dense when sparse options are zeroed out."""
-        selector = MockBankSelector(top_k=0, top_p=0.0, rand=0)
-        self.assertTrue(selector.is_dense, "Selector should be in dense mode when all sparse options are zero")
-
-        selection_spec, _ = selector(self.logits)
-        # Check that all logits are selected in dense mode
-        self.assertEqual(selection_spec.selection_index.shape[-1], self.logits.shape[-1],
-                         "All logits should be selected in dense mode")
-
     def test_dropout_integration(self):
         """Verify dropout integration does not affect mode switching."""
-        selector = MockBankSelector(top_k=3, control_dropout=0.5)
-        selection_spec, _ = selector(self.logits)
+        selector = MockBankSelector(10, 10, top_k=3, control_dropout=0.5, dense_mode=False)
+        selection_spec, _ = selector(self.logits, None)
 
         # Confirm top-k is applied, but some logits may be zeroed by dropout
         self.assertEqual(selection_spec.selection_index.shape[-1], 3,
                          "Top-k selection should select exactly 3 logits in sparse mode")
-
-    def test_dynamic_mode_adjustment(self):
-        """Test dynamic changes in top_k, top_p, and rand values."""
-        selector = MockBankSelector()
-
-        # Start in dense mode
-        self.assertTrue(selector.is_dense, "Initially should be dense mode with no sparse selections")
-
-        # Enable top-k and check for sparse mode
-        selector.top_k = 5
-        self.assertFalse(selector.is_dense, "Setting top_k should switch to sparse mode")
-
-        # Set top_k to 0 and enable top_p
-        selector.top_k = 0
-        selector.top_p = 0.7
-        self.assertFalse(selector.is_dense, "Setting top_p should switch to sparse mode even if top_k is zero")
-
-        # Reset top_p and switch to random mode
-        selector.top_p = 0.0
-        selector.rand = 3
-        self.assertFalse(selector.is_dense, "Setting rand should also enable sparse mode")
-
 
 class TestLinearBankSelector(unittest.TestCase):
 
@@ -1320,36 +991,29 @@ class TestLinearBankSelector(unittest.TestCase):
         self.batch_size = 2
         self.embedding = torch.randn(self.batch_size, self.d_model)
 
-    def test_dense_mode(self):
-        """Test dense mode selection without sparse criteria (top_k, top_p, rand)."""
-        selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size)
-        state = selector.create_state([self.batch_size])
-        selection_spec, _ = selector(self.embedding, state)
-
-        # Verify that all banks are selected in dense mode
-        self.assertEqual(selection_spec.selection_index.shape[-1], self.bank_size, "Dense mode should select all banks")
-        for probs in selection_spec.selection_probabilities:
-            self.assertAlmostEqual(probs.sum().item(), 1.0, places=4)
     def test_top_k_selection(self):
         """Test top-k sparse selection with k < bank_size."""
         top_k = 3
         selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size, top_k=top_k)
-        selection_spec, _ = selector(self.embedding)
+        state = selector.create_state([self.batch_size])
+        selection_spec, _ = selector(self.embedding, state)
 
         # Ensure exactly top_k indices are selected per batch element
-        self.assertEqual(selection_spec.selection_index.shape[-1], top_k,
+        count = torch.count_nonzero(selection_spec.selection_probabilities, dim=-1).max()
+        self.assertEqual(count, top_k,
                          "Top-k selection should select exactly k banks")
-        self.assertTrue(torch.all(selection_spec.selection_probabilities > 0),
+        self.assertTrue(torch.all(selection_spec.selection_probabilities >= 0),
                         "Selected probabilities should be positive")
 
     def test_top_p_selection(self):
         """Test top-p (nucleus) selection with cumulative probability threshold."""
         top_p = 0.7
         selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size, top_p=top_p)
-        selection_spec, _ = selector(self.embedding)
+        state = selector.create_state([self.batch_size])
+        selection_spec, _ = selector(self.embedding, state)
 
         # Check that the number of selected banks varies and is limited by cumulative probability
-        self.assertTrue(selection_spec.selection_index.shape[-1] <= self.bank_size,
+        self.assertTrue(selection_spec.selection_probabilities.shape[-1] <= self.bank_size,
                         "Top-p selection should limit selected elements")
         self.assertTrue(torch.all(selection_spec.selection_probabilities >= 0),
                         "Selected probabilities should be positive or zero")
@@ -1358,29 +1022,15 @@ class TestLinearBankSelector(unittest.TestCase):
         """Test random selection mode with num < bank_size."""
         rand = 4
         selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size, rand=rand)
-        selection_spec, _ = selector(self.embedding)
+        state = selector.create_state([self.batch_size])
+        selection_spec, _ = selector(self.embedding, state)
 
         # Confirm that exactly rand indices are selected randomly
-        self.assertEqual(selection_spec.selection_index.shape[-1], rand,
+        count = torch.count_nonzero(selection_spec.selection_probabilities, dim=-1).max()
+        self.assertEqual(count, rand,
                          "Random selection should select exactly rand banks")
-        self.assertTrue(torch.all(selection_spec.selection_probabilities > 0),
+        self.assertTrue(torch.all(selection_spec.selection_probabilities >= 0),
                         "Selected probabilities should be positive")
-
-    def test_combined_sparse_selection(self):
-        """Test combined sparse selection (top_k, top_p, and rand) and verify integration."""
-        top_k = 3
-        top_p = 0.5
-        rand = 2
-
-        selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size, top_k=top_k, top_p=top_p,
-                                      rand=rand)
-
-
-        selection_spec, _ = selector(self.embedding)
-
-        # Check the number of selected indices, ensuring sparse integration works
-        self.assertTrue(selection_spec.selection_index.shape[-1] <= self.bank_size,
-                        "Sparse selection should limit selected elements")
 
     def test_dropout_integration(self):
         """Verify dropout does not affect mode but may introduce zeroed probabilities in sparse selections."""
@@ -1388,32 +1038,13 @@ class TestLinearBankSelector(unittest.TestCase):
         dropout_rate = 0.5
         selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size, top_k=top_k,
                                       control_dropout=dropout_rate)
-        selection_spec, _ = selector(self.embedding)
+        state = selector.create_state([self.batch_size])
+        selection_spec, _ = selector(self.embedding, state)
 
         # Ensure top_k is applied and some logits may be zeroed out by dropout
-        self.assertEqual(selection_spec.selection_index.shape[-1], top_k,
+        count = torch.count_nonzero(selection_spec.selection_probabilities, dim=-1).max()
+        self.assertEqual(count, top_k,
                          "Top-k selection should select exactly k banks")
-
-    def test_dynamic_mode_adjustment(self):
-        """Test dynamic adjustment of top_k, top_p, and rand values."""
-        selector = LinearBankSelector(d_model=self.d_model, bank_size=self.bank_size)
-
-        # Initially dense mode
-        self.assertTrue(selector.is_dense, "Should be dense mode when all sparse options are zero")
-
-        # Set top_k and check sparse mode
-        selector.top_k = 5
-        self.assertFalse(selector.is_dense, "Setting top_k should switch to sparse mode")
-
-        # Reset top_k, set top_p, and check sparse mode
-        selector.top_k = 0
-        selector.top_p = 0.7
-        self.assertFalse(selector.is_dense, "Setting top_p should switch to sparse mode")
-
-        # Set random selection mode
-        selector.top_p = 0.0
-        selector.rand = 3
-        self.assertFalse(selector.is_dense, "Setting rand should also switch to sparse mode")
 
 
 class TestVirtualAdvancedLinear(unittest.TestCase):

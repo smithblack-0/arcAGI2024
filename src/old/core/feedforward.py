@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from typing import Optional
-from src.main.model.virtual_layers import BankedLinear, BankSelector
+from src.main.argAGI2024.virtual_layers import BankedLinear, BankSelector
 
 class Feedforward(nn.Module):
     """
@@ -56,7 +56,7 @@ class BankedFeedforward(nn.Module):
                  dtype: Optional[torch.dtype] = torch.float32
                  ):
         """
-        :param d_model:   Size of the input and output model parameters
+        :param d_model:   Size of the input and output argAGI2024 parameters
         :param d_hidden:  Size of the hidden layer
         :param num_banks: The number of banks of layers.
         :param num_active: The number of banks selected when running. <= num banks

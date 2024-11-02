@@ -2,9 +2,9 @@ from abc import ABC, abstractmethod
 from typing import Generic, Any, Optional, Tuple, TypeVar, Dict
 
 import torch
-from src.main.model.base import SavableState, DeviceDtypeWatch
-from src.main.model.virtual_layers import VirtualLayer, SelectionSpec
-from src.main.model.registry import InterfaceRegistry
+from ..base import SavableState, DeviceDtypeWatch
+from ..virtual_layers import VirtualLayer, SelectionSpec
+from ..registry import InterfaceRegistry
 
 MemState = TypeVar('MemState')
 class AbstractMemoryState(SavableState):

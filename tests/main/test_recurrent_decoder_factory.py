@@ -3,8 +3,8 @@ import torch
 from torch import nn
 from torch.profiler import profile, record_function, ProfilerActivity
 
-from src.main.model.decoder.recurrent_core_v1 import build_recurrent_decoder_v1
-from src.main.model.base import parallel_pytree_map
+from src.main.argAGI2024.decoder.recurrent_core_v1 import build_recurrent_decoder_v1
+from src.main.argAGI2024.base import parallel_pytree_map
 
 class TestRecurrentDecoderBuilder(unittest.TestCase):
     """
@@ -279,14 +279,14 @@ class TestRecurrentDecoderWithProfilingCUDA(unittest.TestCase):
         # Set device to CUDA for GPU profiling
         self.d_embedding = 1024
         self.d_model = 128
-        self.bank_size = 100
+        self.bank_size = 30
         self.direct_dropout = 0.1
         self.submodule_dropout = 0.05
         self.control_dropout = 0.1
         self.device = torch.device("cuda")  # Use "cuda" for GPU profiling
         self.dtype = torch.float32
         self.stack_depth = 8
-        self.chunk_size = 512
+        self.chunk_size = 200
 
         # Variants for the registry submodules
         self.deep_memory_variant = "FastLinearMemory"
@@ -312,7 +312,7 @@ class TestRecurrentDecoderWithProfilingCUDA(unittest.TestCase):
         Profile a decode step with a randomized input embedding, recording time for each layer.
         """
         batch_size = 10
-        num_items = 4
+        num_items = 300
         embeddings = torch.randn([batch_size, num_items, self.d_embedding], device=self.device)
 
         # Build the decoder
@@ -357,7 +357,7 @@ class TestRecurrentDecoderWithProfilingCUDA(unittest.TestCase):
 
         # Profile the forward pass of the decoder
         with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-                                    record_shapes=True, profile_memory=True, use_cuda) as prof:
+                                    record_shapes=True, profile_memory=True) as prof:
             output, state, statistics = decoder(embeddings, None)
             output, state, statistics = decoder(embeddings, state)  # Second step with initialized state
 
@@ -369,7 +369,63 @@ class TestRecurrentDecoderWithProfilingCUDA(unittest.TestCase):
         print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=10))
 
         # Additional statistics printout
-        print(statistics)
+        # Track down num used parameters
+        num_parameters = sum(param.numel() for param in decoder.parameters())
+        print("Number of parameters:", num_parameters)
+
+        # Track down num memory elements
+        accumulator = []
+        def store(tensor: torch.Tensor):
+            accumulator.append(tensor.numel())
+            return tensor
+        parallel_pytree_map(store, state)
+        print("Number of memory elements:", sum(accumulator))
+    def test_decode_step_with_layer_profiling_sparse(self):
+        """
+        Profile a decode step with a randomized input embedding, recording time for each layer.
+        """
+        batch_size = 10
+        num_items = 300
+        embeddings = torch.randn([batch_size, num_items, self.d_embedding], device=self.device)
+
+        # Build the decoder
+        decoder = build_recurrent_decoder_v1(
+            d_embedding=self.d_embedding,
+            d_core=self.d_model,
+            bank_size=self.bank_size,
+            dense_mode=False,
+            primary_dropout=self.direct_dropout,
+            core_dropout=self.submodule_dropout,
+            control_dropout=self.control_dropout,
+            dtype=self.dtype,
+            device=self.device,
+            stack_depth=self.stack_depth,
+            chunk_size=self.chunk_size,
+            deep_memory_variant=self.deep_memory_variant,
+            deep_memory_details={
+                "d_address": self.d_model // 8,
+                "d_memory": self.d_model,
+                "num_read_heads": 10,
+                "num_write_heads": 10,
+                "num_memories": self.num_memories,
+            },
+            layer_controller_variant="LinearBankSelector",
+            layer_controller_details={"top_k" : 3}
+        )
+
+        # Profile the forward pass of the decoder
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                                    record_shapes=True, profile_memory=True) as prof:
+            output, state, statistics = decoder(embeddings, None)
+            output, state, statistics = decoder(embeddings, state)  # Second step with initialized state
+            print("tests done")
+
+
+        # Print profiling results with layer-specific timings
+        print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=10))
+        print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
+
+        # Additional statistics printout
 
         # Track down num used parameters
         num_parameters = sum(param.numel() for param in decoder.parameters())
@@ -382,3 +438,4 @@ class TestRecurrentDecoderWithProfilingCUDA(unittest.TestCase):
             return tensor
         parallel_pytree_map(store, state)
         print("Number of memory elements:", sum(accumulator))
+        print(statistics)

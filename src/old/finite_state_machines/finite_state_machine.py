@@ -1,7 +1,7 @@
 """
 Finite State Machine (FSM) for Transformer Decoding and Training
 
-This module defines a Finite State Machine (FSM) that is integrated into a transformer-based model
+This module defines a Finite State Machine (FSM) that is integrated into a transformer-based argAGI2024
 for decoding and reinforcement training. The FSM is designed to manage and transition between
 states during the decoding process, based on predefined triggers and state-change operations.
 
@@ -482,7 +482,7 @@ class OutputMachine(nn.Module):
             - Shape (...)
             - Index indicates what operation to run
         :param prediction:
-            - The content that has been predicted by the model.
+            - The content that has been predicted by the argAGI2024.
             - It will need to be written somewhere, but sometimes
               that write can just be discarded.
         :return: The new operator action
@@ -535,7 +535,7 @@ class OperatorAction(nn.Module, ABC):
             - Each integer is an index, telling us what action to perform,
               and of length channels.
         :param prediction:
-            - The content that has been predicted by the model.
+            - The content that has been predicted by the argAGI2024.
             - An integer, not logits.
             - Some actions may involve writing.
         :return: The new state tensor
@@ -617,7 +617,7 @@ class IntSetAction(OperatorAction):
             - Each integer is an index, telling us what action to perform,
               and of length channels.
         :param prediction:
-            - The content that has been predicted by the model.
+            - The content that has been predicted by the argAGI2024.
             - An integer, not logits.
             - Some actions may involve writing.
             - Shape (...)
@@ -645,7 +645,7 @@ class WriteAction(OperatorAction):
     """
     The write action is responsible for writing
     to the state tensor something predicted by
-    the model.
+    the argAGI2024.
     """
 
     def register_operator(self, operator: FSMOperator):
@@ -702,7 +702,7 @@ class WriteAction(OperatorAction):
             - Each integer is an index, telling us what action to perform,
               and of length channels.
         :param prediction:
-            - The content that has been predicted by the model.
+            - The content that has been predicted by the argAGI2024.
             - An integer, not logits.
             - Some actions may involve writing.
             - Shape (...)
@@ -803,7 +803,7 @@ class CountAdvanceRegroupAction(OperatorAction):
             - Each integer is an index, telling us what action to perform,
               and of length channels.
         :param prediction:
-            - The content that has been predicted by the model.
+            - The content that has been predicted by the argAGI2024.
             - An integer, not logits.
             - Some actions may involve writing.
             - Shape (...)

@@ -3,9 +3,10 @@ from typing import Optional, Any, Tuple, Dict
 
 import torch
 from torch import nn
-from src.main.model.base import DeviceDtypeWatch, TensorTree
-from src.main.model.virtual_layers import SelectionSpec, DropoutLogits, virtual_state_scatter
-from src.main.model import registry
+from ..base import DeviceDtypeWatch, TensorTree
+from .core import DropoutLogits, virtual_state_scatter
+from .layers import SelectionSpec
+from .. import registry
 
 # Some general helper layers. Maybe I should put these elsewhere?
 
@@ -159,29 +160,15 @@ class AbstractBankSelector(nn.Module, ABC):
         * `top_k`: Selects the highest k logits.
         * `top_p`: Uses nucleus sampling to select logits until the cumulative probability reaches p.
         * `rand`: Selects a random subset of logits.
-      If all are inactive (set to zero), dense mode is used, where all logits contribute based on their probabilities.
+      If all are inactive (set to zero), comprehensive mode is used, where all logits contribute based on their probabilities.
     - `dropout_rate` is applied to the logits before selection, allowing for stochastic behavior during training.
 
     :param top_k: The number of top logits to select (optional, defaults to 0).
     :param top_p: The cumulative probability threshold for top-p selection (optional, defaults to 0.0).
     :param rand: The number of random logits to select (optional, defaults to 0).
     :param control_dropout: Dropout rate to apply to the logits during selection (optional, defaults to 0.0).
+    :param dense_mode: Determines whether we emit specs for operating in sparse or dense mode.
     """
-
-    #TODO: Add bank selector metrics and, optionally, bank balancing.
-    @property
-    def is_dense(self) -> bool:
-        """
-        Tells us whether selection is operating in dense mode. It is dynamically
-        computed in case someone changes the fields.
-        """
-        if not self.top_k == 0:
-            return False
-        if not self.top_p == 0.0:
-            return False
-        if not self.rand == 0:
-            return False
-        return True
 
     def select_logits(self, logits: torch.Tensor) -> SelectionSpec:
         """
@@ -202,17 +189,32 @@ class AbstractBankSelector(nn.Module, ABC):
         # Perform normalization
         logits = self.dropout(logits)
 
-        # Detect dense logits, and handle them
-        # separately
-
-        if not self.is_dense:
-
-            # Handle and combine all sparse selection mechanisms
+        # Handle and combine all selection mechanisms. This occurs
+        # regardless of operation in sparse or dense mode.
+        if self.top_p > 0.0 or self.top_k > 0.0 or self.rand > 0.0:
             selection_mask = torch.zeros_like(logits, dtype=torch.bool)
             selection_mask = selection_mask | make_top_k_selection_mask(logits, self.top_k)
             selection_mask = selection_mask | make_top_p_selection_mask(logits, self.top_p)
             selection_mask = selection_mask | make_random_selection_mask(logits, self.rand)
+        else:
+            selection_mask = torch.ones_like(logits, dtype=torch.bool)
 
+        # Branch to handle dense vs sparse cases.
+        #
+        # In dense cases, we interpret the selection masks quite literally,
+        # as a mask, and eliminate from consideration anything that is not selected.
+        # However, in sparse mode, we use the selection mask to transfer a reduced
+        # subset of the logits to be activated.
+
+        if self.is_dense:
+            # Create default config. Fill with masked value
+            final_index = None
+            dense_mode = True
+            final_logits = torch.full_like(logits, -1e9)
+
+            # Transfer unmasked logits into position
+            final_logits[selection_mask] = logits[selection_mask]
+        else:
             # The number of required logits is determined by counting up how many
             # selections are active, then keeping the maximum. This is used to initialize
             # a space to hold the selected logits. The space is initialized with highly
@@ -229,30 +231,24 @@ class AbstractBankSelector(nn.Module, ABC):
             # there is always the same number of active entries per batch, ensuring that transfer
             # will be successful. Note that logit order is not guaranteed.
 
-            transfer_mask, transfer_index = torch.sort(selection_mask, dim=-1, descending=True)
+            temp = selection_mask.float() # Cuda patch
+            transfer_mask, transfer_index = torch.sort(temp, dim=-1, descending=True)
             transfer_mask = transfer_mask[..., :num_required_logits]
             transfer_index = transfer_index[..., :num_required_logits]
+            transfer_mask = transfer_mask.bool()
+
 
             # Transfer into the final logit space. Also, use an arange
             # to get an associated index selection
 
             final_logits[transfer_mask] = logits[selection_mask]
             final_index = logit_index[transfer_index]
+            dense_mode = False
 
-        else:
-            # Handle dense mode operation. For now, this
-            # consists of using the sparse logic.
-
-            final_index = logit_index
-            while final_index.dim() < logits.dim():
-                final_index = final_index.unsqueeze(0)
-
-            final_index = final_index.expand_as(logits)
-            final_logits = logits
 
         # Finish up. Active the logits, then return the result
         probabilities = torch.softmax(final_logits, dim=-1)
-        return SelectionSpec(final_index, probabilities)
+        return SelectionSpec(final_index, probabilities, dense_mode)
 
     @property
     def device(self) -> torch.device:
@@ -266,6 +262,7 @@ class AbstractBankSelector(nn.Module, ABC):
     def __init__(self,
                  d_model: int,
                  bank_size: int,
+                 dense_mode: Optional[bool] = None,
                  top_k: Optional[int] = None,
                  top_p: Optional[float] = None,
                  rand: Optional[int] = None,
@@ -283,12 +280,13 @@ class AbstractBankSelector(nn.Module, ABC):
 
         :param d_model: Dimension of what feedforward embeddign is invoked with
         :param bank_size: How big the virtual layer bank is.
+        :param dense_mode: Whether to emit spec for sparse or dense mode. Defaults to dense.
         :param top_k: The top k logits are included.
         :param top_p: Nucleus sampling is done to get the top p logits
         :param rand: This many logits are randomly selected
         :param control_dropout: The dropout rate to apply to the logits
-        :param device: The device to run the model on.
-        :param dtype: The dtype to run the model on.
+        :param device: The device to run the argAGI2024 on.
+        :param dtype: The dtype to run the argAGI2024 on.
         """
         super().__init__()
 
@@ -301,6 +299,8 @@ class AbstractBankSelector(nn.Module, ABC):
             rand = 0
         if control_dropout is None:
             control_dropout = 0.0
+        if dense_mode is None:
+            dense_mode = True
 
         # Setup
         self.d_model = d_model
@@ -309,6 +309,7 @@ class AbstractBankSelector(nn.Module, ABC):
         self.top_p = top_p
         self.rand = rand
         self.dropout = DropoutLogits(control_dropout)
+        self.is_dense = dense_mode
         self.__metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
     @abstractmethod
     def create_state(self, batch_shape: torch.Tensor)->Any:
@@ -366,6 +367,7 @@ class LinearBankSelector(AbstractBankSelector):
     def __init__(self,
                  d_model: int,
                  bank_size: int,
+                 dense_mode: Optional[bool] = None,
                  top_k: Optional[int] = None,
                  top_p: Optional[float] = None,
                  rand: Optional[int] = None,
@@ -383,11 +385,12 @@ class LinearBankSelector(AbstractBankSelector):
         :param top_p: The probability mass to select by (optional, defaults to 0.0).
         :param rand: The number of random logits to include (optional, defaults to 0).
         :param control_dropout: Logit dropout rate (optional, defaults to 0.0).
-        :param device: The device to run the model on.
-        :param dtype: The dtype to run the model on.
+        :param device: The device to run the argAGI2024 on.
+        :param dtype: The dtype to run the argAGI2024 on.
         """
         super().__init__(d_model,
                          bank_size,
+                         dense_mode,
                          top_k,
                          top_p,
                          rand,
@@ -430,18 +433,16 @@ class LinearBankSelector(AbstractBankSelector):
         # Perform selection process
         logits = self.projector(embedding)
         selection = self.select_logits(logits)
+        if not selection.dense_mode:
+            probabilities = torch.zeros_like(logits)
+            probabilities.scatter_(dim=-1, index=selection.selection_index, src=selection.selection_probabilities)
+        else:
+            probabilities = selection.selection_probabilities
+        statistics = state + probabilities
 
         # Perform statistics process. Create probabilities, and
         # add them to accumulator
-        probabilities = torch.zeros_like(state)
-        probabilities = virtual_state_scatter(probabilities,
-                                              torch.ones_like(selection.selection_probabilities),
-                                              selection,
-                                              dim=-1,
-                                              superposition=False
-                                              )
-        state = state + probabilities
-        return selection, state
+        return selection, statistics
 
 @selector_registry.register("PseudoMarkovBankSelector")
 class PseudoMarkovBankSelector(AbstractBankSelector):
@@ -451,7 +452,7 @@ class PseudoMarkovBankSelector(AbstractBankSelector):
     computational results to influence virtual layer selection.
 
     This class assumes that related virtual layers should be closely linked,
-    and it aims to model this through a Markov-like process. The Markov biases,
+    and it aims to argAGI2024 this through a Markov-like process. The Markov biases,
     or logits, act as transition preferences between virtual layers. These biases
     are dynamically updated and applied to the selection process, promoting or
     demoting certain layers based on the last expressed selection - basically the last
@@ -459,7 +460,7 @@ class PseudoMarkovBankSelector(AbstractBankSelector):
 
     However, this is a "pseudo" Markov process because, while these biases exist,
     the immediate computation results (from embeddings or other inputs) also play
-    a significant role. This means the model can adapt and override the Markov
+    a significant role. This means the argAGI2024 can adapt and override the Markov
     biases on-the-fly based on the current task, emphasizing or demoting specific
     virtual layers as needed. This combination of transition biases and current
     computations results in a more flexible and context-sensitive virtual layer
@@ -476,6 +477,7 @@ class PseudoMarkovBankSelector(AbstractBankSelector):
     def __init__(self,
                  d_model: int,
                  bank_size: int,
+                 dense_mode: Optional[bool] = None,
                  top_k: Optional[int] = None,
                  top_p: Optional[float] = None,
                  rand: Optional[int] = None,
@@ -493,11 +495,12 @@ class PseudoMarkovBankSelector(AbstractBankSelector):
         :param top_p: The probability mass to select by (optional, defaults to 0.0).
         :param rand: The number of random logits to include (optional, defaults to 0).
         :param control_dropout: Logit dropout rate (optional, defaults to 0.0).
-        :param device: The device to run the model on.
-        :param dtype: The dtype to run the model on.
+        :param device: The device to run the argAGI2024 on.
+        :param dtype: The dtype to run the argAGI2024 on.
         """
         super().__init__(d_model,
                          bank_size,
+                         dense_mode,
                          top_k,
                          top_p,
                          rand,
@@ -560,9 +563,8 @@ class PseudoMarkovBankSelector(AbstractBankSelector):
 
         # Activate and store the state. Get the selection.=
         selection = self.select_logits(logits)
-        probabilities = torch.zeros_like(cumulative_statistic)
-        probabilities[selection.selection_index] = selection.selection_probabilities
-        cumulative_statistic += probabilities
+        probabilities = selection.selection_probabilities
+        cumulative_statistic += selection.selection_probabilities
 
         # Return
 

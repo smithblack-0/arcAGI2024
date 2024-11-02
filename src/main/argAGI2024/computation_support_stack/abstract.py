@@ -5,8 +5,8 @@ from typing import TypeVar, Generic, Optional, Any, Tuple, Dict, Union, List, Ca
 import torch
 from torch import nn
 
-from src.main.model.base import TensorTree, SavableState, DeviceDtypeWatch
-from src.main.model.registry import InterfaceRegistry
+from src.main.argAGI2024.base import TensorTree, SavableState, DeviceDtypeWatch
+from src.main.argAGI2024.registry import InterfaceRegistry
 BatchShapeType = Union[Tuple[int, ...], List[int], torch.Size]
 
 class AbstractSupportStack(SavableState, ABC):
@@ -56,7 +56,7 @@ class AbstractSupportStack(SavableState, ABC):
         - Shape (...batch_shape)
     - enstack, no_op, destack:
         - Conceptually, the stack can be manipulated by an enstack action, no_op action, and destack action.
-        - How strongly the model wants to do each is provided as action probabilitie
+        - How strongly the argAGI2024 wants to do each is provided as action probabilitie
     - controls:
         - Tensors used to manipulate the stack.
         - Generated in the controller. 
@@ -136,7 +136,7 @@ class AbstractSupportStack(SavableState, ABC):
     @abstractmethod
     def adjust_stack(self, controls: Tuple[torch.Tensor, ...]):
         """
-        Adjusts the stack to account for the directives from the broader model.
+        Adjusts the stack to account for the directives from the broader argAGI2024.
         Responsible for handling this in a differentiable manner.
         :param controls:
             - Adjustment controls, like action probabilities or focus.

@@ -24,7 +24,7 @@ subroutines, such as:
     - **Return from Subroutine**: Manages the behavior when returning from a subroutine call. For example,
       `ReturnAndDiscardContext` discards the subroutine context, while `ReturnAndMerge` merges the subroutine state
       with the calling context.
-    - **Update Subroutine**: Integrates new information from model computations into the subroutine state.
+    - **Update Subroutine**: Integrates new information from argAGI2024 computations into the subroutine state.
       For instance, `UpdateByAddLayernorm` applies an add + layernorm strategy, whereas `UpdateBySet` replaces
       the subroutine state with the new value, as seen in finite state machines (FSM).
 
@@ -34,12 +34,12 @@ subroutines, such as:
     - **Return from the subroutine**
 
    These three possibilities are computed in parallel for all levels in the stack, and the final outcome is determined
-   by the model's action probabilities. This parallelism allows the model to dynamically adjust between subroutine
+   by the argAGI2024's action probabilities. This parallelism allows the argAGI2024 to dynamically adjust between subroutine
    creation, maintenance, and return without the need for sequential decision-making.
 
 4. **Update Integration and Selection**: After the subroutine options are computed, the update action integrates the
-new information (from the model's forward pass) into the stack. This integration ensures that the correct option—whether
-it’s creating, maintaining, or returning from a subroutine—is selected based on the model's current computation.
+new information (from the argAGI2024's forward pass) into the stack. This integration ensures that the correct option—whether
+it’s creating, maintaining, or returning from a subroutine—is selected based on the argAGI2024's current computation.
 
 # Extensibility
 New behaviors can be implemented by extending the abstract classes defined in this module. Users can define
@@ -52,7 +52,7 @@ from torch import nn
 from typing import List, Dict, Tuple, Any, Union, Optional, Callable
 from abc import ABC, abstractmethod
 
-from src.main.model.base import TensorTree,StatefulCore
+from src.main.argAGI2024.base import TensorTree,StatefulCore
 
 
 class CreateSubroutineStub(ABC):
@@ -99,7 +99,7 @@ class CreateSubroutineUsingDefaults(CreateSubroutineStub):
 
     This is useful when each new subroutine should always begin with a predefined state,
     regardless of the other elements in the stack. For example, initializing a new subroutine
-    in a fixed Markov state. These options can be selected later based on the model’s behavior.
+    in a fixed Markov state. These options can be selected later based on the argAGI2024’s behavior.
 
     The default state is broadcast to match the stack’s dimensions, allowing for superposition
     during subroutine creation.
@@ -165,7 +165,7 @@ class CreateBlankSubroutine(CreateSubroutineStub):
 
     This strategy is useful when each subroutine should start with a blank context, i.e., without
     any inherited state from parent subroutines. The options created reflect a "clean slate," providing
-    potential initializations that can be selected during the model’s forward pass.
+    potential initializations that can be selected during the argAGI2024’s forward pass.
     """
     def create_subroutine(self, stack: torch.Tensor) -> torch.Tensor:
         """
@@ -307,7 +307,7 @@ class ReturnAndDiscardContext(ReturnFromSubroutineStub):
     context, with the subroutine's context being ignored.
 
     This is useful when the result of the subroutine is no longer needed,
-    and the model needs to revert fully to its prior state.
+    and the argAGI2024 needs to revert fully to its prior state.
     """
 
     def return_from_subroutine(self, stack: torch.Tensor) -> torch.Tensor:
