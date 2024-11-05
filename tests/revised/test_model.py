@@ -2,6 +2,7 @@ import os
 import shutil
 import unittest
 import torch
+import time
 from torch import nn
 
 from src.main.arcAGI2024.model import (CasualLMCore, CausalLMTrainer, CausalLMGenerator,
@@ -142,8 +143,8 @@ class TestCausalLMTrainer(unittest.TestCase):
         model_core = CasualLMCore.build_model_on_top_of_pretrained_head(
             head_model_name="gpt2",
             num_layers=2,
-            num_read_heads=1,
-            num_write_heads=1,
+            num_read_heads=2,
+            num_write_heads=2,
             num_memories=2,
             dropout_rate=0.1,
             auxilary_dropout_rate=0.1
@@ -201,18 +202,7 @@ class TestCausalLMTrainer(unittest.TestCase):
 
         # Setup an optim
         optim = torch.optim.SGD(self.model_core.parameters(), lr=0.1)
-
-        # Run steps
-        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
-                                                torch.profiler.ProfilerActivity.CUDA],
-                                    record_shapes=True, profile_memory=True) as prof:
-            memories, numeric_metrics = trainer(tokens, targets, masks, numerics_cache_rate=1)
-            optim.step()
-            optim.zero_grad()
-
-        print(numeric_metrics)
-        print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=10))
-        print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
+        memories, numeric_metrics = trainer(tokens, targets, masks, numerics_cache_rate=1)
 
     def test_numeric_sanity_gpu(self):
         """
@@ -228,7 +218,7 @@ class TestCausalLMTrainer(unittest.TestCase):
         # Create some mock training data to utilize in the process
         #
         # It is 100 tokens in a batch of 3
-        batch_size = 3
+        batch_size = 100
         num_tokens = 100
         cache_rate = 50
 
@@ -261,6 +251,9 @@ class TestCausalLMTrainer(unittest.TestCase):
             optim.zero_grad()
 
         print(numeric_metrics)
+        for memory in memories:
+            print(memory.write_probability_mass)
+        print(memories[0].write_probability_mass)
         print(prof.key_averages())
         print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=10))
         print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
@@ -295,7 +288,44 @@ class TestCausalLMTrainer(unittest.TestCase):
                                             numerics_cache_rate=cache_rate,
                                             save_cached_to_cpu=True
                                             )
+    def test_normal_parameters(self):
+        # Test with more typical parameters
+        model_core = CasualLMCore.build_model_on_top_of_pretrained_head(
+            head_model_name="gpt2",
+            num_layers=10,
+            num_read_heads=10,
+            num_write_heads=10,
+            num_memories=80,
+            dropout_rate=0.1,
+            auxilary_dropout_rate=0.1
+        )
+        trainer = CausalLMTrainer(model_core, self.main_loss_fn, self.mem_access_loss_fn)
+        device = torch.device("cuda")
 
+        # Create some mock training data to utilize in the process
+        #
+        batch_size = 10
+        num_tokens = 100
+        cache_rate = 50
+
+        tokens = torch.randint(0, self.model_core.vocabulary.tokenizer.true_vocab_size, [batch_size, num_tokens])
+        targets = torch.randint(0, self.model_core.vocabulary.tokenizer.true_vocab_size, [batch_size, num_tokens])
+        masks = torch.rand([batch_size, num_tokens]) > 0.5
+
+        device = torch.device("cuda")
+        trainer = trainer.to(device=device)
+        tokens = tokens.to(device=device)
+        targets = targets.to(device=device)
+        masks = masks.to(device=device)
+
+        # Run pass
+        start_time = time.time()
+        memories, numeric_metrics = trainer(tokens, targets, masks,
+                                            numerics_cache_rate=cache_rate,
+                                            save_cached_to_cpu=True
+                                            )
+        end_time = time.time()
+        print(f"Time taken: {end_time - start_time} seconds")
 
 
 class TestCausalLMGen(unittest.TestCase):
