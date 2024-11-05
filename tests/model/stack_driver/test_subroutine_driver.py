@@ -2,7 +2,7 @@ import torch
 import unittest
 from src.old.subroutine_driver import (SubroutineDriver, SubroutineCore,
                                        DifferentiableSubroutineStack)
-from src.main.argAGI2024.base import TensorTree
+from src.old.arcAGI2024 import TensorTree
 from typing import Tuple
 
 class MockSubroutineCore(SubroutineCore):

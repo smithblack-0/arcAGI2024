@@ -19,7 +19,7 @@ class PointerSuperpositionStack(AbstractSupportStack):
     weighted by probabilistic pointers, allowing smooth transitions between subroutine states.
 
     The stack accumulates decisions about enstack (push), destack (pop), or no-op at each level based on
-    action probabilities provided by the external argAGI2024. It tracks statistics on these transitions over
+    action probabilities provided by the external arcAGI2024. It tracks statistics on these transitions over
     time for further analysis. Multiple things can be tracked in parallel
 
     Updates for stack adjustment, statistics accumulation, and embeddings are controlled using a `batch_mask`.
@@ -227,11 +227,21 @@ class PointerSuperpositionStack(AbstractSupportStack):
         # Incorporate update.
         self.stack = parallel_pytree_map(update_stack, self.stack, states)
 
+    def copy(self) -> 'PointerSuperpositionStack':
+        """
+        Creates a copy of this instance, but retains
+        the same underlying tensors
+        """
+        return PointerSuperpositionStack(self.pointers,
+                                         self.pointer_prob_masses,
+                                         self.stack,
+                                         self.defaults)
+
 
 class GateControls(AbstractControlGates):
     """
     Computes the control features
-    needed to implement the argAGI2024.
+    needed to implement the arcAGI2024.
     """
 
     def __init__(self,

@@ -3,8 +3,8 @@ import torch
 from torch import nn
 from torch.profiler import profile, record_function, ProfilerActivity
 
-from src.main.argAGI2024.decoder.recurrent_core_v1 import build_recurrent_decoder_v1
-from src.main.argAGI2024.base import parallel_pytree_map
+from src.old.arcAGI2024 import build_recurrent_decoder_v1
+from src.old.arcAGI2024 import parallel_pytree_map
 
 class TestRecurrentDecoderBuilder(unittest.TestCase):
     """
@@ -91,7 +91,7 @@ class TestRecurrentDecoder(unittest.TestCase):
         self.device = torch.device("cpu")
         self.dtype = torch.float32
         self.stack_depth = 8
-        self.chunk_size = 512
+        self.chunk_size = 1
 
         # Variants for the registry submodules
         self.deep_memory_variant = "FastLinearMemory"
@@ -119,8 +119,7 @@ class TestRecurrentDecoder(unittest.TestCase):
         """
         batch_size = 10
         num_items = 4
-        embeddings = torch.randn([batch_size, num_items, self.d_embedding])
-
+        embeddings = torch.randn([batch_size, num_items, self.d_embedding], requires_grad=True)
         decoder = build_recurrent_decoder_v1(
             d_embedding=self.d_embedding,
             d_core=self.d_model,
@@ -132,6 +131,7 @@ class TestRecurrentDecoder(unittest.TestCase):
             device=self.device,
             stack_depth=self.stack_depth,
             chunk_size=self.chunk_size,
+            dense_mode=True,
 
             deep_memory_variant=self.deep_memory_variant,
             deep_memory_details= {"d_address" : self.d_model//8,
@@ -142,13 +142,13 @@ class TestRecurrentDecoder(unittest.TestCase):
                                   },
 
             layer_controller_variant="LinearBankSelector",
-            layer_controller_details={}
+            layer_controller_details={"top_k" : 3}
         )
         # First step creates state
         output, state, statistics = decoder(embeddings, None)
 
-        # Second step, with initialized state
-        output, state, statistics = decoder(embeddings, state)
+        print("begin backwards pass")
+        output.sum().backward()
 
         # Print out the statistics
         print(statistics)
@@ -280,13 +280,13 @@ class TestRecurrentDecoderWithProfilingCUDA(unittest.TestCase):
         self.d_embedding = 1024
         self.d_model = 128
         self.bank_size = 30
-        self.direct_dropout = 0.1
-        self.submodule_dropout = 0.05
-        self.control_dropout = 0.1
+        self.direct_dropout = 0.0
+        self.submodule_dropout = 0.0
+        self.control_dropout = 0.0
         self.device = torch.device("cuda")  # Use "cuda" for GPU profiling
         self.dtype = torch.float32
         self.stack_depth = 8
-        self.chunk_size = 200
+        self.chunk_size = 2
 
         # Variants for the registry submodules
         self.deep_memory_variant = "FastLinearMemory"
@@ -312,7 +312,7 @@ class TestRecurrentDecoderWithProfilingCUDA(unittest.TestCase):
         Profile a decode step with a randomized input embedding, recording time for each layer.
         """
         batch_size = 10
-        num_items = 300
+        num_items = 5000
         embeddings = torch.randn([batch_size, num_items, self.d_embedding], device=self.device)
 
         # Build the decoder
@@ -385,8 +385,10 @@ class TestRecurrentDecoderWithProfilingCUDA(unittest.TestCase):
         Profile a decode step with a randomized input embedding, recording time for each layer.
         """
         batch_size = 10
-        num_items = 300
-        embeddings = torch.randn([batch_size, num_items, self.d_embedding], device=self.device)
+        num_items = 30
+        embeddings = torch.randn([batch_size, num_items, self.d_embedding],
+                                 requires_grad=True,
+                                 device=self.device)
 
         # Build the decoder
         decoder = build_recurrent_decoder_v1(
@@ -417,7 +419,8 @@ class TestRecurrentDecoderWithProfilingCUDA(unittest.TestCase):
         with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
                                     record_shapes=True, profile_memory=True) as prof:
             output, state, statistics = decoder(embeddings, None)
-            output, state, statistics = decoder(embeddings, state)  # Second step with initialized state
+            print("beginning backward pass")
+            output.sum().backward()
             print("tests done")
 
 

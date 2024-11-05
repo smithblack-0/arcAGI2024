@@ -45,99 +45,28 @@ class StatefulCore(nn.Module, ABC):
         """
         pass
 
-class CheckpointWithSeed(nn.Module):
+def get_rng_state(device: torch.device):
+    if device.type == "cpu":
+        return torch.get_rng_state()
+    elif device.type == "cuda":
+        return torch.cuda.get_rng_state(device)
+    else:
+        raise ValueError("Unsupported device type. Must be 'cpu' or 'cuda'.")
+
+
+def set_rng_state(state, device: torch.device):
     """
-    A specialized checkpoint unit designed to keep
-    seeds consistent through forward and backwards
-    passes so that dropout and such remains sane.
+    Sets the RNG state associated with a given device
+    :param state:
+    :param device:
+    :return:
     """
-
-    Seed = Tuple[int, str, Optional[int]]
-    def get_seed(self, device: torch.device) -> Seed:
-        """
-        Get the seed associated with the device a tensor is on.
-        :param device: The device to get the seed from.
-        :return: A tuple containing the seed, the device type ('cpu' or 'cuda'),
-                 and the device number if applicable (for 'cuda', otherwise None).
-        """
-        # If the tensor is on CPU
-        if device.type == 'cpu':
-            # Return the CPU seed
-            return torch.seed(), 'cpu', None
-
-        # If the tensor is on CUDA
-        elif device.type == 'cuda':
-            # Get the current CUDA device index
-            device_num = device.index
-            # Return the CUDA seed and the device number
-            return torch.cuda.seed(), 'cuda', device_num
-
-        # Fallback in case a device type is unsupported (shouldn't happen)
-        else:
-            raise RuntimeError(f"Unsupported device type: {device.type}")
-
-
-    def set_seed(self, seed: Seed):
-        """
-        Set the RNG seed for the given device context (CPU or CUDA).
-        :param seed: The seed to set for the device.
-        :param device_type: The type of the device ('cpu' or 'cuda').
-        :param device_num: The specific CUDA device number (required for CUDA devices, otherwise None).
-        """
-        seed, device_type, device_num = seed
-        if device_type == 'cuda':
-            if device_num is not None:
-                # Ensure the correct CUDA device is set
-                torch.cuda.set_device(device_num)
-            # Set the CUDA seed for the given device
-            torch.cuda.manual_seed(seed)
-        elif device_type == 'cpu':
-            # Set the seed for the CPU
-            torch.manual_seed(seed)
-        else:
-            raise RuntimeError(f"Unsupported device type: {device_type}")
-
-    def __init__(self, p=0.5):
-        super(CheckpointDropout, self).__init__()
-        self.p = p
-
-
-    def run_checkpoint(self,
-                       func: Callable,
-                       seed: Seed,
-                       device: torch.device,
-                       *args,
-                       **kwargs
-                       )->Any:
-        """
-        Runs the checkpoint, while setting or restoring seeds
-        :param func: Function to run
-        :param seed: The seed we cached
-        :param args: Any function args
-        :param kwargs: Any function kwargs
-        :return: Whatever was returned
-        """
-        original_seed = self.get_seed(device)
-        self.set_seed(seed)
-        output = func(*args, **kwargs)
-        self.set_seed(original_seed)
-        return output
-    def forward(self,
-                func: Callable,
-                device: torch.device,
-                *args,
-                **kwargs
-                )->Any:
-        """
-        Performs the forward checkpoint. Caches the
-        seed, and restores it on the backwards pass
-        pattern that was used.
-        :param tensor: The tensor to dropout
-        :return: The tensor with dropout applied.
-        """
-
-        seed = self.get_seed(device)
-        return checkpoint(self.run_checkpoint, func, seed, device, *args, **kwargs)
+    if device.type == 'cpu':
+        torch.set_rng_state(state)
+    elif device.type == 'cuda':
+        torch.cuda.set_rng_state(state, device)
+    else:
+        raise ValueError("Unsupported device type. Must be 'cpu' or 'cuda'.")
 
 
 class DropoutLogits(nn.Module):

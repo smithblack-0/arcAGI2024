@@ -24,13 +24,22 @@ class AbstractMemoryState(SavableState):
     def update_(self, *args: Any, **kwargs: Any):
         """
         In place update of abstract memory state. Implementation
-        specific.
+        specific. Tensors should not be updated in place.
         """
     @abstractmethod
     def get(self)->Any:
         """
         Implementation specific expression of the memory.
         """
+
+    @abstractmethod
+    def copy(self)->'AbstractMemoryState':
+        """
+        Copies the memory to create a new instance,but
+        does not clone the underlying tensors.
+        :return: The new instance
+        """
+
 
 class DeepMemoryUnit(VirtualLayer, ABC):
     """

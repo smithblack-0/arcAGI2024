@@ -3,8 +3,8 @@ from typing import Optional, Any, Tuple, Dict
 
 import torch
 from torch import nn
-from ..base import DeviceDtypeWatch, TensorTree
-from .core import DropoutLogits, virtual_state_scatter
+from ..base import DeviceDtypeWatch
+from .core import DropoutLogits
 from .layers import SelectionSpec
 from .. import registry
 
@@ -285,8 +285,8 @@ class AbstractBankSelector(nn.Module, ABC):
         :param top_p: Nucleus sampling is done to get the top p logits
         :param rand: This many logits are randomly selected
         :param control_dropout: The dropout rate to apply to the logits
-        :param device: The device to run the argAGI2024 on.
-        :param dtype: The dtype to run the argAGI2024 on.
+        :param device: The device to run the arcAGI2024 on.
+        :param dtype: The dtype to run the arcAGI2024 on.
         """
         super().__init__()
 
@@ -385,8 +385,8 @@ class LinearBankSelector(AbstractBankSelector):
         :param top_p: The probability mass to select by (optional, defaults to 0.0).
         :param rand: The number of random logits to include (optional, defaults to 0).
         :param control_dropout: Logit dropout rate (optional, defaults to 0.0).
-        :param device: The device to run the argAGI2024 on.
-        :param dtype: The dtype to run the argAGI2024 on.
+        :param device: The device to run the arcAGI2024 on.
+        :param dtype: The dtype to run the arcAGI2024 on.
         """
         super().__init__(d_model,
                          bank_size,
@@ -452,7 +452,7 @@ class PseudoMarkovBankSelector(AbstractBankSelector):
     computational results to influence virtual layer selection.
 
     This class assumes that related virtual layers should be closely linked,
-    and it aims to argAGI2024 this through a Markov-like process. The Markov biases,
+    and it aims to arcAGI2024 this through a Markov-like process. The Markov biases,
     or logits, act as transition preferences between virtual layers. These biases
     are dynamically updated and applied to the selection process, promoting or
     demoting certain layers based on the last expressed selection - basically the last
@@ -460,7 +460,7 @@ class PseudoMarkovBankSelector(AbstractBankSelector):
 
     However, this is a "pseudo" Markov process because, while these biases exist,
     the immediate computation results (from embeddings or other inputs) also play
-    a significant role. This means the argAGI2024 can adapt and override the Markov
+    a significant role. This means the arcAGI2024 can adapt and override the Markov
     biases on-the-fly based on the current task, emphasizing or demoting specific
     virtual layers as needed. This combination of transition biases and current
     computations results in a more flexible and context-sensitive virtual layer
@@ -495,8 +495,8 @@ class PseudoMarkovBankSelector(AbstractBankSelector):
         :param top_p: The probability mass to select by (optional, defaults to 0.0).
         :param rand: The number of random logits to include (optional, defaults to 0).
         :param control_dropout: Logit dropout rate (optional, defaults to 0.0).
-        :param device: The device to run the argAGI2024 on.
-        :param dtype: The dtype to run the argAGI2024 on.
+        :param device: The device to run the arcAGI2024 on.
+        :param dtype: The dtype to run the arcAGI2024 on.
         """
         super().__init__(d_model,
                          bank_size,

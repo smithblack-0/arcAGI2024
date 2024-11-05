@@ -41,7 +41,7 @@ class SelectionSpec:
     """
     A specification for selecting and weighting different virtual layers
     (previously referred to as "banks") in the context of a virtualized
-    argAGI2024 architecture.
+    arcAGI2024 architecture.
 
     This structure encapsulates both the indices of the virtual layers involved
     in the computation and the associated probabilities or weights that define

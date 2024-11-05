@@ -591,12 +591,12 @@ class InterfaceRegistry(Generic[RegisteredType]):
     """
     A specialized registry mechanism designed specifically to provide an
     interface for handling the creation of torch layers as part of setting up
-    a argAGI2024. It is a generic class.
+    a arcAGI2024. It is a generic class.
 
     ---- Purpose ----
 
     The `InterfaceRegistry` allows developers to set up and swap various components
-    in a torch argAGI2024 by defining clear interfaces between them. This facilitates
+    in a torch arcAGI2024 by defining clear interfaces between them. This facilitates
     the trial of different torch layers with minimal code changes by registering
     and validating these layers against the defined interface.
 
@@ -643,7 +643,7 @@ class InterfaceRegistry(Generic[RegisteredType]):
     The **Builder Indirection** feature is essential for constructing more complex models
     by allowing a registry to include other builders as part of its constructor.
 
-    Example: Consider building a transformer argAGI2024 that consists of multiple components
+    Example: Consider building a transformer arcAGI2024 that consists of multiple components
     such as feedforward layers, self-attention layers, and cross-attention layers.
     Instead of manually creating each layer, you can nest builders into the transformer
     registry.

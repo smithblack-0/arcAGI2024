@@ -1,15 +1,16 @@
-import model
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-model.build_recurrent_decoder_v1(100, 10, 10, 10, 512,
+model = AutoModelForCausalLM.from_pretrained("gpt2")
+tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
-                                 0.2, 0.1, 0.01,
-                                 "FastLinearMemory",
-                                 deep_memory_details={"d_address": 4,
-                                                      "d_memory": 20,
-                                                      "num_memories": 100,
-                                                      "num_read_heads" : 10,
-                                                      "num_write_heads" : 10,
-                                                      },
-                                 layer_controller_variant="PseudoMarkovBankSelector",
-                                 layer_controller_details={}
-                                 )
+prompt = "GPT2 is a model developed by OpenAI."
+
+input_ids = tokenizer(prompt, return_tensors="pt").input_ids
+
+gen_tokens = model.generate(
+    input_ids,
+    do_sample=True,
+    temperature=0.9,
+    max_length=100,
+)
+gen_text = tokenizer.batch_decode(gen_tokens)[0]

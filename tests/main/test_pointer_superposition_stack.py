@@ -2,8 +2,8 @@ import unittest
 import torch
 from torch import nn
 
-from src.main.argAGI2024.computation_support_stack import (stack_controller_registry, AbstractSupportStack,
-                                                           AbstractStackController)
+from src.old.arcAGI2024 import (stack_controller_registry, AbstractSupportStack,
+                                AbstractStackController)
 
 class TestPointerSuperpositionStack(unittest.TestCase):
     """

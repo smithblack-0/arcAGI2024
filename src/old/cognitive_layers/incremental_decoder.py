@@ -8,8 +8,8 @@ class IncrementalDecoder:
     """
     An incremental output decoder.
 
-    Output in this argAGI2024 is incremental, which means adding more computation
-    core computation steps will generally increase the performance of the argAGI2024.
+    Output in this arcAGI2024 is incremental, which means adding more computation
+    core computation steps will generally increase the performance of the arcAGI2024.
     This increase of performance is also linear. What this layer attempts to do
     is provide the next incremental output. These can later be combined together
     to provide final embeddings for making predictions.

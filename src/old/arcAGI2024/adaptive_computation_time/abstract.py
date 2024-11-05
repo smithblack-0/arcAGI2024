@@ -4,8 +4,8 @@ from typing import TypeVar, Generic, Optional, Any, Tuple, Dict
 import torch
 from torch import nn
 
-from src.main.argAGI2024.base import TensorTree, DeviceDtypeWatch
-from src.main.argAGI2024.registry import InterfaceRegistry
+from ..base import TensorTree, DeviceDtypeWatch
+from ..registry import InterfaceRegistry
 
 class AbstractACT(ABC):
     """
@@ -204,7 +204,7 @@ class ACTController(nn.Module):
         Runs the ACT process, setting it up if needed.
         One either
         :param control_embedding: The embedding. Shape (...batch_shape, d_model).
-            - Used to produce halting probabilities and argAGI2024 features.
+            - Used to produce halting probabilities and arcAGI2024 features.
             - Also we can figure out batch shape from this.
         :param act_state: The act state
             - Optional. Not provided means we setup an ACT state before running

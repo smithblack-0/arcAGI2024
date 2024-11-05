@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 setup(
     name='arcAGI2024',
-    version='0.1',
+    version='0.1.4',
     description='Your package description here',
     author='Your Name',
     author_email='your.email@example.com',
@@ -10,6 +10,7 @@ setup(
     install_requires=[
         'torch',
         'tokenizers', # add other dependencies here
+        'transformers',
         'typeguard',
         'numpy'
     ],

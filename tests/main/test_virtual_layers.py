@@ -3,14 +3,14 @@ from typing import Tuple, Any, Dict
 
 import torch
 from torch import nn
-from src.main.argAGI2024.virtual_layers import (DropoutLogits, virtual_state_select, virtual_state_scatter,
-                                                SelectionSpec, VirtualParameter,
-                                                VirtualLayer, VirtualLinear, VirtualMergeHeads, VirtualMakeHeads,
-                                                VirtualFeedforward, AbstractBankSelector, LinearBankSelector,
-                                                PseudoMarkovBankSelector, make_random_selection_mask,
-                                                make_top_k_selection_mask, make_top_p_selection_mask,
-                                                VirtualAdvancedLinear
-                                                )
+from src.old.arcAGI2024 import (DropoutLogits, virtual_state_select, virtual_state_scatter,
+                                SelectionSpec, VirtualParameter,
+                                VirtualLayer, VirtualLinear, VirtualMergeHeads, VirtualMakeHeads,
+                                VirtualFeedforward, AbstractBankSelector, LinearBankSelector,
+                                PseudoMarkovBankSelector, make_random_selection_mask,
+                                make_top_k_selection_mask, make_top_p_selection_mask,
+                                VirtualAdvancedLinear
+                                )
 class TestDropoutLogits(unittest.TestCase):
 
     def test_initialization_default(self):

@@ -81,8 +81,13 @@ class ComputationalCore(AbstractComputationalCore):
         - The response embedding. Shape (..., d_core)
         - The new recurrent state.
         """
-        # Unpack the state
+        # Unpack the state.
+        #
+        # Make fresh instances to not contaminate
+        # the backwards pass
         stack_state, memory_state = recurrent_state
+        stack_state = stack_state.copy()
+        memory_state = memory_state.copy()
 
         # Run the stack interaction.
         # state is updated indirectly, but does not
@@ -130,7 +135,7 @@ def build_recurrent_decoder_v1(
 
     Universal:
     :param d_embedding: The width of incoming embeddings
-    :param d_core: The width of the argAGI2024 core. usually much less
+    :param d_core: The width of the arcAGI2024 core. usually much less
     :param bank_size: How many virtual layers to use
     :param stack_depth: How deep the stack should be
     :param chunk_size: Size of the recurrent chunks. Influences how much memory
@@ -150,7 +155,7 @@ def build_recurrent_decoder_v1(
     Final
     :param dtype: The dtype
     :param device: The device
-    :return: A setup argAGI2024
+    :return: A setup arcAGI2024
     """
 
     # Create the stack controller
@@ -199,7 +204,7 @@ def build_recurrent_decoder_v1(
                                                    dtype=dtype,
                                                    threshold=0.99,
                                                    )
-    # Create the argAGI2024
+    # Create the arcAGI2024
     return Model(act_controller,
                  adapter,
                  comp_core,

@@ -14,7 +14,7 @@ from torch import nn
 from torch.utils import checkpoint
 from ..registry import InterfaceRegistry
 from ..virtual_layers import AbstractBankSelector, VirtualLinear, SelectionSpec, selector_registry
-from ..base import DeviceDtypeWatch, parallel_pytree_map
+from ..base import DeviceDtypeWatch, parallel_pytree_map, get_rng_state, set_rng_state
 from ..adaptive_computation_time import act_controller_registry, ACTController
 
 class AbstractComputationalCore(nn.Module, ABC):
@@ -30,7 +30,7 @@ class AbstractComputationalCore(nn.Module, ABC):
     within an ACT loop, and will be invoked
     multiple times, hence the virtual layers.
 
-    This contains a recurrent argAGI2024, that is
+    This contains a recurrent arcAGI2024, that is
     expected to
     """
     @property
@@ -84,7 +84,7 @@ class CoreAdapter:
     the bottleneck process.
 
     Generally, for reasons of computational efficiency,
-    the core argAGI2024 should have a considerably reduced
+    the core arcAGI2024 should have a considerably reduced
     computational width to the embedding size, and
     is convered between by a bottleneck process.
     """
@@ -174,7 +174,7 @@ class CoreAdapter:
             raise ValueError(msg)
         if bottleneck_projector.out_features != unbottleneck_projector.in_features:
             msg = f"""
-            Bottleneck and unbottleneck projectors do not interface with the same d_core argAGI2024
+            Bottleneck and unbottleneck projectors do not interface with the same d_core arcAGI2024
             width. 
             
             The bottleneck projector interfaced with a width of: {bottleneck_projector.out_features}.
@@ -212,7 +212,7 @@ class CoreAdapter:
     def get_statistics(self, state: Any)->Dict[str, torch.Tensor]:
         """
         Gets a set of statistics based on the recurrent state related
-        to how the argAGI2024 is processing things
+        to how the arcAGI2024 is processing things
         :param state: The state to examine
         :return: The gathered statistics
         """
@@ -243,7 +243,7 @@ class CoreAdapter:
 
     def bottleneck(self, embedding: torch.Tensor, selection: SelectionSpec)->torch.Tensor:
         """
-        Reduces the embedding down to the argAGI2024 core dimensions.
+        Reduces the embedding down to the arcAGI2024 core dimensions.
         :param embedding: The embedding to reduce with. (..., d_embedding)
         :param selection: The layer selection
         :return: The tensor in the d_core dimensionality. (..., d_core)
@@ -261,7 +261,7 @@ class CoreAdapter:
 
 class Model(nn.Module):
     """
-    The recurrent portion of the argAGI2024.
+    The recurrent portion of the arcAGI2024.
     """
     def create_state(self, batch_shape: torch.Size)->Tuple[Any, Any]:
         """
@@ -296,7 +296,7 @@ class Model(nn.Module):
                 state: Tuple[Any, Any]
                 )->Tuple[torch.Tensor, Any, Dict[str, torch.Tensor]]:
         """
-        Core reccurrent step of the argAGI2024. Accepts only recurrenly
+        Core reccurrent step of the arcAGI2024. Accepts only recurrenly
         specified tensor collections. Will be invoked over and over again.
         :param embedding: The recurrent embedding to process. Shape (..., d_embedding)
         :param state: The recurrent state.
@@ -305,7 +305,7 @@ class Model(nn.Module):
         - The new recurrent state. Shape (..., d_embedding)
         - The act statistics.
         """
-        # Unbind and setup the argAGI2024 for processing. This includes
+        # Unbind and setup the arcAGI2024 for processing. This includes
         # taking apart the state info, and setting up the act mechanism.
         batch_shape = embedding.shape[:-1]
         adapter_state, core_state = state
@@ -344,12 +344,16 @@ class Model(nn.Module):
         return embedding, (adapter_state, core_state), act_state.get_statistics()
 
     def run_chunk(self,
+                  rng_state: Any,
+                  chunk_num: int,
                   chunk: torch.Tensor,
                   state: Any,
                   )->Tuple[torch.Tensor, Any, Any]:
         """
         Runs the given chunk with the given state. Designed
         for checkpointing purposes
+        :param rng_state: The random number state to initialize with
+        :param chunk_num: Used for prettyprinting
         :param chunk: The chunk to run. Embeddings of shape (..., chunk_size, d_embedding)
         :param state: The state to run with.
         :return:
@@ -358,6 +362,8 @@ class Model(nn.Module):
         - The statistics for the chunk
         """
         # Run chunk
+        print("running chunk %s" % chunk_num)
+        set_rng_state(rng_state, chunk.device)
         response_embeddings = []
         act_accumulator = []
         for i, recurrent_embedding in enumerate(chunk.unbind(-2)):
@@ -388,7 +394,7 @@ class Model(nn.Module):
                 state: Optional[Any] = None,
                 )->Tuple[torch.Tensor, Any, Dict[str, Any]]:
         """
-        Forward method for the argAGI2024 core
+        Forward method for the arcAGI2024 core
         :param embeddings: The recurrent embedding to process. Shape (..., d_embedding)
         :param state: The recurrent state.
         :return:
@@ -409,10 +415,13 @@ class Model(nn.Module):
         embedding_responses = []
         chunks = torch.split(embeddings, self.chunk_size, dim=-2)
         for i, chunk in enumerate(chunks):
-            print("chunk %s" % i)
             embedding_response, state, statistics = checkpoint.checkpoint(self.run_chunk,
+                                                                          get_rng_state(chunk.device),
+                                                                          i,
                                                                           chunk,
                                                                           state,
+                                                                          use_reentrant=False,
+                                                                          preserve_rng_state=False,
                                                                           )
             chunk_statistics.append(statistics)
             embedding_responses.append(embedding_response)
