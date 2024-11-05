@@ -2,8 +2,11 @@ import torch
 import unittest
 from src.main.arcAGI2024.sampling import (make_random_selection_mask,
                                           make_top_k_selection_mask,
-                                          make_top_p_selection_mask
-
+                                          make_top_p_selection_mask,
+                                          TopLogitSampling,
+                                          TopKSampling,
+                                          NucleusSampling,
+                                          DefaultSampling
 
                                           )
 
@@ -161,3 +164,77 @@ class TestMakeRandomSelectionMask(unittest.TestCase):
 
         # Assert that at least one difference exists between two independent selections
         self.assertFalse(torch.equal(mask1, mask2), "Random selection should vary across calls with the same inputs")
+
+
+class TestTopLogitSampling(unittest.TestCase):
+
+    def setUp(self):
+        torch.manual_seed(0)
+        self.logits = torch.tensor([[2.0, 0.5, 0.3, 0.1, -1.0], [1.5, 0.7, 0.3, -0.2, -1.2]])
+        self.temperature = 1.0
+
+    def test_top_logit_sampling(self):
+        sampler = TopLogitSampling()
+        sampled = sampler(self.logits, temperature=self.temperature)
+        expected = torch.argmax(self.logits, dim=-1)
+        self.assertTrue(torch.equal(sampled, expected), "TopLogitSampling should return the argmax.")
+
+class TestDefaultSampling(unittest.TestCase):
+
+    def setUp(self):
+        torch.manual_seed(0)
+        self.logits = torch.tensor([[2.0, 0.5, 0.3, 0.1, -1.0], [1.5, 0.7, 0.3, -0.2, -1.2]])
+
+    def test_default_sampling_with_temperature(self):
+        sampler = DefaultSampling()
+        sampled = sampler(self.logits, temperature=1.0)
+        self.assertEqual(sampled.shape, (2,), "DefaultSampling should return a tensor of shape (batch size,).")
+
+    def test_default_sampling_with_zero_temperature(self):
+        sampler = DefaultSampling()
+        sampled = sampler(self.logits, temperature=0.0)
+        expected = torch.argmax(self.logits, dim=-1)
+        self.assertTrue(torch.equal(sampled, expected), "With zero temperature, DefaultSampling should return argmax.")
+
+class TestTopKSampling(unittest.TestCase):
+
+    def setUp(self):
+        torch.manual_seed(0)
+        self.logits = torch.tensor([[2.0, 0.5, 0.3, 0.1, -1.0], [1.5, 0.7, 0.3, -0.2, -1.2]])
+
+    def test_top_k_sampling_with_k(self):
+        sampler = TopKSampling(num_k=3)
+        sampled = sampler(self.logits, temperature=1.0)
+        self.assertEqual(sampled.shape, (2,), "TopKSampling should return a tensor of shape (batch size,).")
+
+    def test_top_k_sampling_with_zero_temperature(self):
+        sampler = TopKSampling(num_k=2)
+        sampled = sampler(self.logits, temperature=0.0)
+        expected = torch.argmax(self.logits, dim=-1)
+        self.assertTrue(torch.equal(sampled, expected), "With zero temperature, TopKSampling should return argmax.")
+
+    def test_top_k_sampling_k_greater_than_logits(self):
+        sampler = TopKSampling(num_k=10)  # Exceeds logits count
+        sampled = sampler(self.logits, temperature=1.0)
+        self.assertEqual(sampled.shape, (2,), "TopKSampling should handle k greater than logits size.")
+
+class TestNucleusSampling(unittest.TestCase):
+
+    def setUp(self):
+        torch.manual_seed(0)
+        self.logits = torch.tensor([[2.0, 0.5, 0.3, 0.1, -1.0], [1.5, 0.7, 0.3, -0.2, -1.2]])
+
+    def test_nucleus_sampling_with_top_p(self):
+        sampler = NucleusSampling(top_p=0.9)
+        sampled = sampler(self.logits, temperature=1.0)
+        self.assertEqual(sampled.shape, (2,), "NucleusSampling should return a tensor of shape (batch size,).")
+
+    def test_nucleus_sampling_with_zero_temperature(self):
+        sampler = NucleusSampling(top_p=0.9)
+        sampled = sampler(self.logits, temperature=0.0)
+        expected = torch.argmax(self.logits, dim=-1)
+        self.assertTrue(torch.equal(sampled, expected), "With zero temperature, NucleusSampling should return argmax.")
+
+    def test_nucleus_sampling_with_invalid_top_p(self):
+        with self.assertRaises(AssertionError):
+            NucleusSampling(top_p=1.5)  # Invalid top_p
