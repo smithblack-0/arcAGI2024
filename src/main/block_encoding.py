@@ -185,12 +185,3 @@ class IntGridBlockDataProcessor(AbstractBlockDataProcessor):
     def decode_helper(self, tensor: torch.Tensor) -> Any:
         return tensor.tolist()
 
-class BlockProcessor:
-    """
-    Constructs the headers for blocks.
-    These are needed in order to ensure the main
-    has a way
-    """
-    def __init__(self,
-                 ):
-

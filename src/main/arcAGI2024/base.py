@@ -147,6 +147,8 @@ class DeviceDtypeWatch(nn.Module):
         self.register_buffer("watch", watch)
 
 
+
+
 class SavableState(ABC):
     """
     A abstract state that implemented two methods,
@@ -188,7 +190,6 @@ class SavableState(ABC):
 def parallel_pytree_map(func: Callable[..., Any], *pytrees: Any) -> Any:
     """
     Recursively applies a function to corresponding leaves of multiple pytrees with the same structure.
-    Nodes where the function returns None are dropped.
 
     ---- support ----
 
@@ -209,19 +210,20 @@ def parallel_pytree_map(func: Callable[..., Any], *pytrees: Any) -> Any:
     # Check if all pytrees are lists, tuples, or dicts
     if all(isinstance(pytree, list) for pytree in pytrees):
         result = [parallel_pytree_map(func, *elems) for elems in zip(*pytrees)]
-        return [elem for elem in result if elem is not None]  # Remove none results
+        return result
     elif all(isinstance(pytree, tuple) for pytree in pytrees):
         result = tuple(parallel_pytree_map(func, *elems) for elems in zip(*pytrees))
-        return tuple(elem for elem in result if elem is not None)  # Remove none results
+        return result
     elif all(isinstance(pytree, dict) for pytree in pytrees):
         result = {key: parallel_pytree_map(func, *(pytree[key] for pytree in pytrees))
                   for key in pytrees[0]}
-        return {key: value for key, value in result.items() if value is not None}  # Remove none results.
+        return result
     elif all(isinstance(pytree, SavableState) for pytree in pytrees):
         # Convert to pytrees, and update state
         template = pytrees[0]
         _, bypass = template.save_state()
-        updated_state = parallel_pytree_map(func, *(state.save_state()[0] for state in pytrees))
+        flat_states = [state.save_state()[0] for state in pytrees]
+        updated_state = parallel_pytree_map(func, *flat_states)
         return template.load_state(updated_state, bypass)
     else:
         # These are leaves, apply the function to them

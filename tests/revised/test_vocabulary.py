@@ -3,7 +3,7 @@ import os
 import shutil
 import torch
 from transformers import AutoTokenizer
-from src.main.ArcAGI2024.vocabulary import VocabularyStruct, SpecialTokens, AdditionalSpecialTokens
+from src.main.arcAGI2024.vocabulary import VocabularyStruct, SpecialTokens, AdditionalSpecialTokens
 
 
 class TestVocabularyStruct(unittest.TestCase):

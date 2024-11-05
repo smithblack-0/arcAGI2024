@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from torch import nn
 from torch.nn import functional as F
 from torch.autograd.function import Function, FunctionCtx
-from .base import TensorTree, DeviceDtypeWatch, SavableState, DropoutLogits
+from .base import TensorTree, DeviceDtypeWatch, SavableState, DropoutLogits, parallel_pytree_map
 
 # Implement flag and context managers for
 # checkpointing. We need to know whether we
@@ -442,6 +442,24 @@ class WriteMemory(nn.Module):
                                                                    512)
         self.write_logits = nn.Linear(d_address, 1, dtype=dtype, device=device)
         self.dropout_logits = DropoutLogits(dropout_rate)
+
+    @staticmethod
+    def broadcasted_where(batch_mask: torch.Tensor,
+                          masked_case: torch.Tensor,
+                          update_case: torch.Tensor
+                          )-> torch.Tensor:
+        """
+        Basically, a where statement where the batch mask can broadcast from the left.
+        :param batch_mask: The batch mask. Shape (...). True indicates masked and should not be updated.
+        :param masked_case: What to do when we want to mask. Shape (..., ...more)
+        :param update_case: What to do when we do not want to mask. Shape (..., ...more)
+        :return: Something of shape (..., ...more)
+        """
+        while batch_mask.dim() < masked_case.dim():
+            batch_mask = batch_mask.unsqueeze(-1)
+        return torch.where(batch_mask, masked_case, update_case)
+
+
     def compute_common(self,
                        key: torch.Tensor,
                        values: torch.Tensor,
@@ -502,6 +520,7 @@ class WriteMemory(nn.Module):
     def reverse_memory(self,
                        update: Tuple[torch.Tensor, torch.Tensor],
                        write_factor: torch.Tensor,
+                       batch_mask: torch.Tensor,
                        memory: MemoryState,
                        ) -> MemoryState:
         """
@@ -509,6 +528,7 @@ class WriteMemory(nn.Module):
         current and the various update factors.
         :param update: The matrx, normalizer update pair
         :param write_factor: The write factor
+        :param batch_mask: Shape (...). Indicates whether memory can be updated. True means No.
         :param memory: The current memory state
         :return: The last memory state
         """
@@ -517,9 +537,15 @@ class WriteMemory(nn.Module):
         matrix_update, normalizer_update = update
 
         # Run the inverse of the original update factor.
-        normalizer = (next_matrix - normalizer_update * write_factor) / (1 - write_factor)
-        matrix = (next_normalizer - matrix_update * write_factor.unsqueeze(-1)) / (1 - write_factor.unsqueeze(-1))
-        cum_prob = next_cum_prob - write_factor
+        normalizer = (next_normalizer - normalizer_update * write_factor) / (1 - write_factor)
+        matrix = (next_matrix - matrix_update * write_factor.unsqueeze(-1)) / (1 - write_factor.unsqueeze(-1))
+        cum_prob = next_cum_prob - write_factor.mean(dim=-1)
+
+        # Mask out anything that was not able to be updated
+
+        normalizer = self.broadcasted_where(batch_mask, next_normalizer, normalizer)
+        matrix = self.broadcasted_where(batch_mask, next_matrix, matrix)
+        cum_prob = self.broadcasted_where(batch_mask, next_cum_prob, cum_prob)
 
         # Return the original memory state
         return MemoryState(matrix, normalizer, cum_prob)
@@ -527,6 +553,7 @@ class WriteMemory(nn.Module):
     def advance_memory(self,
                        update: Tuple[torch.Tensor, torch.Tensor],
                        write_factor: torch.Tensor,
+                       batch_mask: torch.Tensor,
                        memory: MemoryState,
                        ) -> MemoryState:
         """
@@ -534,40 +561,27 @@ class WriteMemory(nn.Module):
         Commits using interpolation.
         :param update: The update to integrate
         :param write_factor: The write factor to go with it
+        :param batch_mask: Shape (...). Indicates whether memory can be updated. True means No.
         :param memory: The current memory
         :return: The updated memory
         """
         # Unpack the memory
-        last_matrix, last_normalizer, last_cum_probs = memory.get()
+        last_matrix, last_normalizer, last_cum_prob = memory.get()
         matrix_update, normalizer_update = update
 
         # Get the key common information
         normalizer = last_normalizer * (1 - write_factor) + normalizer_update * write_factor
         matrix = last_matrix * (1 - write_factor.unsqueeze(-1)) + matrix_update * write_factor.unsqueeze(-1)
-        cum_probs = last_cum_probs + write_factor.mean(dim=-1)
+        cum_prob = last_cum_prob + write_factor.mean(dim=-1)
+
+        # Mask out anything that was not able to be updated
+
+        normalizer = self.broadcasted_where(batch_mask, last_normalizer, normalizer)
+        matrix = self.broadcasted_where(batch_mask, last_matrix, matrix)
+        cum_prob = self.broadcasted_where(batch_mask, last_cum_prob, cum_prob)
 
         # Return the new memory
-        return MemoryState(matrix, normalizer, cum_probs)
-
-    def forward(self,
-                key: torch.Tensor,
-                values: torch.Tensor,
-                addresses: torch.Tensor,
-                memory: MemoryState,
-                ) -> MemoryState:
-        """
-        The forward pass mechanism.
-        :param key: A tensor of keys, shaped (..., d_model)
-        :param values: A tensor of values, shaped (..., d_model)
-        :param addresses: The memory addresses. Shape (..., num_memory, d_address).
-        :param memory: The memory state. Contains
-        - matrix: shape (..., num_memories, d_addresses, d_memory)
-        - normalizer: shape (..., num_memories, d_addresses)
-        - cumulative write probs.
-        """
-
-        update, write_factor = self.compute_common(key, values, addresses)
-        return self.advance_memory(update, write_factor, memory)
+        return MemoryState(matrix, normalizer, cum_prob)
 
 class FastLinearMemory(nn.Module):
     """
@@ -649,6 +663,7 @@ class FastLinearMemory(nn.Module):
 
     def reverse(self,
                 tensor: torch.Tensor,
+                batch_mask: torch.Tensor,
                 next_memory: MemoryState,
                 ) -> Tuple[torch.Tensor, MemoryState]:
         """
@@ -665,10 +680,11 @@ class FastLinearMemory(nn.Module):
         be fed in through the "next_memory" parameters.
 
         :param tensor: The original tensor input
+        :param batch_mask: Shape (...). Indicates whether memory can be updated. True means No.
         :param next_memory: The next memory state
         :return:
         - The originally produced output, usable to continue the computation
-        - The previous memory state. Setup to accumulate gradients.
+        - The original memory state. Setup to accumulate gradients.
         """
         # Compute the write components.
         update, write_factor = self.memory_writer.compute_common(tensor, tensor, self.addresses)
@@ -678,25 +694,32 @@ class FastLinearMemory(nn.Module):
         # Make it retain grads so we can get
         # our gradients off it later for the next
         # backwards pass.
-        original_memory = self.memory_writer.reverse_memory(update, write_factor, next_memory)
+        with torch.no_grad():
+            original_memory = self.memory_writer.reverse_memory(update, write_factor, batch_mask, next_memory)
 
-        original_memory.normalizer.retain_grad()
-        original_memory.matrix.retain_grad()
-        original_memory.write_probability_mass.retain_grad()
+        def setup_grads(tensor: torch.Tensor)->torch.Tensor:
+            if torch.is_grad_enabled():
+                tensor.requires_grad_(True)
+                tensor = tensor.clone()
+                tensor.retain_grad()
+            return tensor
+        original_memory = parallel_pytree_map(setup_grads, original_memory)
 
         # Manually compute the write, then the read.
-        next_memory = self.memory_writer.advance_memory(update, write_factor, original_memory)
+        next_memory = self.memory_writer.advance_memory(update, write_factor, batch_mask, original_memory)
         read = self.memory_reader(tensor, self.addresses, next_memory)
 
         # Return the results
         return (read, next_memory), original_memory
     def forward(self,
                 tensor: torch.Tensor,
+                batch_mask: torch.Tensor,
                 memory: MemoryState,
                 ) -> Tuple[torch.Tensor, MemoryState]:
         """
         Forward pass for the fast linear memory unit.
         :param tensor: The tensor to use to access and update the mem state. Shape (..., d_model)
+        :param batch_mask: Shape (...). Indicates whether memory can be updated. True means No.
         :param memory: The memory state. Contains
         - matrix: shape (..., num_memories, d_addresses, d_memory)
         - normalizer: shape (..., num_memories, d_addresses)
@@ -706,7 +729,7 @@ class FastLinearMemory(nn.Module):
         - The new memory state
         """
         update, write_factor = self.memory_writer.compute_common(tensor, tensor, self.addresses)
-        memory = self.memory_writer.advance_memory(update, write_factor, memory)
+        memory = self.memory_writer.advance_memory(update, write_factor, batch_mask, memory)
         read = self.memory_reader(tensor, self.addresses, memory)
         return read, memory
 

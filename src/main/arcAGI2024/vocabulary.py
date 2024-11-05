@@ -14,8 +14,8 @@ class SpecialTokens(Enum):
     pad_token = "<PAD>"
 
 class AdditionalSpecialTokens(Enum):
-    read_token = "<READ>"
-    response_token = "<RESPONSE>"
+    prompt_token = "<PROMPT>"
+    beginning_of_response_token = "<RESPONSE>"
     start_grid_data = "<STARTGRID>"
     end_grid_data = "<ENDGRID>"
     grid_line = "<GRIDLINE>"
@@ -76,7 +76,7 @@ class VocabularyStruct(nn.Module):
         num_added_tokens = self.tokenizer.add_special_tokens(special_tokens, replace_additional_special_tokens=False)
 
         # Modify the tokenizer defaults slightly
-        self.tokenizer.padding_side = "Right"
+        self.tokenizer.padding_side = "right"
         self.tokenizer.true_vocab_size = original_size + num_added_tokens
 
         # Expand the embeddings. We take the current embeddings, extend it

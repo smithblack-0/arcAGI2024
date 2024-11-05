@@ -2,7 +2,7 @@ import copy
 import unittest
 import torch
 from typing import Any, Tuple
-from src.main.ArcAGI2024.base import SavableState, TensorTree, parallel_pytree_map
+from src.main.arcAGI2024.base import SavableState, TensorTree, parallel_pytree_map
 
 
 class MySavableState(SavableState):

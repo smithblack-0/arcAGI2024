@@ -1,9 +1,10 @@
 from setuptools import setup, find_packages
+print("PACKAGES", find_packages(where="src/main"))
 setup(
     name='arcAGI2024',
-    version='0.1.4',
-    description='Your package description here',
-    author='Your Name',
+    version='0.2.1',
+    description='Support mechanism for the arc agi project',
+    author='Chris',
     author_email='your.email@example.com',
     packages=find_packages(where="src/main"),
     package_dir={'': 'src/main'},
