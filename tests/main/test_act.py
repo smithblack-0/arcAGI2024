@@ -36,7 +36,7 @@ class TestAdaptiveComputationTime(unittest.TestCase):
         """
         Tests the initialization of the ACT mechanism using the factory.
         """
-        act_instance = self.factory.forward(batch_shape=self.batch_shape, **self.accumulator_templates)
+        act_instance = self.factory.step(batch_shape=self.batch_shape, **self.accumulator_templates)
 
         # Check that the ACT instance was initialized correctly
         self.assertEqual(act_instance.halting_probabilities.shape, self.batch_shape)
@@ -53,7 +53,7 @@ class TestAdaptiveComputationTime(unittest.TestCase):
         """
         Tests the ACT step mechanism for halting and accumulating outputs.
         """
-        act_instance = self.factory.forward(batch_shape=self.batch_shape, **self.accumulator_templates)
+        act_instance = self.factory.step(batch_shape=self.batch_shape, **self.accumulator_templates)
 
         # Create example halting probabilities and outputs
         halting_prob = torch.full(self.batch_shape, 0.1, dtype=self.dtype, device=self.device)
@@ -76,7 +76,7 @@ class TestAdaptiveComputationTime(unittest.TestCase):
         """
         Tests the `should_continue` method to ensure that it correctly identifies when the process should halt.
         """
-        act_instance = self.factory.forward(batch_shape=self.batch_shape, **self.accumulator_templates)
+        act_instance = self.factory.step(batch_shape=self.batch_shape, **self.accumulator_templates)
 
         # Initially, should_continue should return True since no samples have halted
         self.assertTrue(act_instance.should_continue())
@@ -91,7 +91,7 @@ class TestAdaptiveComputationTime(unittest.TestCase):
         """
         Tests the finalize method to ensure it completes the accumulation and provides the final results.
         """
-        act_instance = self.factory.forward(batch_shape=self.batch_shape, **self.accumulator_templates)
+        act_instance = self.factory.step(batch_shape=self.batch_shape, **self.accumulator_templates)
 
         # Perform several steps to simulate computation
         halting_prob = torch.full(self.batch_shape, 0.1, dtype=self.dtype, device=self.device)
@@ -117,7 +117,7 @@ class TestAdaptiveComputationTime(unittest.TestCase):
         """
         Tests that finalizing without all samples having halted raises a RuntimeError.
         """
-        act_instance = self.factory.forward(batch_shape=self.batch_shape, **self.accumulator_templates)
+        act_instance = self.factory.step(batch_shape=self.batch_shape, **self.accumulator_templates)
 
         # Perform some steps but do not halt all samples
         halting_prob = torch.full(self.batch_shape, 0.1, dtype=self.dtype, device=self.device)

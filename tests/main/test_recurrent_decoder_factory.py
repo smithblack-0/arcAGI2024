@@ -233,13 +233,13 @@ class TestRecurrentDecoderWithProfiling(unittest.TestCase):
 
         # Function to patch each layer with record_function timing
         def patch_forward_with_record_function(layer, layer_name):
-            original_forward = layer.forward
+            original_forward = layer.step
 
             def timed_forward(*args, **kwargs):
                 with record_function(f"{layer_name}.forward"):
                     return original_forward(*args, **kwargs)
 
-            layer.forward = timed_forward
+            layer.step = timed_forward
 
         # Patch each layer with record_function for profiling
         patched_layers = {}
@@ -254,7 +254,7 @@ class TestRecurrentDecoderWithProfiling(unittest.TestCase):
 
         # Unpatch layers to restore original forward methods
         for name, layer in patched_layers.items():
-            layer.forward = layer.__class__.forward
+            layer.step = layer.__class__.step
 
         # Print profiling results with layer-specific timings
         print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
@@ -341,13 +341,13 @@ class TestRecurrentDecoderWithProfilingCUDA(unittest.TestCase):
 
         # Function to patch each layer with record_function timing
         def patch_forward_with_record_function(layer, layer_name):
-            original_forward = layer.forward
+            original_forward = layer.step
 
             def timed_forward(*args, **kwargs):
                 with torch.autograd.profiler.record_function(f"{layer_name}.forward"):
                     return original_forward(*args, **kwargs)
 
-            layer.forward = timed_forward
+            layer.step = timed_forward
 
         # Patch each layer for profiling
         patched_layers = {}
@@ -363,7 +363,7 @@ class TestRecurrentDecoderWithProfilingCUDA(unittest.TestCase):
 
         # Unpatch layers to restore original forward methods
         for name, layer in patched_layers.items():
-            layer.forward = layer.__class__.forward
+            layer.step = layer.__class__.step
 
         # Print profiling results with layer-specific timings
         print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=10))

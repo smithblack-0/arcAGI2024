@@ -319,11 +319,13 @@ class CausalLMTrainer(nn.Module):
         # memories I shall need. This consists of recurrently
         # updating again and again. We discard the final state
         save_to_cpu = lambda x: x.cpu()
+        output_embeddings = []
         with torch.no_grad(), profiler.record_function("train_step: forward pass"):
             for i, (embedding, mask) in enumerate(zip(embeddings.unbind(-2), batch_mask.unbind(-1))):
                 # Run forward pass
                 rng_state = get_rng_state(embedding.device)
                 embedding, memories = self.decoder(embedding, mask, memories)
+                output_embeddings.append(embedding.detach())
 
                 # Integrate rng into cache. In order to reproducibly
                 # run the reverse pass the same way as the forward
@@ -354,7 +356,7 @@ class CausalLMTrainer(nn.Module):
         results["memories"] = memories
         results["rng_states"] = rng_states
         results["numeric_cache"] = numeric_caches
-        return results
+        return results, output_embeddings
 
     def setup_reverse_pass(self,
                            access_schedule: Optional[float],
@@ -378,13 +380,10 @@ class CausalLMTrainer(nn.Module):
         with profiler.record_function("train_step: Setup for reverse pass"):
             memory_state: List[MemoryState] = cache_dict["memories"]
 
-            # Make a copy of the memories.
-            #
-            # This can later be returned without
-            # changes and used to continue generation
-            # if desired.
-            final_memories = parallel_pytree_map(lambda x: x.clone().detach(), memory_state)
+            # Make a copy pf the final rng state,
+            # to restore it later. Also copy the final memories
             final_rng = get_rng_state(device)
+            final_memories = parallel_pytree_map(lambda x : x.clone().detach(), memory_state)
 
             # Perform modifications to the final memory state, readying
             # it for backpropogation and gradient accumulation. This
@@ -408,10 +407,11 @@ class CausalLMTrainer(nn.Module):
                     loss += self.mem_access_loss_function(memory.write_probability_mass, access_schedule)
                 loss.backward()
 
-            # Store the revised memories, and the final memories
+            # Store the revised memories, and the beginnings of
+            # the loss metric.
 
             cache_dict["memories"] = memory_state
-            cache_dict["final_memories"] = final_memories
+            cache_dict["loss"] = loss.detach()
 
         return final_memories, final_rng
 
@@ -435,13 +435,15 @@ class CausalLMTrainer(nn.Module):
         :param cache_dict: The main cache, containing memories
         :return: The numerics metrics. KVDivegence at various locations between the forward and
                                        backwards predictions. Also mean prob difference.
+        :return: The total loss. Is a detached metric, not a backprop feature.
+
         """
 
         numerics_metrics = {}
         with (profiler.record_function("train_step: Reverse pass")):
             # Setup states, and grad cache containers
             memories = cache_dict["memories"]
-
+            loss_metric = cache_dict["loss"]
             def get_mem_grads(tensor: torch.Tensor) -> torch.Tensor:
                 if tensor.grad is not None:
                     return tensor.grad.detach()
@@ -524,16 +526,19 @@ class CausalLMTrainer(nn.Module):
                 (embedding, next_memory), last_memory = self.decoder.reverse(embedding, mask, memories)
                 logits = self.vocabulary.logit_projector(embedding)
                 loss = self.main_loss_function(logits, target, loss_schedule)
-
-                def set_grad_hooks(tensor: torch.Tensor, grads: torch.Tensor):
-                    nonlocal loss
-                    tensor.register_hook(lambda x, capture=grads: capture)
-                    loss += 0 * tensor.sum()
-
-                parallel_pytree_map(set_grad_hooks, next_memory, mem_grads)
+                loss_metric += loss.detach()
+                def execute_gradients(tensor: torch.Tensor, gradients: torch.Tensor):
+                    if gradients is not None:
+                    tensor.backward(gradients, retain_graph=True)
 
                 with profiler.record_function("train_step: Backpropagation"):
+                    parallel_pytree_map(execute_gradients, next_memory, mem_grads)
+                    set1 = last_memory[0].matrix.grad
                     loss.backward()
+                    set2 = last_memory[0].matrix.grad
+                    print(set1-set2)
+
+
 
                 # Explicitly clear out tensors and detach graphs
                 # on ANYTHING that actually had a graph attached.
@@ -547,17 +552,17 @@ class CausalLMTrainer(nn.Module):
                 mem_grads = parallel_pytree_map(get_mem_grads, last_memory)
                 memories = parallel_pytree_map(lambda x: x.detach(), last_memory)
 
-        return numerics_metrics
+        return numerics_metrics, loss_metric
 
-    def forward(self,
-                tokens: torch.Tensor,
-                targets: torch.Tensor,
-                batch_mask: torch.Tensor,
-                memories: Optional[List[MemoryState]] = None,
-                scheduling_rates: Optional[Tuple[float, float]] = None,
-                numerics_cache_rate: int = 500,
-                save_cached_to_cpu: bool = False,
-                ) -> Tuple[List[MemoryState], Dict[int, torch.Tensor]]:
+    def step(self,
+             tokens: torch.Tensor,
+             targets: torch.Tensor,
+             batch_mask: torch.Tensor,
+             memories: Optional[List[MemoryState]] = None,
+             scheduling_rates: Optional[Tuple[float, float]] = None,
+             numerics_cache_rate: int = 500,
+             save_cached_to_cpu: bool = False,
+             ) -> Tuple[List[MemoryState], Dict[int, torch.Tensor], torch.Tensor]:
         """
         Performs a single training step. This consists of
         embedding, going through the forward pass, and accumulating
@@ -592,6 +597,7 @@ class CausalLMTrainer(nn.Module):
                 where the numerics caches are stored.
         :return: The final memory state. In case you want to continue training or something.
         :return: The MSE between the forward and reverse predictions at cache rate locations.
+        :return: The total loss. Is a detached metric, not a backprop feature.
         """
         with profiler.record_function("train_step: Embedding and intake"):
             # Unwrap and standardize the scheduling details
@@ -606,7 +612,7 @@ class CausalLMTrainer(nn.Module):
                 memories = self.decoder.create_state(embeddings.shape[:-2])
 
         # Run forward pass, setup, and reverse pass.
-        pass_cache = self.run_forward_pass(
+        pass_cache, _ = self.run_forward_pass(
             embeddings,
             batch_mask,
             numerics_cache_rate,
@@ -614,7 +620,7 @@ class CausalLMTrainer(nn.Module):
             memories
         )
         final_memory, final_rng = self.setup_reverse_pass(access_schedule, pass_cache, embeddings.device)
-        numerics_metrics = self.run_reverse_pass(embeddings,
+        numerics_metrics, loss_metric = self.run_reverse_pass(embeddings,
                                                  targets,
                                                  batch_mask,
                                                  main_schedule,
@@ -625,7 +631,7 @@ class CausalLMTrainer(nn.Module):
         # Perform restoration of final rng state
         set_rng_state(final_rng, embeddings.device)
 
-        return final_memory, numerics_metrics
+        return final_memory, numerics_metrics, loss_metric
 
 
 class CausalLMGenerator(nn.Module):

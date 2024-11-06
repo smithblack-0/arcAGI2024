@@ -387,7 +387,7 @@ class TestLogitSeparator(unittest.TestCase):
             [[0.1, 0.2, 0.0, 0.0, 0.0, 0.0], [0.3, 0.4, 0.5, 0.0, 0.0, 0.0], [0.6, 0.0, 0.0, 0.0, 0.0, 0.0]],
             [[0.1, 0.0, 0.0, 0.0, 0.0, 0.0], [0.2, 0.0, 0.0, 0.0, 0.0, 0.0], [0.3, 0.4, 0.0, 0.0, 0.0, 0.0]]
         ])
-        output = self.logit_separator.forward(schemas, logits)
+        output = self.logit_separator.step(schemas, logits)
         self.assertTrue(torch.equal(output[0], expected_output), f"Expected {expected_output}, but got {output}")
 
 

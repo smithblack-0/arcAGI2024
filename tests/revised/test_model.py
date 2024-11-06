@@ -192,6 +192,7 @@ class TestCausalLMTrainer(unittest.TestCase):
             main_loss_function=self.main_loss_fn,
             mem_access_loss_function=self.mem_access_loss_fn
         )
+        torch.autograd.set_detect_anomaly(True)
 
         # Create some mock training data to utilize in the process
         #
@@ -202,7 +203,7 @@ class TestCausalLMTrainer(unittest.TestCase):
 
         # Setup an optim
         optim = torch.optim.SGD(self.model_core.parameters(), lr=0.1)
-        memories, numeric_metrics = trainer(tokens, targets, masks, numerics_cache_rate=1)
+        memories, numeric_metrics, loss_metric = trainer.step(tokens, targets, masks, numerics_cache_rate=1)
 
     def test_numeric_sanity_gpu(self):
         """
@@ -246,7 +247,7 @@ class TestCausalLMTrainer(unittest.TestCase):
         with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
                                                 torch.profiler.ProfilerActivity.CUDA],
                                     record_shapes=True, profile_memory=True) as prof:
-            memories, numeric_metrics = trainer(tokens, targets, masks, numerics_cache_rate=cache_rate)
+            memories, numeric_metrics, loss_metric = trainer(tokens, targets, masks, numerics_cache_rate=cache_rate)
             optim.step()
             optim.zero_grad()
 
@@ -300,7 +301,6 @@ class TestCausalLMTrainer(unittest.TestCase):
             auxilary_dropout_rate=0.1
         )
         trainer = CausalLMTrainer(model_core, self.main_loss_fn, self.mem_access_loss_fn)
-        device = torch.device("cuda")
 
         # Create some mock training data to utilize in the process
         #
@@ -320,7 +320,7 @@ class TestCausalLMTrainer(unittest.TestCase):
 
         # Run pass
         start_time = time.time()
-        memories, numeric_metrics = trainer(tokens, targets, masks,
+        memories, numeric_metrics, loss_metric = trainer(tokens, targets, masks,
                                             numerics_cache_rate=cache_rate,
                                             save_cached_to_cpu=True
                                             )

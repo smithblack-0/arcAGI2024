@@ -8,53 +8,6 @@ from torch.nn import functional as F
 from torch.autograd.function import Function, FunctionCtx
 from .base import TensorTree, DeviceDtypeWatch, SavableState, DropoutLogits, parallel_pytree_map
 
-# Implement flag and context managers for
-# checkpointing. We need to know whether we
-# are completing a forward pass, or recomputing
-# for a backwards pass, in order to dynamically
-# reconstruct the memories.
-
-class ContextFlag:
-    """
-    Contains the context flag.
-
-    Forward: True
-    Recompute: False
-    Neither: None
-    """
-    flag = None
-def is_forward_context()->bool:
-    """
-    Returns true if operating in a forward context,
-    false if operating in a recompute context
-    :return: The indicator
-    """
-    if ContextFlag.flag is not None:
-        return ContextFlag.flag
-    else:
-        msg = "Function was invoked outside of a ForwardContext or RecomputeContext context manager"
-        raise ValueError(msg)
-class ForwardContext:
-    """
-    Context manager that sets the forward context flag to True, indicating a forward pass.
-    """
-    def __enter__(self):
-        ContextFlag.flag = True
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        ContextFlag.flag = None  # Reset after exiting
-
-class RecomputeContext:
-    """
-    Context manager that sets the forward context flag to False,
-    indicating a recompute context during the backward pass.
-    """
-    def __enter__(self):
-        ContextFlag.flag = False
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        ContextFlag.flag = None  # Reset after exiting
-
-
 
 # Define the memory state
 class MemoryState(SavableState):
@@ -698,11 +651,8 @@ class FastLinearMemory(nn.Module):
             original_memory = self.memory_writer.reverse_memory(update, write_factor, batch_mask, next_memory)
 
         def setup_grads(tensor: torch.Tensor)->torch.Tensor:
-            if torch.is_grad_enabled():
-                tensor.requires_grad_(True)
-                tensor = tensor.clone()
-                tensor.retain_grad()
-            return tensor
+            return nn.Parameter(tensor, requires_grad=True)
+
         original_memory = parallel_pytree_map(setup_grads, original_memory)
 
         # Manually compute the write, then the read.
