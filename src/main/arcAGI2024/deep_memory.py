@@ -146,7 +146,7 @@ class LinearAttention(nn.Module):
         """
         query = self.activation(query)
         numerator = torch.matmul(query, matrix)
-        denominator = torch.matmul(query, normalizer.unsqueeze(-1)) + 1e-9
+        denominator = torch.matmul(query, normalizer.unsqueeze(-1)) + 1e-5
         return numerator / denominator
 
     def make_kernel(self,
@@ -391,8 +391,8 @@ class WriteMemory(nn.Module):
 
         # Create the probability projectors and interpolation logits
         self.interpolation_logits = initialize_based_on_half_lives([num_memories, d_address],
-                                                                   1,
-                                                                   512)
+                                                                   0.1,
+                                                                   3)
         self.write_logits = nn.Linear(d_address, 1, dtype=dtype, device=device)
         self.dropout_logits = DropoutLogits(dropout_rate)
 
@@ -463,6 +463,11 @@ class WriteMemory(nn.Module):
         interpolation_factor = torch.sigmoid(self.interpolation_logits)  # (num_memories, d_address)
         write_factor = write_probability * interpolation_factor
 
+        # For reasons of numeric stability, the write factor should never exceed
+        # 0.5. Anything that does exceed that is instead clamped, and a loss
+        # is gathered based on this overflowing clamp probability.
+
+
         # Create kernel update. Unsqueeze to fit linear attn mechanism format.
 
         update = self.linear_attn.make_kernel(key.unsqueeze(-2), value.unsqueeze(-2))
@@ -490,8 +495,8 @@ class WriteMemory(nn.Module):
         matrix_update, normalizer_update = update
 
         # Run the inverse of the original update factor.
-        normalizer = (next_normalizer - normalizer_update * write_factor) / (1 - write_factor)
-        matrix = (next_matrix - matrix_update * write_factor.unsqueeze(-1)) / (1 - write_factor.unsqueeze(-1))
+        normalizer = (next_normalizer - normalizer_update * write_factor) #/ (1 - write_factor)
+        matrix = (next_matrix - matrix_update * write_factor.unsqueeze(-1)) #/ (1 - write_factor.unsqueeze(-1))
         cum_prob = next_cum_prob - write_factor.mean(dim=-1)
 
         # Mask out anything that was not able to be updated
@@ -523,8 +528,8 @@ class WriteMemory(nn.Module):
         matrix_update, normalizer_update = update
 
         # Get the key common information
-        normalizer = last_normalizer * (1 - write_factor) + normalizer_update * write_factor
-        matrix = last_matrix * (1 - write_factor.unsqueeze(-1)) + matrix_update * write_factor.unsqueeze(-1)
+        normalizer = last_normalizer  + normalizer_update * write_factor
+        matrix = last_matrix  + matrix_update * write_factor.unsqueeze(-1)
         cum_prob = last_cum_prob + write_factor.mean(dim=-1)
 
         # Mask out anything that was not able to be updated
@@ -586,7 +591,7 @@ class FastLinearMemory(nn.Module):
 
         # Defaults
         if linear_kernel_activation is None:
-            linear_kernel_activation = F.elu
+            linear_kernel_activation = F.softplus
 
         super().__init__()
 
@@ -651,16 +656,12 @@ class FastLinearMemory(nn.Module):
             original_memory = self.memory_writer.reverse_memory(update, write_factor, batch_mask, next_memory)
 
         def setup_grads(tensor: torch.Tensor)->torch.Tensor:
-            return nn.Parameter(tensor, requires_grad=True)
+            tensor = nn.Parameter(tensor, requires_grad=True)
+            tensor.retain_grad()
+            return tensor
 
         original_memory = parallel_pytree_map(setup_grads, original_memory)
-
-        # Manually compute the write, then the read.
-        next_memory = self.memory_writer.advance_memory(update, write_factor, batch_mask, original_memory)
-        read = self.memory_reader(tensor, self.addresses, next_memory)
-
-        # Return the results
-        return (read, next_memory), original_memory
+        return self.forward(tensor, batch_mask, original_memory), original_memory
     def forward(self,
                 tensor: torch.Tensor,
                 batch_mask: torch.Tensor,

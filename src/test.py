@@ -1,133 +1,75 @@
-from typing import List, Tuple, Dict
-
 import torch
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
-from transformers import AutoTokenizer, DataCollatorForLanguageModeling
-from datasets import load_dataset
-from src.main.arcAGI2024.vocabulary import VocabularyStruct
+import time
+import timeit
 
-vocab = VocabularyStruct.auto_load_from_pretrained('gpt2')
-tokenizer = vocab.tokenizer
-max_length = 500
-batch_size = 32
-num_workers = 4
-prefetch_factor = 2
-def load_and_tokenize_dataset():
+
+def benchmark_operation(tensor, operation, *args, **kwargs):
+    # Run a warm-up to avoid any initialization effects
+    operation(tensor, *args, **kwargs)
+
+    # Measure the time for the operation
+    start_time = time.time()
+    operation(tensor, *args, **kwargs)
+    end_time = time.time()
+
+    return end_time - start_time
+
+
+# Set the tensor size and quantile to test
+tensor_size = (1000, 1000)
+quantile_value = 0.5  # 50th percentile (median)
+def middle_quantiles_mask(tensor: torch.Tensor,
+                     dim: int,
+                     )->torch.Tensor:
     """
-    Loads and tokenizes the WikiText-2 dataset using the specified tokenizer.
-
-    Args:
-        model_name (str): Name of the tokenizer model to use.
-
-    Returns:
-        tuple: (tokenized_datasets, tokenizer) where tokenized_datasets is the tokenized WikiText-2 dataset.
+    Gets a mask that is inclusive only of the middle two quantiles,
+    that matches tensor.
+    :param tensor: The tensor to get the quantile mask on.
+    :param dim: The dimension to perform quantile sorting on
+    :return: The mask. Top and bottme quantiles are false. Middle two are true
     """
-    # Load WikiText-2 dataset
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
+    # Get the starting point. Then figure out the top and bottom halfs
+    mean = tensor.mean(dim=-1, keepdim=True)
+    top_half = tensor >= mean
+    bottom_half = tensor < mean
 
-    def tokenize_function(examples):
-        texts = examples["text"]
-        encodings = tokenizer(
-            text=texts,
-            truncation=True,
-            padding=False,
-            max_length=max_length,
-            return_attention_mask=False,
-        )
+    # Take the mean of the top half, and the bottom half
+    first_quartile = (tensor*bottom_half).sum(dim=dim, keepdim=True) / (1e-9 + bottom_half.sum(dim=dim, keepdim=True))
+    third_quartile = (tensor*top_half).sum(dim=dim, keepdim=True) / (1e-9 + top_half.sum(dim=dim, keepdim=True))
 
-        return encodings
+    # Get everything that is between the first and third quantiles
+    output = (tensor >= first_quartile) & (tensor < third_quartile)
+    return output
 
-
-    # Preprocess dataset. For some reason a significant number
-    # of these are empty
-    # Tokenize dataset
-    dataset = dataset.filter(lambda x: len(x['text']) > 100)
-    tokenized_datasets = dataset.map(tokenize_function, batched=True, remove_columns=["text"])
-    return tokenized_datasets, tokenizer
-
-
-def data_collator(batch: List[Dict[str, List[int]]])->Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-
+def middle_quantiles_mean(tensor: torch.Tensor, dim: int, keepdims: bool=False)->torch.Tensor:
     """
-    Turns the pretraining targets into a batch.
+    Performs a mean with only the middle two quantiles.
+    Quite fast. Only about 5x slower than mean itself
+    :param tensor: the tensor to perform a middle quantiles mean on
+    :param dim: The dimension to perform it on
+    :param keepdims: Whether to keep the dimensions
+    :return: The mean, using only the middle two quantiles
     """
-    batch = [item["input_ids"] for item in batch]
-    batch = [[tokenizer.bos_token_id] + item + [tokenizer.eos_token_id] for item in batch]
-    batch = {"input_ids" : item for item in batch}
-    encodings = tokenizer.pad(batch, padding=True, return_tensors='pt', return_attention_mask=True)
-
-    input_ids= encodings['input_ids']
-    batch_mask = encodings['attention_mask']
-
-    inputs = input_ids[..., :-1]
-    targets = input_ids[..., 1:]
-    batch_mask = batch_mask[..., :-1]
-    return inputs, targets, batch_mask
-
-def create_data_loaders(tokenized_datasets):
-    """
-    Creates DataLoaders for training and validation datasets with length-based batching and optimizations.
-
-    Args:
-        tokenized_datasets (DatasetDict): The tokenized WikiText-2 dataset.
-        tokenizer (AutoTokenizer): Tokenizer for padding and masking.
-        batch_size (int): Batch size for training and validation.
-        num_workers (int): Number of workers for data loading.
-        prefetch_factor (int): Number of batches to prefetch.
-
-    Returns:
-        tuple: (train_loader, val_loader) DataLoaders for training and validation.
-    """
-
-    # Train DataLoader
-    train_loader = DataLoader(
-        tokenized_datasets["train"],
-        batch_size=batch_size,
-        sampler=RandomSampler(tokenized_datasets["train"]),
-        collate_fn=data_collator,
-        num_workers=num_workers,
-        pin_memory=True,
-        prefetch_factor=prefetch_factor,
-    )
-
-    # Validation DataLoader
-    val_loader = DataLoader(
-        tokenized_datasets["validation"],
-        batch_size=batch_size,
-        sampler=SequentialSampler(tokenized_datasets["validation"]),
-        collate_fn=data_collator,
-        num_workers=num_workers,
-        pin_memory=True,
-        prefetch_factor=prefetch_factor,
-    )
-
-    return train_loader, val_loader
+    selection_mask = middle_quantiles_mask(tensor, dim=dim)
+    sum = torch.sum(selection_mask*tensor, dim=dim, keepdim=keepdims)
+    normalizer = torch.sum(selection_mask, dim=dim, keepdim=keepdims)
+    return sum / normalizer
+# Create a random tensor
+tensor = torch.rand(tensor_size)
 
 
-def prepare_wikitext2_dataloaders():
-    """
-    Prepares the WikiText-2 dataset DataLoaders for training and validation.
+# Benchmark
+mean_time = timeit.timeit(lambda : tensor.mean(), number=10)
+quantile_time = timeit.timeit(lambda : tensor.quantile(quantile_value), number=10)
+top_k = timeit.timeit(lambda : tensor.topk(1000), number=10)
+sort = timeit.timeit(lambda : tensor.sort(), number=10)
+std = timeit.timeit(lambda : tensor.std(), number=10)
+fast_quantiles = timeit.timeit(lambda : middle_quantiles_mean(tensor, dim=-1), number=10)
+# Display
 
-    Args:
-        model_name (str): Name of the tokenizer model to use.
-        batch_size (int): Batch size for training and validation.
-        num_workers (int): Number of workers for data loading.
-        prefetch_factor (int): Number of batches to prefetch.
-
-    Returns:
-        tuple: (train_loader, val_loader) for the WikiText-2 dataset.
-    """
-    # Load and preprocess the dataset
-    tokenized_datasets, tokenizer = load_and_tokenize_dataset()
-
-    # Create DataLoaders
-    train_loader, val_loader = create_data_loaders(tokenized_datasets)
-
-    return train_loader, val_loader
-
-if __name__ == '__main__':
-    # Usage example
-    train_loader, val_loader = prepare_wikitext2_dataloaders()
-    for item in train_loader:
-        print(item)
-        break
+print(f"torch.mean execution time: {mean_time:.6f} seconds")
+print(f"torch.quantile execution time: {quantile_time:.6f} seconds")
+print(f"torch.topk execution time: {top_k:.6f} seconds")
+print(f"torch.sort execution time: {sort:.6f} seconds")
+print(f"torch.std execution time: {std:.6f} seconds")
+print(f"middle_quantiles_mean execution time: {fast_quantiles:.6f} seconds")

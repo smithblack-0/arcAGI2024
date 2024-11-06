@@ -70,6 +70,42 @@ def set_rng_state(state, device: torch.device):
     else:
         raise ValueError("Unsupported device type. Must be 'cpu' or 'cuda'.")
 
+def middle_quantiles_mask(tensor: torch.Tensor,
+                     dim: int,
+                     )->torch.Tensor:
+    """
+    Gets a mask that is inclusive only of the middle two quantiles,
+    that matches tensor.
+    :param tensor: The tensor to get the quantile mask on.
+    :param dim: The dimension to perform quantile sorting on
+    :return: The mask. Top and bottme quantiles are false. Middle two are true
+    """
+    # Get the starting point. Then figure out the top and bottom halfs
+    mean = tensor.mean(dim=-1, keepdim=True)
+    top_half = tensor >= mean
+    bottom_half = tensor < mean
+
+    # Take the mean of the top half, and the bottom half
+    first_quartile = (tensor*bottom_half).sum(dim=dim, keepdim=True) / (1e-9 + bottom_half.sum(dim=dim, keepdim=True))
+    third_quartile = (tensor*top_half).sum(dim=dim, keepdim=True) / (1e-9 + top_half.sum(dim=dim, keepdim=True))
+
+    # Get everything that is between the first and third quantiles
+    output = (tensor >= first_quartile) & (tensor < third_quartile)
+    return output
+
+def middle_quantiles_mean(tensor: torch.Tensor, dim: int, keepdims: bool=False)->torch.Tensor:
+    """
+    Performs a mean with only the middle two quantiles.
+    Quite fast. Only about 5x slower than mean itself
+    :param tensor: the tensor to perform a middle quantiles mean on
+    :param dim: The dimension to perform it on
+    :param keepdims: Whether to keep the dimensions
+    :return: The mean, using only the middle two quantiles
+    """
+    selection_mask = middle_quantiles_mask(tensor, dim=dim)
+    sum = torch.sum(selection_mask*tensor, dim=dim, keepdim=keepdims)
+    normalizer = torch.sum(selection_mask, dim=dim, keepdim=keepdims)
+    return sum / normalizer
 
 class DropoutLogits(nn.Module):
     """
@@ -186,6 +222,8 @@ class SavableState(ABC):
         :param bypass: The bypass to load, if any
         :return: A setup instance.
         """
+
+
 
 def parallel_pytree_map(func: Callable[..., Any], *pytrees: Any) -> Any:
     """

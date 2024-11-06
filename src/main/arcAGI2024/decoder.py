@@ -275,7 +275,6 @@ class RecurrentDecoder(nn.Module):
 
             # Integrate update, and store memory.
             embedding = layernorm(embedding + self.dropout(update))
-            previous_memories.append(previous_memory)
         return (embedding, gradprop_memories), previous_memories
 
     def forward(self,

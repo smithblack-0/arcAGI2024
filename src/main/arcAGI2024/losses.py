@@ -97,13 +97,14 @@ class UniformMemLoss(MemAccessLossInterface):
         # Normalize the write probability mass into a write
         # probability distribution
         write_probability_mass = write_probability_mass/write_probability_mass.sum(dim=-1, keepdim=True)
+        write_log_predictions = torch.log(write_probability_mass)
 
         # Create the uniform target distribution
         num_memories = write_probability_mass.shape[-1]
-        target_distribution = torch.full_like(write_probability_mass, 1/num_memories)
+        target_distribution = torch.full_like(write_log_predictions, 1/num_memories)
 
         # Create the loss. Scale
-        loss = self.weight*self.divergence(write_probability_mass, target_distribution)
+        loss = self.weight*self.divergence(write_log_predictions, target_distribution)
         if schedule is not None:
             loss = loss*schedule
         return loss
