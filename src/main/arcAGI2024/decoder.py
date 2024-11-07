@@ -51,6 +51,7 @@ class DecoderLayer(nn.Module):
                  num_read_heads: int,
                  num_write_heads: int,
                  num_memories: int,
+                 numeric_write_factor: float,
                  dropout: float,
                  device: torch.device,
                  dtype: torch.dtype
@@ -87,6 +88,7 @@ class DecoderLayer(nn.Module):
                                               num_write_heads,
                                               num_memories,
                                               dropout,
+                                              max_write_factor=numeric_write_factor,
                                               device=device,
                                               dtype=dtype)
         self.deep_layernorm = nn.LayerNorm(d_model)
@@ -324,6 +326,7 @@ def build_decoder(
         num_memories: int,
         dropout_rate: float,
         auxilary_dropout_rate: float,
+        numeric_write_factor: float,
 
         # Dtype, device
         dtype: torch.dtype = None,
@@ -388,6 +391,7 @@ def build_decoder(
                      num_read_heads,
                      num_write_heads,
                      num_memories,
+                     numeric_write_factor,
                      auxilary_dropout_rate,
                      device=device,
                      dtype=dtype

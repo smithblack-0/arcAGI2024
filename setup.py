@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 print("PACKAGES", find_packages(where="src/main"))
 setup(
     name='arcAGI2024',
-    version='0.2.16',
+    version='0.3.11',
     description='Support mechanism for the arc agi project',
     author='Chris',
     author_email='your.email@example.com',

@@ -343,17 +343,32 @@ class WriteMemory(nn.Module):
                  num_write_heads: int,
                  num_memories: int,
                  dropout_rate: float,
+                 max_write_factor: float,
                  linear_kernel_activation: Callable[[torch.Tensor], torch.Tensor],
                  dtype: torch.dtype,
                  device: torch.device
-
                  ):
+        """
+        :param d_model: The model dim
+        :param d_address: The address di
+        :param d_memory: the memory dim
+        :param num_write_heads: num write heads
+        :param num_memories: num memores
+        :param dropout_rate: write selection logit dropout
+        :param max_write_factor: Maximum rate we can write to a memory with
+        - Note: While max is 1.0, for numeric stability you should keep it lower like 0.7
+        :param linear_kernel_activation: The kernel activation
+        :param dtype: The dtype
+        :param device: The device.
+        """
+
         super().__init__()
         self.d_model = d_model
         self.d_address = d_address
         self.d_memory = d_memory
         self.num_write_heads = num_write_heads
         self.linear_kernel_activation = linear_kernel_activation
+        self.max_write_factor = max_write_factor
         self.__metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
 
         # Create the linear attn mechanism.
@@ -463,11 +478,6 @@ class WriteMemory(nn.Module):
         interpolation_factor = torch.sigmoid(self.interpolation_logits)  # (num_memories, d_address)
         write_factor = write_probability * interpolation_factor
 
-        # For reasons of numeric stability, the write factor should never exceed
-        # 0.5. Anything that does exceed that is instead clamped, and a loss
-        # is gathered based on this overflowing clamp probability.
-
-
         # Create kernel update. Unsqueeze to fit linear attn mechanism format.
 
         update = self.linear_attn.make_kernel(key.unsqueeze(-2), value.unsqueeze(-2))
@@ -495,8 +505,8 @@ class WriteMemory(nn.Module):
         matrix_update, normalizer_update = update
 
         # Run the inverse of the original update factor.
-        normalizer = (next_normalizer - normalizer_update * write_factor) #/ (1 - write_factor)
-        matrix = (next_matrix - matrix_update * write_factor.unsqueeze(-1)) #/ (1 - write_factor.unsqueeze(-1))
+        normalizer = next_normalizer - normalizer_update * write_factor
+        matrix = next_matrix - matrix_update * write_factor.unsqueeze(-1)
         cum_prob = next_cum_prob - write_factor.mean(dim=-1)
 
         # Mask out anything that was not able to be updated
@@ -528,8 +538,8 @@ class WriteMemory(nn.Module):
         matrix_update, normalizer_update = update
 
         # Get the key common information
-        normalizer = last_normalizer  + normalizer_update * write_factor
-        matrix = last_matrix  + matrix_update * write_factor.unsqueeze(-1)
+        normalizer = last_normalizer + normalizer_update * write_factor
+        matrix = last_matrix + matrix_update * write_factor.unsqueeze(-1)
         cum_prob = last_cum_prob + write_factor.mean(dim=-1)
 
         # Mask out anything that was not able to be updated
@@ -574,6 +584,7 @@ class FastLinearMemory(nn.Module):
                  num_memories: int,
                  dropout_rate: int,
                  linear_kernel_activation: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+                 max_write_factor: float = None,
                  dtype: Optional[torch.dtype] = None,
                  device: Optional[torch.device] = None,
                  ):
@@ -585,6 +596,11 @@ class FastLinearMemory(nn.Module):
         :param num_write_heads: The number of write heads. 4-8 is fine.
         :param num_memories: The number of memories under consideration. Should be large
         :param linear_kernel_activation: The activation kernel for linear attention. Defaults to elu
+        :param max_write_factor: The maximum probability, between 0 and 1, that can be committed at once
+                                 to a memory position
+                                 - It is required to be less than 1.0 for numeric reasons.
+                                 - Default is 0.6
+                                 - If numeric divergence is an issue, try lowering it a bit.
         :param dtype: defaults to float32
         :param device: defaults to cpu
         """
@@ -592,6 +608,8 @@ class FastLinearMemory(nn.Module):
         # Defaults
         if linear_kernel_activation is None:
             linear_kernel_activation = F.softplus
+        if max_write_factor is None:
+            max_write_factor = 0.6
 
         super().__init__()
 
@@ -604,7 +622,8 @@ class FastLinearMemory(nn.Module):
         self.memory_reader = ReadMemory(d_model, d_address, d_memory, num_read_heads, linear_kernel_activation,
                                         device=device, dtype=dtype)
         self.memory_writer = WriteMemory(d_model, d_address, d_memory, num_write_heads, num_memories,
-                                         dropout_rate, linear_kernel_activation, dtype=dtype, device=device)
+                                         dropout_rate, max_write_factor, linear_kernel_activation,
+                                         dtype=dtype, device=device)
 
         # Create the device metainfo watch.
         self.__metainfo = DeviceDtypeWatch(device=device, dtype=dtype)

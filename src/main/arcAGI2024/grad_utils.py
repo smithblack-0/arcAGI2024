@@ -5,7 +5,6 @@ from .base import parallel_pytree_map, middle_quantiles_mean
 from typing import Any, List
 
 
-
 class BatchCollectiveReductiveGradNorm:
     """
     Performs collective gradient normalization on a group of gradients flowing through
@@ -23,7 +22,7 @@ class BatchCollectiveReductiveGradNorm:
     def __init__(self,
                  num_batch_dims: int = 1,
                  rescale_threshold: float = 1.0,
-                 reduction_mode: str = 'quantiles_mean',
+                 reduction_mode: str = 'quartiles_mean',
                  verbose: bool = False,
                  ):
         """
@@ -36,10 +35,10 @@ class BatchCollectiveReductiveGradNorm:
               - "mean": Reduces using mean as option
               - "max": Reduces using max as an option
               - "sum": Reduces using sum as an option
-              - "quantiles_mean": Performs a mean around only the middle two quantiles. Default
+              - "quartiles_mean": Performs a mean around only the middle two quantiles. Default
         """
         assert num_batch_dims >= 0
-        assert reduction_mode in ['mean', 'max', 'sum', 'quantiles_mean']
+        assert reduction_mode in ['mean', 'max', 'sum', 'quartiles_mean']
         assert rescale_threshold >= 0.0
 
         self.num_batch_dims = num_batch_dims
@@ -48,9 +47,9 @@ class BatchCollectiveReductiveGradNorm:
         self.verbose = verbose
 
     def collect_gradients(self,
-                        grads: torch.Tensor,
-                        accumulator: List[torch.Tensor]
-                        ):
+                          grads: torch.Tensor,
+                          accumulator: List[torch.Tensor]
+                          ):
         """
         Collects gradients and appends them to an accumulator.
         :param grads: Gradients to be processed.
@@ -88,18 +87,20 @@ class BatchCollectiveReductiveGradNorm:
         parallel_pytree_map(reduce_gradients, grad_tree)
 
         # Calculate reduced statistics per batch over entire collection.
-        observations = torch.concat(grad_accumulator, dim=-1)
-
-        if self.reduction_mode == "mean":
-            observed_grads = observations.mean(dim=-1)
-        elif self.reduction_mode == "max":
-            observed_grads = observations.max(dim=-1).values
-        elif self.reduction_mode == "sum":
-            observed_grads = observations.sum(dim=-1)
-        elif self.reduction_mode == "quantiles_mean":
-            observed_grads = middle_quantiles_mean(observations, dim=-1)
-        else:
-            raise ValueError(f"Unrecognized reduction mode: {self.reduction_mode}")
+        summaries = []
+        for observation in grad_accumulator:
+            if self.reduction_mode == "mean":
+                summary = observation.mean(dim=-1)
+            elif self.reduction_mode == "max":
+                summary = observation.max(dim=-1).values
+            elif self.reduction_mode == "sum":
+                summary = observation.sum(dim=-1)
+            elif self.reduction_mode == "quantiles_mean":
+                summary = middle_quantiles_mean(observation, dim=-1)
+            else:
+                raise ValueError(f"Unrecognized reduction mode: {self.reduction_mode}")
+            summaries.append(summary)
+        observed_grads, _ = torch.stack(summaries, dim=-1).max(dim=-1)
 
         if self.verbose:
             print(observed_grads)
@@ -112,6 +113,7 @@ class BatchCollectiveReductiveGradNorm:
         rescale_gradients = functools.partial(self.rescale_gradients, rescale_factor=rescale_factor)
         return parallel_pytree_map(rescale_gradients, grad_tree)
 
+
 class BatchCollectiveQuantileClipping:
     """
     A extremum clipping algorithm that is resistant
@@ -121,6 +123,7 @@ class BatchCollectiveQuantileClipping:
 
     It operates on a provided pytree
     """
+
     def __init__(self,
                  num_batch_dims: int = 1,
                  clip_factor: float = 1000.0,
@@ -146,9 +149,9 @@ class BatchCollectiveQuantileClipping:
         self.verbose = verbose
 
     def collect_gradients(self,
-                        grads: torch.Tensor,
-                        accumulator: List[torch.Tensor]
-                        ):
+                          grads: torch.Tensor,
+                          accumulator: List[torch.Tensor]
+                          ):
         """
         Collects gradients and appends them to an accumulator.
         :param grads: Gradients to be processed.
@@ -161,7 +164,7 @@ class BatchCollectiveQuantileClipping:
         accumulator.append(grads)
 
     @staticmethod
-    def clip_gradients(grads: torch.Tensor, clip_threshold: torch.Tensor)->torch.Tensor:
+    def clip_gradients(grads: torch.Tensor, clip_threshold: torch.Tensor) -> torch.Tensor:
         """
         Performs the actual gradient clipping process.
         :param grads: The gradients to clip.
@@ -171,7 +174,8 @@ class BatchCollectiveQuantileClipping:
         while clip_threshold.dim() < grads.dim():
             clip_threshold = clip_threshold.unsqueeze(-1)
         return torch.minimum(grads, clip_threshold)
-    def __call__(self, grad_tree: Any)->Any:
+
+    def __call__(self, grad_tree: Any) -> Any:
         """
         Runs the clipping algorithm.
         :param grad_tree: The gradient tree to clip
@@ -192,7 +196,7 @@ class BatchCollectiveQuantileClipping:
         else:
             raise ValueError(f"Unrecognized reduction mode: {self.mean_mode}")
 
-        threshold = observed_grads*self.clip_factor
+        threshold = observed_grads * self.clip_factor
         threshold = threshold.clip(min=self.protection_threshold)
         if self.verbose:
             print(threshold)
@@ -202,7 +206,24 @@ class BatchCollectiveQuantileClipping:
         return parallel_pytree_map(clip_gradients, grad_tree)
 
 
+class GradClip:
+    """
+    A simple gradient clipper.
 
+    Gradients that go above a certain threshold
+    are clipped away.
+    """
 
+    def __init__(self, clip_threshold: float):
+        self.clip_threshold = clip_threshold
 
+    def clip_gradients(self, grad: torch.Tensor) -> torch.Tensor:
+        return grad.clip(max=self.clip_threshold, min=-self.clip_threshold)
 
+    def __call__(self, grad_tree: Any) -> Any:
+        """
+        Runs the grad clipping process
+        :param grad_tree: A grad tree to clip
+        :return: The clipped gradients
+        """
+        return parallel_pytree_map(self.clip_gradients, grad_tree)

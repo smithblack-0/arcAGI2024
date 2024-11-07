@@ -220,7 +220,7 @@ class TestCausalLMTrainer(unittest.TestCase):
         #
         # It is 100 tokens in a batch of 3
         batch_size = 100
-        num_tokens = 100
+        num_tokens = 50
         cache_rate = 50
 
         tokens = torch.randint(0, self.model_core.vocabulary.tokenizer.true_vocab_size, [batch_size, num_tokens])
@@ -247,14 +247,11 @@ class TestCausalLMTrainer(unittest.TestCase):
         with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
                                                 torch.profiler.ProfilerActivity.CUDA],
                                     record_shapes=True, profile_memory=True) as prof:
-            memories, numeric_metrics, loss_metric = trainer(tokens, targets, masks, numerics_cache_rate=cache_rate)
+            memories, numeric_metrics, loss_metric = trainer.step(tokens, targets, masks, numerics_cache_rate=cache_rate)
             optim.step()
             optim.zero_grad()
 
         print(numeric_metrics)
-        for memory in memories:
-            print(memory.write_probability_mass)
-        print(memories[0].write_probability_mass)
         print(prof.key_averages())
         print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=10))
         print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
