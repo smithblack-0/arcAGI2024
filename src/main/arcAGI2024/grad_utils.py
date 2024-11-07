@@ -95,7 +95,7 @@ class BatchCollectiveReductiveGradNorm:
                 summary = observation.max(dim=-1).values
             elif self.reduction_mode == "sum":
                 summary = observation.sum(dim=-1)
-            elif self.reduction_mode == "quantiles_mean":
+            elif self.reduction_mode == "quartiles_mean":
                 summary = middle_quantiles_mean(observation, dim=-1)
             else:
                 raise ValueError(f"Unrecognized reduction mode: {self.reduction_mode}")

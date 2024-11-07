@@ -58,7 +58,7 @@ def explore_models_with_profiling():
         num_memories=100,
         dropout_rate=0.1,
         auxilary_dropout_rate=0.1
-    ).to("cuda")
+    )
 
     # Initialize loss functions
     main_loss_fn = arcAGI2024.CrossEntropyLoss(model_core.vocabulary.tokenizer.pad_token_id)
@@ -76,9 +76,9 @@ def explore_models_with_profiling():
     batch_size = 30
     num_tokens = 20
     cache_rate = 50
-    tokens = torch.randint(0, model_core.vocabulary.tokenizer.true_vocab_size, (batch_size, num_tokens)).to("cuda")
-    targets = torch.randint(0, model_core.vocabulary.tokenizer.true_vocab_size, (batch_size, num_tokens)).to("cuda")
-    masks = (torch.rand(batch_size, num_tokens) > 0.5).to("cuda")
+    tokens = torch.randint(0, model_core.vocabulary.tokenizer.true_vocab_size, (batch_size, num_tokens))
+    targets = torch.randint(0, model_core.vocabulary.tokenizer.true_vocab_size, (batch_size, num_tokens))
+    masks = (torch.rand(batch_size, num_tokens) > 0.5)
 
     # Move to cuda
     tokens = tokens.to("cuda")
@@ -107,8 +107,5 @@ def explore_models_with_profiling():
     del numeric_metrics
     torch.cuda.empty_cache()
 
-
-torch.autograd.set_detect_anomaly(True)
-with GPUMonitor(0.1):
-    explore_models_with_profiling()
+explore_models_with_profiling()
 

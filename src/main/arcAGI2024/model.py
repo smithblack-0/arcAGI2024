@@ -308,7 +308,9 @@ class CausalLMTrainer(nn.Module):
                          batch_mask: torch.Tensor,
                          numerics_cache_rate: int,
                          save_cached_to_cpu: bool,
-                         memories: List[MemoryState]
+                         memories: List[MemoryState],
+                         main_schedule: torch.Tensor,
+                         return_embeddings: bool = True
                          ) -> Dict[str, Any]:
         """
         Runs the model forward pass. Records numeric metrics, random
@@ -332,6 +334,9 @@ class CausalLMTrainer(nn.Module):
         # updating again and again. We discard the final state
         save_to_cpu = lambda x: x.cpu()
         output_embeddings = []
+
+
+
         with torch.no_grad(), profiler.record_function("train_step: forward pass"):
             for i, (embedding, mask) in enumerate(zip(embeddings.unbind(-2), batch_mask.unbind(-1))):
                 # Run forward pass
@@ -543,10 +548,6 @@ class CausalLMTrainer(nn.Module):
                 mem_grads_trigger = torch.zeros_like(loss)
                 def inject_grad_hooks(tensor: torch.Tensor, grads: torch.Tensor):
                     nonlocal mem_grads_trigger
-                    if grads is not None:
-                        print(f"grad maxes {grads.max()}")
-                        print(f'grad means: {grads.mean()}')
-
                     tensor.register_hook(lambda x, capture=grads: capture)
                     mem_grads_trigger += 0 * tensor.sum()
 
@@ -587,7 +588,6 @@ class CausalLMTrainer(nn.Module):
                     mem_grads = self.grad_rescaler(mem_grads)
                     memories = parallel_pytree_map(lambda x: x.clone().detach(), last_memory)
                 del last_memory
-                torch.cuda.empty_cache()
 
         return numerics_metrics, loss_metric
 
