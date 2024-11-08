@@ -139,6 +139,6 @@ class VocabularyStruct(nn.Module):
 
         self.d_model = embeddings.weight.shape[-1]
         self.embeddings = embeddings
-        self.tokenizer = tokenizer
+        self.tokenizer = tokenizer.pad
         self.logit_projector = logit
         self.customize_vocabulary()

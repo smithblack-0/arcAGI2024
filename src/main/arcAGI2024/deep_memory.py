@@ -406,8 +406,8 @@ class WriteMemory(nn.Module):
 
         # Create the probability projectors and interpolation logits
         self.interpolation_logits = initialize_based_on_half_lives([num_memories, d_address],
-                                                                   0.1,
-                                                                   3)
+                                                                   1,
+                                                                   60)
         self.write_logits = nn.Linear(d_address, 1, dtype=dtype, device=device)
         self.dropout_logits = DropoutLogits(dropout_rate)
 
@@ -478,6 +478,10 @@ class WriteMemory(nn.Module):
         interpolation_factor = torch.sigmoid(self.interpolation_logits)  # (num_memories, d_address)
         write_factor = write_probability * interpolation_factor
 
+        # In order to prevent numeric explosion, we must limit the maximum available write factor
+        # Otherwise, the reverse pass can divide by zero
+        write_factor = self.max_write_factor*write_factor
+
         # Create kernel update. Unsqueeze to fit linear attn mechanism format.
 
         update = self.linear_attn.make_kernel(key.unsqueeze(-2), value.unsqueeze(-2))
@@ -505,8 +509,8 @@ class WriteMemory(nn.Module):
         matrix_update, normalizer_update = update
 
         # Run the inverse of the original update factor.
-        normalizer = next_normalizer - normalizer_update * write_factor
-        matrix = next_matrix - matrix_update * write_factor.unsqueeze(-1)
+        normalizer = (next_normalizer  - normalizer_update * write_factor)/(1 - write_factor)
+        matrix = (next_matrix  - matrix_update * write_factor.unsqueeze(-1))/(1 - write_factor.unsqueeze(-1))
         cum_prob = next_cum_prob - write_factor.mean(dim=-1)
 
         # Mask out anything that was not able to be updated
@@ -538,8 +542,8 @@ class WriteMemory(nn.Module):
         matrix_update, normalizer_update = update
 
         # Get the key common information
-        normalizer = last_normalizer + normalizer_update * write_factor
-        matrix = last_matrix + matrix_update * write_factor.unsqueeze(-1)
+        normalizer = last_normalizer * (1 - write_factor) + normalizer_update * write_factor
+        matrix = last_matrix * (1-write_factor.unsqueeze(-1)) + matrix_update * write_factor.unsqueeze(-1)
         cum_prob = last_cum_prob + write_factor.mean(dim=-1)
 
         # Mask out anything that was not able to be updated

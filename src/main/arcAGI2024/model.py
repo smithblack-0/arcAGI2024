@@ -240,7 +240,7 @@ class ForwardPassProgress:
         self.progress_bar.set_postfix(
             cumulative_loss=f"{cumulative_loss:.4f}",
             tokens_per_sec=f"{tokens_per_second:.2f}",
-            running_accuracy=f"{total_correct/total_examined:.1f}"
+            running_accuracy=f"{total_correct/total_examined:.5f}"
         )
         self.progress_bar.update(1)
 
@@ -528,7 +528,6 @@ class CausalLMTrainer(nn.Module):
         results["forward_time"] = progress.elapsed_time
         results["accuracy"] = float(num_correct / num_processed)
         return results
-
     def setup_reverse_pass(self,
                            access_schedule: Optional[float],
                            cache_dict: Dict[str, Any],
@@ -829,6 +828,8 @@ class CausalLMTrainer(nn.Module):
                 access_schedule, main_schedule = None, None
             else:
                 access_schedule, main_schedule = scheduling_rates
+                access_schedule = float(access_schedule)
+                main_schedule = float(main_schedule)
 
             # embed the tokens and setup the initial memory state
             embeddings = self.vocabulary.embeddings(tokens)
