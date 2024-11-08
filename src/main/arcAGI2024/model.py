@@ -225,7 +225,7 @@ class ForwardPassProgress:
         self.elapsed_time = None  # Slot for elapsed time
         self.start_time = None # Slot for start time if needed
 
-    def update(self, cumulative_loss: float):
+    def update(self, cumulative_loss: float, total_correct: float, total_examined: float):
         """
         Update the cumulative loss, tokens per second, and progress count.
         """
@@ -239,9 +239,9 @@ class ForwardPassProgress:
         # Update progress bar with cumulative loss and tokens per second
         self.progress_bar.set_postfix(
             cumulative_loss=f"{cumulative_loss:.4f}",
-            tokens_per_sec=f"{tokens_per_second:.2f}"
+            tokens_per_sec=f"{tokens_per_second:.2f}",
+            running_accuracy=f"{total_correct/total_examined:.1f}"
         )
-        self.tokens_per_second = tokens_per_second
         self.progress_bar.update(1)
 
     def __enter__(self):
@@ -281,7 +281,7 @@ class ReversePassProgress:
         self.elapsed_time = None  # Slot for elapsed time
         self.start_time = None # slot for start time if needed
 
-    def update(self, loss: float, numeric_divergence: float = None, numeric_percent_error: float = None):
+    def update(self, loss: float, numeric_divergence: float, numeric_percent_error: float):
         """
         Update the cumulative loss, tokens per second, progress count, and optional metrics.
 
@@ -293,12 +293,6 @@ class ReversePassProgress:
         if not self.verbose:
             return  # No-op if verbose is False
 
-        # Cache optional metrics if provided
-        if numeric_divergence is not None:
-            self.numeric_divergence = numeric_divergence
-        if numeric_percent_error is not None:
-            self.numeric_percent_error = numeric_percent_error
-
         # Calculate tokens per second
         elapsed_time = self.progress_bar.format_dict['elapsed']
         tokens_processed = self.progress_bar.n * self.batch_width
@@ -307,12 +301,10 @@ class ReversePassProgress:
         # Update progress bar with current metrics
         postfix = {
             "reverse_loss": f"{loss:.4f}",
-            "tokens_per_sec": f"{tokens_per_second:.2f}"
+            "tokens_per_sec": f"{tokens_per_second:.2f}",
+            "numeric_error" : f"{numeric_divergence:.4f}",
+            "numeric_percent_error" : f"{numeric_percent_error:.4f}"
         }
-        if self.numeric_divergence is not None:
-            postfix["divergence"] = f"{self.numeric_divergence:.4f}"
-        if self.numeric_percent_error is not None:
-            postfix["percent_error"] = f"{self.numeric_percent_error:.4f}"
 
         self.progress_bar.set_postfix(postfix)
         self.progress_bar.update(1)
@@ -418,7 +410,8 @@ class CausalLMTrainer(nn.Module):
                  grad_clip_threshold: float = 100,
                  verbose: bool = False,
                  rescaler_mode: str = "mean",
-                 rescaler_threshold: float = 0.1
+                 rescaler_threshold: float = 0.1,
+                 empty_cuda_cache: bool = True
                  ):
         super().__init__()
 
@@ -435,6 +428,7 @@ class CausalLMTrainer(nn.Module):
         self.vocabulary = model_core.vocabulary
         self.mse_metric = nn.MSELoss(reduction="mean")
         self.verbose = verbose
+        self.empty_cuda_cache = empty_cuda_cache
 
     def run_forward_pass(self,
                          embeddings: torch.Tensor,
@@ -466,10 +460,12 @@ class CausalLMTrainer(nn.Module):
         """
         num_tokens = embeddings.shape[-2]
         batch_width = embeddings.shape[0]
-        # Setup the various required caches.
+        # Setup the various required caches and metrics
 
         rng_states = []
         numeric_caches = []
+        num_correct = 0.0
+        num_processed = 0.0
 
         # Perform the forward pass to gain access to the
         # memories I shall need. This consists of recurrently
@@ -491,9 +487,14 @@ class CausalLMTrainer(nn.Module):
 
                 # Compute loss. We use this to monitor numeric divergence, among
                 # other things. However, it will not be used in backprop
-                logits = self.vocabulary.logit_projector(output_embedding)
+                logits: torch.Tensor = self.vocabulary.logit_projector(output_embedding)
                 case_loss = self.main_loss_function(logits, target, main_schedule)
                 forward_loss = forward_loss + case_loss
+
+                # Handle accuracy metric
+
+                num_correct += (logits.argmax(dim=-1) == target).sum()
+                num_processed += (~mask).sum()
 
                 # Integrate rng into cache. In order to reproducibly
                 # run the reverse pass the same way as the forward
@@ -511,12 +512,12 @@ class CausalLMTrainer(nn.Module):
                         saved_memories = parallel_pytree_map(save_to_cpu, memories)
                     else:
                         saved_memories = memories
-                    package = i, saved_memories, (logits, case_loss, embedding, output_embedding, target, mask)
+                    package = i, saved_memories
                     numeric_caches.append(package)
                 else:
                     numeric_caches.append(None)
 
-                progress.update(forward_loss)
+                progress.update(forward_loss, float(num_correct), float(num_processed))
 
         # Return the results
         results = {}
@@ -524,8 +525,8 @@ class CausalLMTrainer(nn.Module):
         results["rng_states"] = rng_states
         results["numeric_cache"] = numeric_caches
         results["forward_loss"] = forward_loss
-        if self.verbose:
-            results["forward_time"] = progress.elapsed_time
+        results["forward_time"] = progress.elapsed_time
+        results["accuracy"] = float(num_correct / num_processed)
         return results
 
     def setup_reverse_pass(self,
@@ -638,12 +639,15 @@ class CausalLMTrainer(nn.Module):
             # Run iteration and backwards pass
             #
             # Make sure all tensors are detached too
-            with torch.no_grad():
-                iterator = zip(reversed(embeddings.unbind(-2)),
-                               reversed(targets.unbind(-1)),
-                               reversed(batch_mask.unbind(-1)))
+            for i in reversed(range(num_tokens)):
 
-            for embedding, target, mask in iterator:
+                # Get the features
+                with torch.no_grad():
+                    embedding = embeddings[..., i, :]
+                    target = targets[..., i]
+                    mask = batch_mask[..., i]
+
+
                 # Manage RNG.
                 #
                 # Restore the original rng state, and
@@ -668,7 +672,7 @@ class CausalLMTrainer(nn.Module):
                 if numeric_cache is not None:
                     with torch.no_grad():
                         # Get forward statistics ready to go.
-                        entry_num, forward_memories,(f_logits, f_case_loss, f_embedding, f_output_embedding, f_target, f_mask) =  numeric_cache
+                        entry_num, forward_memories = numeric_cache
                         if save_cached_to_cpu:
                             load_from_cpu = lambda x: x.to(device=embedding.device)
                             forward_memories = parallel_pytree_map(load_from_cpu, forward_memories)
@@ -694,12 +698,17 @@ class CausalLMTrainer(nn.Module):
                         # gradients so backprop continues to work
                         memories = forward_memories
 
+                        # Release anything claimed within the block
+                        del forward_memories
+                        del case_numeric_error
+                        del case_numeric_percent_error
+
                 # Perform the loss computation. Then store the metrics
                 with profiler.record_function("train_step: computing loss"):
                     (output_embedding, next_memory), last_memory = self.decoder.reverse(embedding, mask, memories)
                     logits = self.vocabulary.logit_projector(output_embedding)
                     loss = self.main_loss_function(logits, target, loss_schedule)
-                    loss_metric = loss_metric + loss.detach()
+                    loss_metric += loss.detach()
 
                 # Integrate the gradients into the memories
                 # locations as manually injected gradients,
@@ -738,7 +747,9 @@ class CausalLMTrainer(nn.Module):
                 del embedding
                 del logits
                 del loss
-
+                del numeric_cache
+                del rng_state
+                del mem_grads
 
                 # Advance to the prior memory. Rescale and normalize if needed
                 mem_grads = parallel_pytree_map(get_mem_grads, last_memory)
@@ -748,13 +759,19 @@ class CausalLMTrainer(nn.Module):
                     memories = parallel_pytree_map(lambda x: x.clone().detach(), last_memory)
                 del last_memory
 
+                if self.empty_cuda_cache:
+                    torch.cuda.empty_cache()
+
                 # Update progress when verbose
                 progress.update(loss_metric, numeric_error, numeric_percent_error)
 
-            metrics = {"numeric_percent_error" : numeric_percent_error,
-                       "numeric_error" : numeric_error,
-                       "reverse_loss" : loss_metric,
+            metrics = {
                        "forward_loss" : cache_dict["forward_loss"],
+                       "reverse_loss": loss_metric,
+                       "accuracy" : cache_dict["accuracy"],
+                       "numeric_percent_error" : numeric_percent_error,
+                       "numeric_error" : numeric_error,
+
                        "forward_time" : cache_dict["forward_time"],
                        "setup_time" : cache_dict["setup_time"],
                        }

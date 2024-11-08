@@ -88,17 +88,18 @@ def explore_models_with_profiling():
     trainer = trainer.to("cuda")
 
     # Compute schedule rate
-    num_active_tokens = masks.sum()
+    num_active_tokens = (~masks).sum().to(dtype=torch.float32)
     schedule_rate = 1/num_active_tokens
-    schedule_rate = schedule_rate.to(dtype=tokens.dtype)
+    schedule_rate = schedule_rate
 
     # Run steps with profiler
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
                  record_shapes=True, profile_memory=True) as prof:
-        memories, metrics = trainer.step(tokens, targets, masks,
-                                         numerics_cache_rate=cache_rate,
-                                         scheduling_rates=(schedule_rate, schedule_rate),
-                                         )
+        with GPUMonitor(interval=0.1):
+            memories, metrics = trainer.step(tokens, targets, masks,
+                                             numerics_cache_rate=cache_rate,
+                                             scheduling_rates=(schedule_rate, schedule_rate),
+                                             )
 
     # Output profiling results
     print(metrics)
