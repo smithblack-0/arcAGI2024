@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 print("PACKAGES", find_packages(where="src/main"))
 setup(
     name='arcAGI2024',
-    version='0.3.13',
+    version='0.3.14',
     description='Support mechanism for the arc agi project',
     author='Chris',
     author_email='your.email@example.com',
@@ -13,6 +13,7 @@ setup(
         'tokenizers', # add other dependencies here
         'transformers',
         'typeguard',
+        'tqdm',
         'numpy'
     ],
     python_requires='>=3.10', # adjust based on your requirements

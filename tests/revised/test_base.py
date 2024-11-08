@@ -2,7 +2,7 @@ import copy
 import unittest
 import torch
 from typing import Any, Tuple
-from src.main.arcAGI2024.base import SavableState, TensorTree, parallel_pytree_map
+from src.main.arcAGI2024.base import SavableState, TensorTree, parallel_pytree_map, GradientSubstitutionEndpoint
 
 
 class MySavableState(SavableState):
@@ -96,3 +96,33 @@ class TestParallelPytreeMapWithSavableState(unittest.TestCase):
         self.assertTrue(torch.equal(result['a'][1], torch.tensor([8.0, 10.0])))
         self.assertTrue(torch.equal(result['b'][0], torch.tensor([12.0])))
         self.assertTrue(torch.equal(result['b'][1].tensor, expected_tensor))
+
+class GradientSubstitutionEndpoint(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, tensor, desired_gradients):
+        ctx.save_for_backward(desired_gradients)
+        return torch.tensor(0.0, requires_grad=True, device=tensor.device)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        desired_gradients, = ctx.saved_tensors
+        return desired_gradients, None
+
+class TestGradientSubstitutionEndpoint(unittest.TestCase):
+    def test_gradient_substitution(self):
+        # Create an input tensor with requires_grad=True
+        input_tensor = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+
+        # Define desired gradients
+        desired_grads = torch.tensor([0.1, 0.2, 0.3])
+
+        # Use GradientSubstitutionEndpoint in the computation graph
+        output = GradientSubstitutionEndpoint.apply(input_tensor, desired_grads)
+
+        # Combine output with a dummy loss to trigger backpropagation
+        loss = output
+        loss.backward()
+
+        # Check that the gradients of input_tensor match the desired gradients
+        self.assertTrue(torch.allclose(input_tensor.grad, desired_grads),
+                        f"Expected gradients: {desired_grads}, but got: {input_tensor.grad}")

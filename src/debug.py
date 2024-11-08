@@ -69,13 +69,14 @@ def explore_models_with_profiling():
         model_core=model_core,
         main_loss_function=main_loss_fn,
         mem_access_loss_function=mem_access_loss_fn,
+        rescaler_mode="mean",
         verbose=True
     )
 
     # Create mock training data
-    batch_size = 30
+    batch_size = 20
     num_tokens = 20
-    cache_rate = 50
+    cache_rate = 5
     tokens = torch.randint(0, model_core.vocabulary.tokenizer.true_vocab_size, (batch_size, num_tokens))
     targets = torch.randint(0, model_core.vocabulary.tokenizer.true_vocab_size, (batch_size, num_tokens))
     masks = (torch.rand(batch_size, num_tokens) > 0.5)
@@ -86,15 +87,23 @@ def explore_models_with_profiling():
     masks = masks.to("cuda")
     trainer = trainer.to("cuda")
 
+    # Compute schedule rate
+    num_active_tokens = masks.sum()
+    schedule_rate = 1/num_active_tokens
+    schedule_rate = schedule_rate.to(dtype=tokens.dtype)
+
     # Run steps with profiler
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
                  record_shapes=True, profile_memory=True) as prof:
-        memories, numeric_metrics, loss = trainer.step(tokens, targets, masks, numerics_cache_rate=cache_rate)
+        memories, metrics = trainer.step(tokens, targets, masks,
+                                         numerics_cache_rate=cache_rate,
+                                         scheduling_rates=(schedule_rate, schedule_rate),
+                                         )
 
     # Output profiling results
-    print(numeric_metrics)
-    print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=10))
-    print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
+    print(metrics)
+    print(prof.key_averages().table(sort_by="self_cuda_time_total"))
+    print(prof.key_averages().table(sort_by="self_cpu_time_total"))
 
     # Cleanup
     del prof
@@ -104,7 +113,6 @@ def explore_models_with_profiling():
     del targets
     del masks
     del memories
-    del numeric_metrics
     torch.cuda.empty_cache()
 
 explore_models_with_profiling()

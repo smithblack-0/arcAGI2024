@@ -268,3 +268,35 @@ def parallel_pytree_map(func: Callable[..., Any], *pytrees: Any) -> Any:
         return func(*pytrees)
 
 
+class GradientSubstitutionEndpoint(torch.autograd.Function):
+    """
+    Acts as a location in which gradients can be manually
+    substituted into the tensor stream.
+    """
+
+    @staticmethod
+    def forward(ctx: torch.autograd.function.FunctionCtx,
+                tensor: torch.Tensor,
+                desired_gradients: torch.Tensor) -> torch.Tensor:
+        assert tensor.shape == desired_gradients.shape
+
+        # Save the desired gradients for the backward pass
+        ctx.save_for_backward(desired_gradients)
+
+        # Return a zero-filled scalar that can connect to the loss
+        return torch.tensor(0.0,
+                            requires_grad=True,
+                            dtype=tensor.dtype,
+                            device=tensor.device)
+
+    @staticmethod
+    def backward(ctx,
+                 grad_outputs: torch.Tensor
+                 ) -> torch.Tensor:
+        # Load the desired gradients
+        desired_gradients, = ctx.saved_tensors
+
+        # Substitute the gradient with the desired gradients.
+        # Also, clearly indicate that desired grads is not
+        # going to be differentiated further.
+        return desired_gradients, None

@@ -4,8 +4,7 @@ import torch
 from torch import nn
 
 from .deep_memory import MemoryState, FastLinearMemory
-
-
+from .base import get_rng_state
 class Feedforward(nn.Module):
     """
     A classic feedforward implementation.
@@ -129,8 +128,11 @@ class DecoderLayer(nn.Module):
         """
 
         # Perform the deep memory access pattern
+
+
         (update, next_memory), previous_memory = self.deep_memories.reverse(tensor, batch_mask, next_memory)
         tensor = self.deep_layernorm(tensor + self.dropout(update))
+
 
         # Perform the feedforward
         update = self.feedforward(tensor)
@@ -153,8 +155,11 @@ class DecoderLayer(nn.Module):
             - The next memory state.
         """
         # Perform the deep memory access pattern
+
+
         update, next_memory = self.deep_memories(tensor, batch_mask, previous_memory)
         tensor = self.deep_layernorm(tensor + self.dropout(update))
+
 
         # Perform the feedforward
         update = self.feedforward(tensor)

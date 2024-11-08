@@ -62,7 +62,8 @@ class CrossEntropyLoss(MainLossInterface):
         super().__init__()
         self.weight = weight
         self.cross_entropy = nn.CrossEntropyLoss(ignore_index=padding_token_id,
-                                                 label_smoothing=label_smoothing_rate)
+                                                 label_smoothing=label_smoothing_rate,
+                                                 reduction="sum")
     def forward(self, logits: torch.Tensor, targets: torch.Tensor, schedule: Optional[float]):
         loss = self.weight*self.cross_entropy(logits, targets)
         if schedule is not None:
@@ -82,7 +83,7 @@ class UniformMemLoss(MemAccessLossInterface):
                  weight: float = 1.0,
                  ):
         super().__init__()
-        self.divergence = nn.KLDivLoss()
+        self.divergence = nn.KLDivLoss(reduction="sum")
         self.weight = weight
 
     def forward(self, write_probability_mass: torch.Tensor, schedule: Optional[float])->torch.Tensor:

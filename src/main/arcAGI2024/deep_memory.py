@@ -680,7 +680,11 @@ class FastLinearMemory(nn.Module):
             return tensor
 
         original_memory = parallel_pytree_map(setup_grads, original_memory)
-        return self.forward(tensor, batch_mask, original_memory), original_memory
+
+        # Manually complete the read
+        next_memory = self.memory_writer.advance_memory(update, write_factor, batch_mask, original_memory)
+        read = self.memory_reader(tensor, self.addresses, next_memory)
+        return (read, next_memory), original_memory
     def forward(self,
                 tensor: torch.Tensor,
                 batch_mask: torch.Tensor,
@@ -698,6 +702,8 @@ class FastLinearMemory(nn.Module):
         - The response tensor. Shape (..., d_model)
         - The new memory state
         """
+
+
         update, write_factor = self.memory_writer.compute_common(tensor, tensor, self.addresses)
         memory = self.memory_writer.advance_memory(update, write_factor, batch_mask, memory)
         read = self.memory_reader(tensor, self.addresses, memory)
