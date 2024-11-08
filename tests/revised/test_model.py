@@ -5,7 +5,7 @@ import torch
 import time
 from torch import nn
 
-from src.main.arcAGI2024.model import (CasualLMCore, CausalLMTrainer, CausalLMGenerator,
+from src.main.arcAGI2024.model import (CausalLMCore, CausalLMTrainer, CausalLMGenerator,
                                        RecurrentDecoder, VocabularyStruct)
 from src.main.arcAGI2024.losses import CrossEntropyLoss, UniformMemLoss
 from src.main.arcAGI2024.base import parallel_pytree_map
@@ -42,7 +42,7 @@ class TestCausalLMCore(unittest.TestCase):
 
 
     def test_basic_sanity(self):
-        model = CasualLMCore.build_model_on_top_of_pretrained_head(
+        model = CausalLMCore.build_model_on_top_of_pretrained_head(
             head_model_name=self.head_name,
             num_layers=2,
             num_read_heads=10,
@@ -57,7 +57,7 @@ class TestCausalLMCore(unittest.TestCase):
 
     def test_save_load_no_directory(self):
         # Initialize and save when the directory does not exist
-        model = CasualLMCore.build_model_on_top_of_pretrained_head(
+        model = CausalLMCore.build_model_on_top_of_pretrained_head(
             head_model_name=self.head_name,
             num_layers=2,
             num_read_heads=1,
@@ -75,12 +75,12 @@ class TestCausalLMCore(unittest.TestCase):
         model.save_to_folder(self.temp_directory)
 
         # Load the model and validate initialization
-        loaded_model = CasualLMCore.load_from_folder(self.temp_directory)
+        loaded_model = CausalLMCore.load_from_folder(self.temp_directory)
         self.initialized_correctly(loaded_model)
 
     def test_save_load_directory_exists(self):
         # Initialize and save when the directory exists (contains a junk file)
-        model = CasualLMCore.build_model_on_top_of_pretrained_head(
+        model = CausalLMCore.build_model_on_top_of_pretrained_head(
             head_model_name=self.head_name,
             num_layers=2,
             num_read_heads=1,
@@ -102,11 +102,11 @@ class TestCausalLMCore(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.temp_directory, "junk.txt")))
 
         # Load the model and validate initialization
-        loaded_model = CasualLMCore.load_from_folder(self.temp_directory)
+        loaded_model = CausalLMCore.load_from_folder(self.temp_directory)
         self.initialized_correctly(loaded_model)
 
     def test_masking_sanity(self):
-        model = CasualLMCore.build_model_on_top_of_pretrained_head(
+        model = CausalLMCore.build_model_on_top_of_pretrained_head(
             head_model_name=self.head_name,
             num_layers=2,
             num_read_heads=10,
@@ -140,7 +140,7 @@ class TestCausalLMCore(unittest.TestCase):
 class TestCausalLMTrainer(unittest.TestCase):
     def setUp(self):
         # Setup model core
-        model_core = CasualLMCore.build_model_on_top_of_pretrained_head(
+        model_core = CausalLMCore.build_model_on_top_of_pretrained_head(
             head_model_name="gpt2",
             num_layers=2,
             num_read_heads=2,
@@ -288,7 +288,7 @@ class TestCausalLMTrainer(unittest.TestCase):
                                             )
     def test_normal_parameters(self):
         # Test with more typical parameters
-        model_core = CasualLMCore.build_model_on_top_of_pretrained_head(
+        model_core = CausalLMCore.build_model_on_top_of_pretrained_head(
             head_model_name="gpt2",
             num_layers=10,
             num_read_heads=10,
@@ -329,7 +329,7 @@ class TestCausalLMGen(unittest.TestCase):
 
     def setUp(self):
         # Setup model core and sampling mode
-        model_core = CasualLMCore.build_model_on_top_of_pretrained_head(
+        model_core = CausalLMCore.build_model_on_top_of_pretrained_head(
             head_model_name="gpt2",
             num_layers=2,
             num_read_heads=1,

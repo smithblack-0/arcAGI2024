@@ -50,7 +50,7 @@ class GPUMonitor(ContextDecorator):
             time.sleep(self.interval)
 def explore_models_with_profiling():
     # Setup model core
-    model_core = arcAGI2024.CasualLMCore.build_model_on_top_of_pretrained_head(
+    model_core = arcAGI2024.CausalLMCore.build_model_on_top_of_pretrained_head(
         head_model_name="gpt2",
         num_layers=10,
         num_read_heads=10,
