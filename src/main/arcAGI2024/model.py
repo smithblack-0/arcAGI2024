@@ -757,8 +757,6 @@ class CausalLMTrainer(nn.Module):
                 del embedding
                 del logits
                 del loss
-                del numeric_cache
-                del rng_state
                 del mem_grads
 
                 # Advance to the prior memory. Rescale and normalize if needed

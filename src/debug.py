@@ -70,13 +70,13 @@ def explore_models_with_profiling():
         main_loss_function=main_loss_fn,
         mem_access_loss_function=mem_access_loss_fn,
         rescaler_mode="mean",
-        verbose=True
+        verbose=True,
     )
 
     # Create mock training data
     batch_size = 20
-    num_tokens = 20
-    cache_rate = 5
+    num_tokens = 5000
+    cache_rate = 300
     tokens = torch.randint(0, model_core.vocabulary.tokenizer.true_vocab_size, (batch_size, num_tokens))
     targets = torch.randint(0, model_core.vocabulary.tokenizer.true_vocab_size, (batch_size, num_tokens))
     masks = (torch.rand(batch_size, num_tokens) > 0.5)
@@ -93,13 +93,12 @@ def explore_models_with_profiling():
     schedule_rate = schedule_rate
 
     # Run steps with profiler
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                 record_shapes=True, profile_memory=True) as prof:
-        with GPUMonitor(interval=0.1):
-            memories, metrics = trainer.step(tokens, targets, masks,
-                                             numerics_cache_rate=cache_rate,
-                                             scheduling_rates=(schedule_rate, schedule_rate),
-                                             )
+    with GPUMonitor(interval=0.1):
+        memories, metrics = trainer.step(tokens, targets, masks,
+                                         numerics_cache_rate=cache_rate,
+                                         scheduling_rates=(schedule_rate, schedule_rate),
+                                         save_cached_to_cpu=True,
+                                         )
 
     # Output profiling results
     print(metrics)
