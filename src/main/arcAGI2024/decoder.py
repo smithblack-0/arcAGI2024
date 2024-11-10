@@ -15,14 +15,16 @@ class Feedforward(nn.Module):
 
     def __init__(self,
                  d_model: int,
-                 d_hidden: int
+                 d_hidden: int,
+                 device: torch.device,
+                 dtype: torch.dtype,
                  ):
         super().__init__()
         self.d_hidden = d_hidden
         self.d_model = d_model
 
-        self.ff1 = nn.Linear(d_model, d_hidden)
-        self.ff2 = nn.Linear(d_hidden, d_model)
+        self.ff1 = nn.Linear(d_model, d_hidden, device=device, dtype=dtype)
+        self.ff2 = nn.Linear(d_hidden, d_model, device=device, dtype=dtype)
         self.relu = nn.ReLU()
 
     def forward(self, tensor: torch.Tensor) -> torch.Tensor:
@@ -90,11 +92,11 @@ class DecoderLayer(nn.Module):
                                               max_write_factor=numeric_write_factor,
                                               device=device,
                                               dtype=dtype)
-        self.deep_layernorm = nn.LayerNorm(d_model)
+        self.deep_layernorm = nn.LayerNorm(d_model, device=device, dtype=dtype)
 
         # Define the feedforward layer
-        self.feedforward = Feedforward(d_model, d_hidden)
-        self.ff_layernorm = nn.LayerNorm(d_model)
+        self.feedforward = Feedforward(d_model, d_hidden, device=device, dtype=dtype)
+        self.ff_layernorm = nn.LayerNorm(d_model, device=device, dtype=dtype)
 
         # Define the dropout layer
         self.dropout = nn.Dropout(dropout)

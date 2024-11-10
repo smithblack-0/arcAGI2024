@@ -1,7 +1,9 @@
+from abc import ABC, abstractmethod
+
 import torch
 import functools
 from torch import nn
-from .base import parallel_pytree_map, middle_quantiles_mean
+from .base import parallel_pytree_map, middle_quantiles_mean, TensorTree
 from typing import Any, List
 
 
@@ -227,3 +229,45 @@ class GradClip:
         :return: The clipped gradients
         """
         return parallel_pytree_map(self.clip_gradients, grad_tree)
+class AbstractGradientControl(nn.Module, ABC):
+    """
+    A class which is dedicated completely to controlling
+    gradients and preventing them from exploding.
+
+    It should directly accept, then return, gradients.
+    """
+    def __init__(self):
+        super().__init__()
+
+    @abstractmethod
+    def forward(self, gradient_tree: TensorTree)->TensorTree:
+        pass
+class AutorescaleGradientControl(AbstractGradientControl):
+    """
+    Automatically rescales gradients flowing through
+    it, and clips excessive values after that
+    rescale.
+    """
+    def __init__(self,
+                 rescale_threshold: float = 1.0,
+                 rescale_reduction_mode: str = "mean",
+                 clip_factor: float = 100,
+                 num_batch_dims: int = 1,
+                 ):
+        """
+        :param num_batch_dims: Number of batch dimensions.
+        :param rescale_threshold: Grads that exceed this threshold when reduced will be scaled down to be in proportion
+        :param rescale_reduction_mode: Reductive modes. Recommend "mean" or "max".
+        :param clip_factor: When, after rescaling, we still exceed this we clip.
+        """
+        super().__init__()
+        self.rescaling = BatchCollectiveReductiveGradNorm(num_batch_dims, rescale_threshold, rescale_reduction_mode)
+        self.clipper = GradClip(clip_factor*rescale_threshold)
+    def forward(self, gradient_tree: TensorTree) -> TensorTree:
+        """
+        Runs the actual gradient control process.
+        """
+        with torch.no_grad():
+            gradient_tree = self.rescaling(gradient_tree)
+            gradient_tree = self.clipper(gradient_tree)
+        return gradient_tree

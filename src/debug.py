@@ -75,7 +75,7 @@ def explore_models_with_profiling():
 
     # Create mock training data
     batch_size = 20
-    num_tokens = 5000
+    num_tokens = 10
     cache_rate = 300
     tokens = torch.randint(0, model_core.vocabulary.tokenizer.true_vocab_size, (batch_size, num_tokens))
     targets = torch.randint(0, model_core.vocabulary.tokenizer.true_vocab_size, (batch_size, num_tokens))

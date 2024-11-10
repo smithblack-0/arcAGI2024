@@ -8,6 +8,7 @@ import tqdm
 import os
 import textwrap
 import shutil
+from concurrent import futures
 from typing import Callable, List
 from typing import Any, List, Tuple, Dict, Union, Callable, Optional
 import torch
@@ -16,16 +17,18 @@ from torch.autograd import profiler
 from torch.nn import functional as F
 from abc import ABC, abstractmethod
 
+
 from .decoder import RecurrentDecoder, MemoryState, build_decoder
 from .vocabulary import VocabularyStruct, AdditionalSpecialTokens
 from .base import (get_rng_state, set_rng_state, parallel_pytree_map,
                    DeviceDtypeWatch, GradientSubstitutionEndpoint)
 from .losses import MainLossInterface, MemAccessLossInterface
 from .sampling import SamplingInterface
-from .grad_utils import GradClip, BatchCollectiveReductiveGradNorm
+from .grad_utils import GradClip, BatchCollectiveReductiveGradNorm, AbstractGradientControl
 
 try:
     import torch_xla
+    from torch_xla.core import xla_model as xm
 except:
     pass
 
@@ -275,6 +278,7 @@ class CoreReverse(nn.Module):
             - The memory states for this timestep. It has a graph. We need to insert gradients here
         - The memory from the last timestep. Setup to accumulate gradients and continue the chain.
         """
+        return self.core.decoder.reverse(embedding, batch_mask, next_memories)
 
 
 class CoreCreateState(nn.Module):
@@ -353,6 +357,9 @@ class AbstractTrainerCore(nn.Module, ABC):
     def setup_compilation(self, module: nn.Module) -> Any:
         pass
 
+    @abstractmethod
+    def release_memory(self, *items: Any):
+        pass
     def __init__(self, core: CausalLMCore):
         super().__init__()
 
@@ -378,6 +385,10 @@ class UncompiledCore(AbstractTrainerCore):
     def setup_compilation(self, module: nn.Module) -> Any:
         return module
 
+    def release_memory(self, *items: Any):
+        for item in items:
+            del item
+
 class TorchCompiledCore(AbstractTrainerCore):
     """
     A core that has been compiled using torch.compile
@@ -394,12 +405,60 @@ class XLACompiledCore(AbstractTrainerCore):
     """
 
     def setup_compilation(self, module: nn.Module) -> Any:
-        return torch_xla.compile(module)
+        return torch_xla.compile(module, full_graph=True)
+
+    def release_memory(self, *items: Any):
+        """
+        Explicitly release memory of tensors, ensuring that they are properly marked for deletion.
+        :param items: Tensors or nested structures containing tensors.
+        """
+
+        def delete_tensors(tensor: torch.Tensor):
+            del tensor  # This should trigger the underlying C++ code to free memory
+
+        # Traverse and delete tensors within nested structures
+        parallel_pytree_map(delete_tensors, items)
+
+        # Delete references to the items themselves, if any remaining in the main scope
+        for item in items:
+            del item
+
+        # Ensure TPU operations are synchronized and memory is freed
+        xm.mark_step()
+
+# Logging
 
 
-# Some pretty tracking of statistics
+class Logger:
+    """
+    A logger that uses an existing executor to perform asynchronous logging.
+    """
+    def __init__(self,
+                 executor: futures.Executor,
+                 terminal_callback: Callable[[str], None],
+                 metric_callback: Callable[[Dict[str, Any]], None]):
+        self.executor = executor
+        self.terminal_callback = terminal_callback
+        self.metric_callback = metric_callback
+
+    def update_terminal_status(self, message: str):
+        """
+        Submits a terminal update task to the executor.
+        """
+        self.executor.submit(self.terminal_callback, message)
+
+    def commit_metrics(self, metrics: Dict[str, Any]):
+        """
+        Submits a metrics update task to the executor.
+        """
+        self.executor.submit(self.metric_callback, metrics)
+
 class ForwardPassProgress:
-    def __init__(self, total_tokens: int, batch_width: int = 1, verbose: bool = True):
+    def __init__(self,
+                 total_tokens: int,
+                 batch_width: int,
+                 verbose: bool,
+                 logger: Logger):
         """
         Context manager for tracking forward pass progress with tqdm.
 
@@ -407,54 +466,54 @@ class ForwardPassProgress:
             total_tokens (int): The total number of tokens to be processed.
             batch_width (int): Number of tokens processed per step (batch size).
             verbose (bool): If False, disables progress tracking (acts as a no-op).
+            terminal_callback: Where to send the message string.
         """
         self.total_tokens = total_tokens
+        self.n = 0
         self.batch_width = batch_width
+        self.start_time = None
+        self.elapsed_time = None
         self.verbose = verbose
-        self.progress_bar = None
-        self.elapsed_time = None  # Slot for elapsed time
-        self.start_time = None  # Slot for start time if needed
+        self.logger = logger
 
     def update(self, cumulative_loss: float, total_correct: float, total_examined: float):
         """
         Update the cumulative loss, tokens per second, and progress count.
         """
+
         if not self.verbose:
             return  # No-op if verbose is False
+        self.n += 1
+        elapsed_time = time.time() - self.start_time
+        tokens_per_second = float(self.n * self.batch_width) / elapsed_time
 
-        elapsed_time = self.progress_bar.format_dict['elapsed']
-        tokens_processed = self.progress_bar.n * self.batch_width
-        tokens_per_second = tokens_processed / elapsed_time if elapsed_time > 0 else 0
+        postfix = {"forward_loss" : f"{cumulative_loss:.4f}",
+                   "tokens_per_second": f"{tokens_per_second:.4f}",
+                   "running_accuracy" : f"{total_correct/total_examined:.4f}",
+                   }
 
-        # Update progress bar with cumulative loss and tokens per second
-        running_accuracy = 0 if total_examined is None else total_correct / total_examined
-        self.progress_bar.set_postfix(
-            cumulative_loss=f"{cumulative_loss:.4f}",
-            tokens_per_sec=f"{tokens_per_second:.2f}",
-            running_accuracy=f"{running_accuracy:.5f}"
+        progress_string = tqdm.tqdm.format_meter(
+            n=self.n,
+            total=self.total_tokens,
+            elapsed=time.time() - self.start_time,
+            postfix=postfix
         )
-        self.progress_bar.update(1)
-
+        self.logger.update_terminal_status(progress_string)
     def __enter__(self):
         # Initialize tqdm progress bar if verbose is True
-        if self.verbose:
-            self.progress_bar = tqdm.tqdm(total=self.total_tokens, desc="Running forward pass", leave=True)
-            self.progress_bar.set_postfix(cumulative_loss=f"{0:.4f}", tokens_per_sec="0.00")
-        else:
-            self.start_time = time.time()
+        self.start_time = time.time()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         # Store elapsed time if progress bar was initialized
-        if self.progress_bar is not None:
-            self.elapsed_time = self.progress_bar.format_dict['elapsed']
-            self.progress_bar.close()
-        else:
-            self.elapsed_time = time.time() - self.start_time
-
-
+        self.elapsed_time = time.time() - self.start_time
 class ReversePassProgress:
-    def __init__(self, total_tokens: int, batch_width: int, verbose: bool):
+    def __init__(self,
+                 total_tokens: int,
+                 batch_width: int,
+                 verbose: bool,
+                 logger: Logger
+                 ):
         """
         Context manager for tracking reverse pass progress with tqdm.
 
@@ -462,15 +521,14 @@ class ReversePassProgress:
             total_tokens (int): The total number of tokens to be processed.
             batch_width (int): Number of tokens processed per step (batch size).
             verbose (bool): If False, disables progress tracking (acts as a no-op).
+            terminal_callback: Where to send the message string.
         """
+        self.n = 0
         self.total_tokens = total_tokens
         self.batch_width = batch_width
         self.verbose = verbose
-        self.progress_bar = None
-        self.numeric_divergence = None
-        self.numeric_percent_error = None
-        self.elapsed_time = None  # Slot for elapsed time
-        self.start_time = None  # slot for start time if needed
+        self.start_time = None
+        self.logger = logger
 
     def update(self, loss: float, numeric_divergence: float, numeric_percent_error: float):
         """
@@ -484,12 +542,13 @@ class ReversePassProgress:
         if not self.verbose:
             return  # No-op if verbose is False
 
-        # Calculate tokens per second
-        elapsed_time = self.progress_bar.format_dict['elapsed']
-        tokens_processed = self.progress_bar.n * self.batch_width
-        tokens_per_second = tokens_processed / elapsed_time if elapsed_time > 0 else 0
+        self.n += 1
 
-        # Update progress bar with current metrics
+        # Calculate tokens per second
+        elapsed_time = time.time() - self.start_time
+        tokens_per_second = float(self.n * self.batch_width) / elapsed_time
+
+        # Create the postfix
         postfix = {
             "reverse_loss": f"{loss:.4f}",
             "tokens_per_sec": f"{tokens_per_second:.2f}",
@@ -497,25 +556,39 @@ class ReversePassProgress:
             "numeric_percent_error": f"{numeric_percent_error:.4f}"
         }
 
-        self.progress_bar.set_postfix(postfix)
-        self.progress_bar.update(1)
+        # Create the progress string
+        progress_string = tqdm.tqdm.format_meter(
+            n=self.n,
+            total=self.total_tokens,
+            elapsed=time.time() - self.start_time,
+            postfix=postfix
+        )
+        self.logger.update_terminal_status(progress_string)
+
 
     def __enter__(self):
-        # Initialize tqdm progress bar if verbose is True
-        if self.verbose:
-            self.progress_bar = tqdm.tqdm(total=self.total_tokens, desc="Running reverse pass", leave=True)
-            self.progress_bar.set_postfix(reverse_loss=f"{0:.4f}", tokens_per_sec="0.00")
-        else:
-            self.start_time = time.time()
+        self.start_time = time.time()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        # Store elapsed time if progress bar was initialized
-        if self.progress_bar is not None:
-            self.elapsed_time = self.progress_bar.format_dict['elapsed']
-            self.progress_bar.close()
-        else:
-            self.elapsed_time = time.time() - self.start_time
+        self.elapsed_time = time.time() - self.start_time
+
+class TrainingDependencies(nn.Module):
+    """
+    Training interface which the model can
+    use to interact with the loss functions and the
+    display/logging callbacks
+    """
+
+    def __init__(self,
+                 main_loss: MainLossInterface,
+                 mem_loss: MemAccessLossInterface,
+                 gradient_normalization: AbstractGradientControl,
+                 ):
+        super().__init__()
+        self.main_loss = main_loss
+        self.mem_loss = mem_loss
+        self.gradient_normalization = gradient_normalization
 
 
 # Main trainer
@@ -551,12 +624,12 @@ class CausalLMTrainer(nn.Module):
     In this model, however, that standard paradigm breaks down.
     This is a recurrent model, and recurrent models train optimally
     under very large batch sizes, and over long sequences. Unfortunately,
-    that would very quickly saturate the GPU.
+    that would very quickly saturate the GPU memory.
 
     Instead, we can imagine the trainer  as computing the loss with a single token at a time,
     gathering gradients on "recurrent memories", and then manually propogating updates from
     those memories back in time. This is done in a forward pass, then a reverse pass. It
-    also means there are some differences to the standard paradym.
+    also means there are some differences to the standard paradigm.
 
     #1): You pass in the targets, and pass in the loss function. The trainer decides where and when to use it,
          since it needs to apply the losses per token.
@@ -597,23 +670,12 @@ class CausalLMTrainer(nn.Module):
 
     def __init__(self,
                  model_core: CausalLMCore,
-                 main_loss_function: MainLossInterface,
-                 mem_access_loss_function: MemAccessLossInterface,
-                 grad_clip_threshold: float = 100,
+                 training_interface: TrainingDependencies,
                  verbose: bool = False,
-                 rescaler_mode: str = "mean",
-                 rescaler_threshold: float = 0.1,
-                 empty_cuda_cache: bool = True,
                  compile_type: str = "none"
                  ):
         super().__init__()
 
-        # Training details
-        self.main_loss_function = main_loss_function
-        self.mem_access_loss_function = mem_access_loss_function
-        self.grad_clipper = GradClip(grad_clip_threshold)
-        self.grad_rescaler = BatchCollectiveReductiveGradNorm(reduction_mode=rescaler_mode,
-                                                              rescale_threshold=rescaler_threshold)
         # Compile types
         if compile_type == "none":
             core = UncompiledCore(model_core)
@@ -626,9 +688,9 @@ class CausalLMTrainer(nn.Module):
 
         # Models
         self.core = core
-        self.mse_metric = nn.MSELoss(reduction="mean")
+        self.training_interface = training_interface
+        self.mse_error = nn.MSELoss(reduction='mean')
         self.verbose = verbose
-        self.empty_cuda_cache = empty_cuda_cache
 
     def run_forward_pass(self,
                          tokens: torch.Tensor,
@@ -638,6 +700,7 @@ class CausalLMTrainer(nn.Module):
                          save_cached_to_cpu: bool,
                          main_schedule: float,
                          memories: List[MemoryState],
+                         logger: Logger,
                          ) -> Dict[str, Any]:
         """
         Runs the model forward pass. Records numeric metrics, random
@@ -650,6 +713,7 @@ class CausalLMTrainer(nn.Module):
         :param save_cached_to_cpu: Whether to save the numeric caches to cpu
         :param main_schedule: The weight for the main loss. Used when gathering the forward loss
         :param memories: The existing memories
+        :param logger: The logging callback container.
         :return:
         - A dictionary containing a cache of features used for the backwards pass. In specific,
           it contains
@@ -673,7 +737,10 @@ class CausalLMTrainer(nn.Module):
         save_to_cpu = lambda x: x.to(device=torch.device("cpu"))
         forward_loss = torch.tensor(0.0, device=tokens.device, dtype=tokens.dtype)
         with (torch.no_grad(), profiler.record_function("train_step: forward pass"),
-              ForwardPassProgress(num_tokens, batch_width, self.verbose) as progress
+              ForwardPassProgress(num_tokens,
+                                  batch_width,
+                                  self.verbose,
+                                  logger) as progress
               ):
             for i in range(num_tokens):
                 # Get the features
@@ -688,7 +755,7 @@ class CausalLMTrainer(nn.Module):
                 # Compute loss. We use this to monitor numeric divergence, among
                 # other things. However, it will not be used in backprop
                 logits: torch.Tensor = self.core.logits(output_embedding)
-                case_loss = self.main_loss_function(logits, target, main_schedule)
+                case_loss = self.training_interface.main_loss(logits, target, main_schedule)
                 forward_loss = forward_loss + case_loss
 
                 # Handle accuracy metric
@@ -718,6 +785,14 @@ class CausalLMTrainer(nn.Module):
                     numeric_caches.append(None)
 
                 progress.update(forward_loss, float(num_correct), float(num_processed))
+
+                # Release anything I no longer need
+                self.core.release_memory(embedding,
+                                         target,
+                                         mask,
+                                         output_embedding,
+                                         case_loss,
+                                         )
 
         # Return the results
         results = {}
@@ -776,7 +851,7 @@ class CausalLMTrainer(nn.Module):
 
                 loss = torch.tensor(0.0, device=device, dtype=dtype)
                 for memory in memory_state:
-                    loss += self.mem_access_loss_function(memory.write_probability_mass, access_schedule)
+                    loss += self.training_interface.mem_loss(memory.write_probability_mass, access_schedule)
                 loss.backward()
 
             # Store the revised memories, and the beginnings of
@@ -795,7 +870,8 @@ class CausalLMTrainer(nn.Module):
                          batch_mask: torch.Tensor,
                          loss_schedule: Optional[float],
                          save_cached_to_cpu: bool,
-                         cache_dict: Dict[str, Any]
+                         cache_dict: Dict[str, Any],
+                         logger: Logger
                          ) -> Dict[int, Dict[str, torch.Tensor]]:
         """
         Runs the reverse pass basically. This includes most of the
@@ -807,17 +883,9 @@ class CausalLMTrainer(nn.Module):
         :param loss_schedule: The schedule weight on the main loss functionm
         :param save_cached_to_cpu: Whether the intermediate caches were saved to the cpu or gpu
         :param cache_dict: The main cache, containing memories
-        :return: The numerics metrics.
-        - forward loss: Loss seen during the forward pass
-        - reverse loss: Loss as seen during the reverse pass
-        - numeric_error: The error in memories between forward and reverse pass
-        - numeric_percent_error: A measure of how strongly the error actually matters
+        :param logger: The logging class
 
-        Optionally, when verbose,
-        - forward_pass_time: The time taken for the forward pass.
-        - setup_time: The time taken for the setup pass
-        - reverse_pass_time: The time taken for the reverse pass.
-
+        We will dump the metrics into the logging callback
         """
         num_tokens = tokens.shape[-1]
         batch_width = tokens.shape[0]
@@ -825,7 +893,11 @@ class CausalLMTrainer(nn.Module):
         numeric_error = 0.0
 
         with (profiler.record_function("train_step: Reverse pass"),
-              ReversePassProgress(num_tokens, batch_width, self.verbose) as progress):
+              ReversePassProgress(num_tokens,
+                                  batch_width,
+                                  self.verbose,
+                                  logger)
+              as progress):
             # Setup states, and grad cache containers
             memories: List[MemoryState] = cache_dict["memories"]
             loss_metric = cache_dict["reverse_loss"].clone().detach()
@@ -857,7 +929,6 @@ class CausalLMTrainer(nn.Module):
                 # before usage if needed.
                 rng_state = cache_dict["rng_states"].pop()
                 set_rng_state(rng_state, embedding.device)
-                del rng_state
 
                 # Numeric caching needs to be resolved here.
                 #
@@ -903,16 +974,12 @@ class CausalLMTrainer(nn.Module):
                         memories = forward_memories
 
                         # Release anything claimed within the block
-                        del forward_memories
-                        del case_numeric_error
-                        del case_numeric_percent_error
-                del numeric_cache
 
                 # Perform the loss computation. Then store the metrics
                 with profiler.record_function("train_step: computing loss"):
                     (output_embedding, next_memory), last_memory = self.core.reverse(embedding, mask, memories)
                     logits = self.core.logits(output_embedding)
-                    loss = self.main_loss_function(logits, target, loss_schedule)
+                    loss = self.training_interface.main_loss(logits, target, loss_schedule)
                     loss_metric += loss.detach()
 
                 # Integrate the gradients into the memories
@@ -947,25 +1014,26 @@ class CausalLMTrainer(nn.Module):
                             parallel_pytree_map(write_it, mem_grads)
                         raise err
 
-                # Explicitly clear out tensors and detach graphs
-                # on ANYTHING that actually had a graph attached.
-                del memories
-                del next_memory
-                del embedding
-                del logits
-                del loss
-                del mem_grads
+
+
 
                 # Advance to the prior memory. Rescale and normalize if needed
                 mem_grads = parallel_pytree_map(get_mem_grads, last_memory)
-                with torch.no_grad(), profiler.record_function("train step: grad sanity"):
-                    mem_grads = self.grad_clipper(mem_grads)
-                    mem_grads = self.grad_rescaler(mem_grads)
-                    memories = parallel_pytree_map(lambda x: x.clone().detach(), last_memory)
-                del last_memory
+                mem_grads = self.training_interface.gradient_normalization(mem_grads)
+                memories = parallel_pytree_map(lambda x: x.clone().detach(), last_memory)
 
-                if self.empty_cuda_cache:
-                    torch.cuda.empty_cache()
+                # Explicitly clear out tensors and detach graphs
+                # on ANYTHING that actually had a graph attached.
+                self.core.release_memory(
+                    memories,
+                    next_memory,
+                    embedding,
+                    logits,
+                    loss,
+                    mem_grads,
+                    numeric_cache,
+                    last_memory,
+                )
 
                 # Update progress when verbose
                 progress.update(loss_metric, numeric_error, numeric_percent_error)
@@ -982,8 +1050,7 @@ class CausalLMTrainer(nn.Module):
             }
         metrics["reverse_time"] = progress.elapsed_time
         metrics["total_time"] = cache_dict["forward_time"] + cache_dict["setup_time"] + progress.elapsed_time
-        return metrics
-
+        logger.commit_metrics(metrics)
     def step(self,
              tokens: torch.Tensor,
              targets: torch.Tensor,
