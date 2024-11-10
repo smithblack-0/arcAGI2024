@@ -14,6 +14,7 @@ import torch
 from torch import nn
 from torch.autograd import profiler
 from torch.nn import functional as F
+from abc import ABC, abstractmethod
 
 from .decoder import RecurrentDecoder, MemoryState, build_decoder
 from .vocabulary import VocabularyStruct, AdditionalSpecialTokens
@@ -22,6 +23,11 @@ from .base import (get_rng_state, set_rng_state, parallel_pytree_map,
 from .losses import MainLossInterface, MemAccessLossInterface
 from .sampling import SamplingInterface
 from .grad_utils import GradClip, BatchCollectiveReductiveGradNorm
+
+try:
+    import torch_xla
+except:
+    pass
 
 
 class CausalLMCore(nn.Module):
@@ -209,6 +215,188 @@ class CausalLMCore(nn.Module):
         raise NotImplementedError(msg)
 
 
+# Core adapters to support compile processes.
+class CoreForward(nn.Module):
+    """
+    An adapter class that calls the LM core decoder
+    forward method. Exists to allow it to be wrapped
+    in a compile statement
+    """
+
+    def __init__(self, model_core: CausalLMCore):
+        super().__init__()
+        self.core = model_core
+
+    def forward(self,
+                embedding: torch.Tensor,
+                batch_mask: torch.Tensor,
+                previous_memories: List[MemoryState]
+                ) -> Tuple[torch.Tensor, List[MemoryState]]:
+        """
+        The forward mechanism. Performs a forward pass through the model.
+        This will usually occur without gradients.
+
+        :param embedding: The embedding being processed
+        :param batch_mask: Shape (...). Indicates whether memory can be updated. True means No.
+        :param previous_memories: The memory states from the last timestep
+        :return:
+        - The output. Same whether forward or backwards
+        - The memory states for the next timestep.
+        """
+        return self.core.decoder(embedding, batch_mask, previous_memories)
+
+
+class CoreReverse(nn.Module):
+    """
+    An adapter class that calls the lm core reverse pass
+    mechanism. Exists to be compiled
+    """
+
+    def __init__(self, model_core: CausalLMCore):
+        super().__init__()
+        self.core = model_core
+
+    def forward(self,
+                embedding: torch.Tensor,
+                batch_mask: torch.Tensor,
+                next_memories: List[MemoryState]
+                ) -> Tuple[Tuple[torch.Tensor, List[MemoryState]], List[MemoryState]]:
+        """
+        Runs the reverse process. This means figuring out the
+        previous memory states and setting them up for gradient
+        accumulation. And of course returning the final output
+
+        :param embedding: The input embedding. Whatever it might be
+        :param batch_mask: Shape (...). Indicates whether memory can be updated. True means No.
+        :param next_memories: The memories from the NEXT step
+        :return:
+        - Tuple:
+            - The final embedding, ready for usage in logits.
+            - The memory states for this timestep. It has a graph. We need to insert gradients here
+        - The memory from the last timestep. Setup to accumulate gradients and continue the chain.
+        """
+
+
+class CoreCreateState(nn.Module):
+    """
+    Runs the create state process from the lm core.
+    Mainly an adapter that is designed to be compiled
+    later on.
+    """
+
+    def __init__(self, model_core: CausalLMCore):
+        super().__init__()
+        self.core = model_core
+
+    def forward(self, batch_shape: torch.Size) -> List[MemoryState]:
+        """
+        Sets up the recurrent state bound
+        to a particular batch shape
+
+        :param batch_shape: The batch shape to match
+        :return: A list of memory states. One for each layer.
+        """
+        return self.core.decoder.create_state(batch_shape)
+
+
+class CoreEmbed(nn.Module):
+    """
+    Exposes the embedding process as a torch
+    layer that can be compiled. Mainly an
+    adapter.
+    """
+
+    def __init__(self, core: CausalLMCore):
+        super().__init__()
+        self.core = core
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        """
+        Turns a collection of tokens into embeddings
+        :param tokens: The tokens to embed
+        :return: The embeddings
+        """
+        return self.core.vocabulary.embeddings(tokens)
+
+
+class CoreLogits(nn.Module):
+    """
+    Exposes the creation of logits as a layer
+    that can be discretely compiled if needed.
+
+    Mainly an adapter for torchscript, torch.compile,
+    torch xla, etc.
+    """
+
+    def __init__(self, core: CausalLMCore):
+        super().__init__()
+        self.core = core
+
+    def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """
+        The logit production process
+        :param embeddings: The embeddings to process. Shape (..., d_model)
+        :return: The logits. Shape (..., num_logits)
+        """
+        return self.core.vocabulary.logit_projector(embeddings)
+
+
+class AbstractTrainerCore(nn.Module, ABC):
+    """
+    An abstract trainer core takes in a set
+    of modules, compiles them or marks them
+    to be compiled, and exposes them
+    for downstream use
+    """
+
+    @abstractmethod
+    def setup_compilation(self, module: nn.Module) -> Any:
+        pass
+
+    def __init__(self, core: CausalLMCore):
+        super().__init__()
+
+        forward_call = CoreForward(core)
+        self.forward_call: CoreForward = self.setup_compilation(forward_call)
+
+        reverse = CoreReverse(core)
+        self.reverse: CoreReverse = self.setup_compilation(reverse)
+
+        create_state = CoreCreateState(core)
+        self.create_state: CoreCreateState = self.setup_compilation(create_state)
+
+        embed = CoreEmbed(core)
+        self.embed: CoreEmbed = self.setup_compilation(embed)
+
+        logits = CoreLogits(core)
+        self.logits = self.setup_compilation(logits)
+
+class UncompiledCore(AbstractTrainerCore):
+    """
+    A core that is not compiled in any way
+    """
+    def setup_compilation(self, module: nn.Module) -> Any:
+        return module
+
+class TorchCompiledCore(AbstractTrainerCore):
+    """
+    A core that has been compiled using torch.compile
+    """
+
+    def setup_compilation(self, module: nn.Module) -> Any:
+        return torch.compile(module)
+
+
+class XLACompiledCore(AbstractTrainerCore):
+    """
+    A core that has been compiled to work with
+    xla, hopefully.
+    """
+
+    def setup_compilation(self, module: nn.Module) -> Any:
+        return torch_xla.compile(module)
+
+
 # Some pretty tracking of statistics
 class ForwardPassProgress:
     def __init__(self, total_tokens: int, batch_width: int = 1, verbose: bool = True):
@@ -239,10 +427,11 @@ class ForwardPassProgress:
         tokens_per_second = tokens_processed / elapsed_time if elapsed_time > 0 else 0
 
         # Update progress bar with cumulative loss and tokens per second
+        running_accuracy = 0 if total_examined is None else total_correct / total_examined
         self.progress_bar.set_postfix(
             cumulative_loss=f"{cumulative_loss:.4f}",
             tokens_per_sec=f"{tokens_per_second:.2f}",
-            running_accuracy=f"{total_correct / total_examined:.5f}"
+            running_accuracy=f"{running_accuracy:.5f}"
         )
         self.progress_bar.update(1)
 
@@ -414,7 +603,8 @@ class CausalLMTrainer(nn.Module):
                  verbose: bool = False,
                  rescaler_mode: str = "mean",
                  rescaler_threshold: float = 0.1,
-                 empty_cuda_cache: bool = True
+                 empty_cuda_cache: bool = True,
+                 compile_type: str = "none"
                  ):
         super().__init__()
 
@@ -424,11 +614,18 @@ class CausalLMTrainer(nn.Module):
         self.grad_clipper = GradClip(grad_clip_threshold)
         self.grad_rescaler = BatchCollectiveReductiveGradNorm(reduction_mode=rescaler_mode,
                                                               rescale_threshold=rescaler_threshold)
+        # Compile types
+        if compile_type == "none":
+            core = UncompiledCore(model_core)
+        elif compile_type == "torch":
+            core = TorchCompiledCore(model_core)
+        elif compile_type == "xla":
+            core = XLACompiledCore(model_core)
+        else:
+            raise ValueError(f"Unrecognized compile type: {compile_type}")
 
         # Models
-        self.core = model_core
-        self.decoder = model_core.decoder
-        self.vocabulary = model_core.vocabulary
+        self.core = core
         self.mse_metric = nn.MSELoss(reduction="mean")
         self.verbose = verbose
         self.empty_cuda_cache = empty_cuda_cache
@@ -473,24 +670,24 @@ class CausalLMTrainer(nn.Module):
         # Perform the forward pass to gain access to the
         # memories I shall need. This consists of recurrently
         # updating again and again. We discard the final state
-        save_to_cpu = lambda x: x.cpu()
+        save_to_cpu = lambda x: x.to(device=torch.device("cpu"))
         forward_loss = torch.tensor(0.0, device=tokens.device, dtype=tokens.dtype)
         with (torch.no_grad(), profiler.record_function("train_step: forward pass"),
               ForwardPassProgress(num_tokens, batch_width, self.verbose) as progress
               ):
             for i in range(num_tokens):
                 # Get the features
-                embedding = self.vocabulary.embeddings(tokens[..., i].detach())
+                embedding = self.core.embed(tokens[..., i])
                 target = targets[..., i]
                 mask = batch_mask[..., i]
 
                 # Run forward pass
                 rng_state = get_rng_state(embedding.device)
-                output_embedding, memories = self.decoder(embedding, mask, memories)
+                output_embedding, memories = self.core.forward_call(embedding, mask, memories)
 
                 # Compute loss. We use this to monitor numeric divergence, among
                 # other things. However, it will not be used in backprop
-                logits: torch.Tensor = self.vocabulary.logit_projector(output_embedding)
+                logits: torch.Tensor = self.core.logits(output_embedding)
                 case_loss = self.main_loss_function(logits, target, main_schedule)
                 forward_loss = forward_loss + case_loss
 
@@ -651,7 +848,7 @@ class CausalLMTrainer(nn.Module):
                     target = targets[..., i]
                     mask = batch_mask[..., i]
 
-                embedding = self.vocabulary.embeddings(token)
+                embedding = self.core.embed(token)
 
                 # Manage RNG.
                 #
@@ -713,8 +910,8 @@ class CausalLMTrainer(nn.Module):
 
                 # Perform the loss computation. Then store the metrics
                 with profiler.record_function("train_step: computing loss"):
-                    (output_embedding, next_memory), last_memory = self.decoder.reverse(embedding, mask, memories)
-                    logits = self.vocabulary.logit_projector(output_embedding)
+                    (output_embedding, next_memory), last_memory = self.core.reverse(embedding, mask, memories)
+                    logits = self.core.logits(output_embedding)
                     loss = self.main_loss_function(logits, target, loss_schedule)
                     loss_metric += loss.detach()
 
@@ -842,7 +1039,7 @@ class CausalLMTrainer(nn.Module):
 
             # setup the initial memory state
             if memories is None:
-                memories = self.decoder.create_state(tokens.shape[:-1])
+                memories = self.core.create_state(tokens.shape[:-1])
 
         # Run forward pass, setup, and reverse pass.
         pass_cache = self.run_forward_pass(

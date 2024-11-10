@@ -5,6 +5,10 @@ from tokenizers import Tokenizer
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
+try:
+    import torch_xla
+except:
+    pass
 
 # Types
 TensorTree = Union[
@@ -52,6 +56,9 @@ def get_rng_state(device: torch.device):
         return torch.get_rng_state()
     elif device.type == "cuda":
         return torch.cuda.get_rng_state(device)
+    elif device.type == "xla":
+        return torch_xla.core.xla_model.get_rng_state(device)
+
     else:
         raise ValueError("Unsupported device type. Must be 'cpu' or 'cuda'.")
 
@@ -67,6 +74,8 @@ def set_rng_state(state, device: torch.device):
         torch.set_rng_state(state)
     elif device.type == 'cuda':
         torch.cuda.set_rng_state(state, device)
+    elif device.type == "xla":
+        torch_xla.core.xla_model.set_rng_state(state, device)
     else:
         raise ValueError("Unsupported device type. Must be 'cpu' or 'cuda'.")
 

@@ -4,7 +4,7 @@ import torch
 from torch import nn
 
 from .deep_memory import MemoryState, FastLinearMemory
-from .base import get_rng_state
+from .base import get_rng_state, DeviceDtypeWatch
 class Feedforward(nn.Module):
     """
     A classic feedforward implementation.
@@ -190,27 +190,38 @@ class RecurrentDecoder(nn.Module):
     You can fetch the old decoder layers feature, and use
     it to initialize a new recurrent decoder.
     """
+    @property
+    def device(self)->torch.device:
+        return self._metainfo.device
 
+    @property
+    def dtype(self)->torch.dtype:
+        return self._metainfo.dtype
     def __init__(self,
                  d_model: int,
                  dropout_rate: float,
-                 decoder_layers: List[DecoderLayer]
+                 decoder_layers: List[DecoderLayer],
+                 dtype: torch.dtype,
+                 device: torch.device
                  ):
 
         super().__init__()
         template = decoder_layers[0]
         self.d_model = d_model
         self.dropout_rate = dropout_rate
+        self._metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
 
         # Setup layernorms, with a no op on the last for immediate consumption
         # by a logit system.
-        layernorms = [nn.LayerNorm(d_model) for _ in range(len(decoder_layers))]
+        layernorms = [nn.LayerNorm(d_model, device=device, dtype=dtype) for _ in range(len(decoder_layers))]
         layernorms.pop(-1)
         layernorms.append(nn.Identity())
 
         # Setup bottleneck, unbottleneck layers
-        bottlenecks = [nn.Linear(d_model, template.d_model) for _ in range(len(decoder_layers))]
-        unbottlenecks = [nn.Linear(template.d_model, d_model) for _ in range(len(decoder_layers))]
+        bottlenecks = [nn.Linear(d_model, template.d_model, dtype=dtype, device=device)
+                       for _ in range(len(decoder_layers))]
+        unbottlenecks = [nn.Linear(template.d_model, d_model, dtype=dtype, device=device)
+                         for _ in range(len(decoder_layers))]
 
         # Setup layers and repositories
         self.layernorms = nn.ModuleList(layernorms)
@@ -229,7 +240,8 @@ class RecurrentDecoder(nn.Module):
         :param d_model: The model width to now set us up at
         :return: The new recurrent decoder
         """
-        return RecurrentDecoder(d_model, self.dropout_rate, self.decoder_layers)
+        return RecurrentDecoder(d_model, self.dropout_rate, self.decoder_layers,
+                                dtype=self.dtype, device=self.device)
 
     def create_state(self, batch_shape: torch.Size) -> List[MemoryState]:
         """
@@ -405,4 +417,4 @@ def build_decoder(
     ]
 
     # Create and return the model
-    return RecurrentDecoder(d_model, dropout_rate, layers)
+    return RecurrentDecoder(d_model, dropout_rate, layers, dtype=dtype, device=device)
