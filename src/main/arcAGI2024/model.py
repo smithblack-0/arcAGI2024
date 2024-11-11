@@ -3,11 +3,13 @@ Core model builders and functions
 """
 import functools
 import time
-
+import copy
 import tqdm
 import os
 import textwrap
 import shutil
+import json
+
 from concurrent import futures
 from typing import Callable, List
 from typing import Any, List, Tuple, Dict, Union, Callable, Optional
@@ -16,22 +18,119 @@ from torch import nn
 from torch.autograd import profiler
 from torch.nn import functional as F
 from abc import ABC, abstractmethod
-
+from dataclasses import dataclass, asdict
 
 from .decoder import RecurrentDecoder, MemoryState, build_decoder
 from .vocabulary import VocabularyStruct, AdditionalSpecialTokens
 from .base import (get_rng_state, set_rng_state, parallel_pytree_map,
-                   DeviceDtypeWatch, GradientSubstitutionEndpoint)
+                   DeviceDtypeWatch, GradientSubstitutionEndpoint, TensorTree)
 from .losses import MainLossInterface, MemAccessLossInterface
 from .sampling import SamplingInterface
 from .grad_utils import GradClip, BatchCollectiveReductiveGradNorm, AbstractGradientControl
 
-try:
-    import torch_xla
-    from torch_xla.core import xla_model as xm
-except:
-    pass
 
+@dataclass
+class CoreConfig:
+    """
+    Config for a functioning decoder. What each parameter does
+    is indicated in depth.
+
+    --- Top level parameters ---
+    :param num_layers:
+    - Number of transformer layers.
+    - Each is a DecoderLayer
+    :param dropout_rate:
+    - Dropout rate, within the primary recurrent model
+    :param sublayers_dropout_rate:
+    - Dropout rate, within sublayers rather than the core proces.
+
+    --- DecoderLayer Parameters
+    Everything here is occurring with respect to d_core.
+
+    :param d_core:
+    - Bottleneck rate. d_model is bottlenecked down to this dimension to save compute time
+    - Much of the computation occurs at this rate
+    :param d_hidden:
+    - Size of the hidden layer.
+    - Choose it with respect to d_core.
+    :param d_address:
+    - A smaller subset of d_core. Can be anything.
+    - Represents the width of the attn memory addresses.
+    :param d_memory:
+    - Represents the width of the memory value addresses.
+    - Can be different.
+    :param num_read_heads:
+    - Number of heads used for the memory read process
+    - Larger means more of the memory can be read from per step
+    :param num_write_heads:
+    - Number of heads used for the memory write process
+    - Larger means more of the memory can be written to per step
+    :param num_memories:
+    - Number of independent memory states
+    :param numeric_write_factor:
+    - The maximum probability that can be written to a memory slot in one go.
+    - Should be less than 1.0 for numeric reasons. 0.9 would probably be fine.
+    - Numeric divergence can be reduced by making it smaller, at the cost of
+      some fidelity.
+
+    ---- final ---
+    :param dtype: The dtype
+    :param device: The device
+    :return: A setup RecurrentDecoder
+    """
+    # Primary specifications
+    num_layers: int
+    num_read_heads: int
+    num_write_heads: int
+    num_memories: int
+
+    # Helper specifics
+
+    dropout_rate: float
+    sublayers_dropout_rate: float
+
+    # These have defaults.
+    numeric_write_factor: Optional[float] = None
+    d_core: Optional[int] = None
+    d_memory: Optional[int] = None
+    d_address: Optional[int] = None
+    d_hidden: Optional[int] = None
+    dtype: torch.dtype = None
+    device: torch.device = None
+    def save_to_folder(self, directory: Union[str, os.PathLike]):
+        """
+        Saves the config to the folder. The dtype and
+        device are not saved.
+
+        :param directory: The directory to put it at
+        :return:
+        """
+        with open(os.path.join(directory, "decoder_config.json"), "w") as f:
+            config = asdict(self)
+            config.pop("device")
+            config.pop("dtype")
+            json.dump(config, f, indent=4)
+    @classmethod
+    def load_from_folder(cls,
+                         directory: Union[str, os.PathLike],
+                         dtype: torch.dtype,
+                         device: torch.device
+                         )->'CoreConfig':
+        """
+        Loads the model from the folder. The dtype and device
+        have to provided, since they are not saved.
+
+        :param directory: Directory to load from
+        :param dtype: The dtype it is
+        :param device: The device it is.
+        :return: The config.
+        """
+        with open(os.path.join(directory, "decoder_config.json"), "r") as f:
+            config = json.load(f)
+            config["device"] = device
+            config["dtype"] = dtype
+            config = cls(**config)
+        return config
 
 class CausalLMCore(nn.Module):
     """
@@ -49,116 +148,58 @@ class CausalLMCore(nn.Module):
         return self._metainfo.dtype
 
     @classmethod
-    def build_model_on_top_of_pretrained_head(cls,
-                                              # Primary specifications
-                                              head_model_name: str,
-                                              num_layers: int,
-                                              num_read_heads: int,
-                                              num_write_heads: int,
-                                              num_memories: int,
-
-                                              # Helper specifics
-
-                                              dropout_rate: float,
-                                              auxilary_dropout_rate: float,
-
-                                              # These have defaults.
-                                              numeric_write_factor: Optional[float] = None,
-                                              d_core: Optional[int] = None,
-                                              d_memory: Optional[int] = None,
-                                              d_address: Optional[int] = None,
-                                              d_hidden: Optional[int] = None,
-                                              dtype: torch.dtype = None,
-                                              device: torch.device = None
-                                              ):
+    def build_model_using_config(cls,
+                                 vocabulary: VocabularyStruct,
+                                 config: CoreConfig
+                                 ) -> 'CausalLMCore':
         """
-        Creates a functioning recurrent decoder, with
-        forward and reverse modes, ready for integration
-        into a broader architecture.
-
-        The returned model is designed to be entirely
-        recurrent.
-
-        --- Top level parameters ---
-        :param num_layers:
-        - Number of transformer layers.
-        - Each is a DecoderLayer
-        :param head_model_name:
-        - The huggingface model to get the CausalLM head from.
-        :param dropout_rate:
-        - Dropout rate, within the primary recurrent model
-        :param auxilary_dropout_rate:
-        - Dropout rate, within the core decoder layers and computation models.
-
-        --- DecoderLayer Parameters
-        Everything here is occurring with respect to d_core.
-
-        :param d_core:
-        - Bottleneck rate. d_model is bottlenecked down to this dimension to save compute time
-        - Much of the computation occurs at this rate
-        :param d_hidden:
-        - Size of the hidden layer.
-        - Choose it with respect to d_core.
-        :param d_address:
-        - A smaller subset of d_core. Can be anything.
-        - Represents the width of the attn memory addresses.
-        :param d_memory:
-        - Represents the width of the memory value addresses.
-        - Can be different.
-        :param num_read_heads:
-        - Number of heads used for the memory read process
-        - Larger means more of the memory can be read from per step
-        :param num_write_heads:
-        - Number of heads used for the memory write process
-        - Larger means more of the memory can be written to per step
-        :param num_memories:
-        - Number of independent memory states
-        :param numeric_write_factor:
-        - The maximum probability that can be written to a memory slot in one go.
-        - Should be less than 1.0 for numeric reasons.
-        - Numeric divergence can be reduced by making it smaller, at the cost of
-          some fidelity.
-
-        ---- final ---
-        :param dtype: The dtype
-        :param device: The device
-        :return: A setup RecurrentDecoder
+        Builds a model using the provided config.
+        :param vocabulary: The vocabulary structure to bind to.
+        :param config: The config to use
+        :return: The created CausalLMCore model.
         """
+        config = copy.deepcopy(config)
+
         # Load the causal lm head
-        vocabulary = VocabularyStruct.auto_load_from_pretrained(head_model_name)
-        vocabulary = vocabulary.to(dtype=dtype, device=device)
+        vocabulary = vocabulary.to(dtype=config.dtype, device=config.device)
         d_model = vocabulary.d_model
 
         # Standardize defaults
-        if d_core is None:
-            d_core = d_model // 8
-        if d_address is None:
-            d_address = d_core // 4
-        if d_memory is None:
-            d_memory = d_core
-        if d_hidden is None:
-            d_hidden = d_core * 4
+        if config.d_core is None:
+            config.d_core = d_model // 8
+        if config.d_address is None:
+            config.d_address = config.d_core // 4
+        if config.d_memory is None:
+            config.d_memory = config.d_core
+        if config.d_hidden is None:
+            config.d_hidden = config.d_core * 4
+        if config.dtype is None:
+            config.dtype = torch.float32
+        if config.device is None:
+            config.device = torch.device("cpu")
+        if config.numeric_write_factor is None:
+            config.numeric_write_factor = 0.9
 
         # Setup the model for training
         decoder = build_decoder(
             d_model,
-            num_layers,
-            d_core,
-            d_hidden,
-            d_address,
-            d_memory,
-            num_read_heads,
-            num_write_heads,
-            num_memories,
-            dropout_rate,
-            auxilary_dropout_rate,
-            numeric_write_factor,
-            dtype=dtype,
-            device=device
+            config.num_layers,
+            config.d_core,
+            config.d_hidden,
+            config.d_address,
+            config.d_memory,
+            config.num_read_heads,
+            config.num_write_heads,
+            config.num_memories,
+            config.dropout_rate,
+            config.sublayers_dropout_rate,
+            config.numeric_write_factor,
+            dtype=config.dtype,
+            device=config.device
         )
 
         # Return instance
-        return cls(vocabulary, decoder)
+        return cls(vocabulary, decoder, config)
 
     def rebase_model_onto_vocabulary(self, vocabulary: VocabularyStruct) -> 'CausalLMCore':
         """
@@ -170,7 +211,7 @@ class CausalLMCore(nn.Module):
         :return: The new casual lm core
         """
         decoder = self.decoder.rebuild_at_different_width(vocabulary.d_model)
-        return CausalLMCore(vocabulary, decoder)
+        return CausalLMCore(vocabulary, decoder, self.config)
 
     def save_to_folder(self,
                        directory: Union[str, os.PathLike]
@@ -181,24 +222,43 @@ class CausalLMCore(nn.Module):
         """
         if os.path.isdir(directory):
             shutil.rmtree(directory)
+        os.makedirs(directory, exist_ok=True)
 
         self.vocabulary.save_pretrained_vocabulary(directory)
         torch.save(self.decoder, os.path.join(directory, "decoder.pt"))
+        self.config.save_to_folder(directory)
 
     @classmethod
-    def load_from_folder(cls, directory: Union[str, os.PathLike]) -> 'CausalLMCore':
+    def load_from_folder(cls,
+                         directory: Union[str, os.PathLike],
+                         device: Optional[torch.device] = None,
+                         dtype: Optional[torch.dtype]=None,
+                         ) -> 'CausalLMCore':
         """
         Loads the saved causal lm core file from the given directory.
         :param directory: The directory to load from
+        :param device: The device we loaded on
+        :param dtype: The dtype we loaded on
         :returns: The loaded causal lm core model
         """
+        if device is None:
+            device = torch.device("cpu")
+        if dtype is None:
+            dtype = torch.float32
+
         decoder = torch.load(os.path.join(directory, "decoder.pt"))
         vocabulary = VocabularyStruct.load_pretrained_vocabulary(directory)
-        return cls(vocabulary, decoder)
+
+        decoder = decoder.to(dtype=dtype, device=device)
+        vocabulary = vocabulary.to(dtype=dtype, device=device)
+        config = CoreConfig.load_from_folder(directory, dtype, device)
+
+        return cls(vocabulary, decoder, config)
 
     def __init__(self,
                  vocabulary: VocabularyStruct,
                  decoder: RecurrentDecoder,
+                 config: CoreConfig,
                  device: Optional[torch.device] = None,
                  dtype: Optional[torch.dtype] = None,
                  ):
@@ -207,6 +267,7 @@ class CausalLMCore(nn.Module):
         self._metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
         self.vocabulary: VocabularyStruct = vocabulary.to(device=device, dtype=dtype)
         self.decoder: RecurrentDecoder = decoder.to(device=device, dtype=dtype)
+        self.config = config
 
     def __reduce__(self):
         msg = """
@@ -218,18 +279,68 @@ class CausalLMCore(nn.Module):
         raise NotImplementedError(msg)
 
 
-# Core adapters to support compile processes.
-class CoreForward(nn.Module):
+##
+#
+# Begin defining the core mechanisms. This is the trainer
+#
+##
+
+
+class AbstractTrainerCore(nn.Module, ABC):
     """
-    An adapter class that calls the LM core decoder
-    forward method. Exists to allow it to be wrapped
-    in a compile statement
+    The abstract definition of the trainer core the following
+    trainer can work. Sometimes, compiling might be required,
+    hence this mechanism.
     """
 
-    def __init__(self, model_core: CausalLMCore):
-        super().__init__()
-        self.core = model_core
+    @abstractmethod
+    def embed(self, token: torch.Tensor) -> torch.Tensor:
+        """
+        Embeds a token
+        :param token: The token to embed. Shape (...)
+        :return: The embedded token. shape (..., d_model)
+        """
 
+    @abstractmethod
+    def logits(self, embedding: torch.Tensor) -> torch.Tensor:
+        """
+        Takes embeddings, and produces logits out of them
+        :param embedding: The embedding. Shape (..., d_model)
+        :return: Shape (..., num_logits)
+        """
+
+    @abstractmethod
+    def create_state(self, batch_shape: torch.Size) -> List[MemoryState]:
+        """
+        Sets up the recurrent state bound
+        to a particular batch shape
+
+        :param batch_shape: The batch shape to match
+        :return: A list of memory states. One for each layer.
+        """
+
+    @abstractmethod
+    def reverse(self,
+                embedding: torch.Tensor,
+                batch_mask: torch.Tensor,
+                next_memories: List[MemoryState]
+                ) -> Tuple[Tuple[torch.Tensor, List[MemoryState]], List[MemoryState]]:
+        """
+        Runs the reverse process. This means figuring out the
+        previous memory states and setting them up for gradient
+        accumulation. And of course returning the final output
+
+        :param embedding: The input embedding. Whatever it might be
+        :param batch_mask: Shape (...). Indicates whether memory can be updated. True means No.
+        :param next_memories: The memories from the NEXT step
+        :return:
+        - Tuple:
+            - The final embedding, ready for usage in logits.
+            - The memory states for this timestep. It has a graph. We need to insert gradients here
+        - The memory from the last timestep. Setup to accumulate gradients and continue the chain.
+        """
+
+    @abstractmethod
     def forward(self,
                 embedding: torch.Tensor,
                 batch_mask: torch.Tensor,
@@ -238,7 +349,6 @@ class CoreForward(nn.Module):
         """
         The forward mechanism. Performs a forward pass through the model.
         This will usually occur without gradients.
-
         :param embedding: The embedding being processed
         :param batch_mask: Shape (...). Indicates whether memory can be updated. True means No.
         :param previous_memories: The memory states from the last timestep
@@ -246,20 +356,51 @@ class CoreForward(nn.Module):
         - The output. Same whether forward or backwards
         - The memory states for the next timestep.
         """
-        return self.core.decoder(embedding, batch_mask, previous_memories)
+
+    @abstractmethod
+    def release_memory(self, *items: TensorTree):
+        """
+        Releases memory however is needed
+        :param items: The items whose memory is being released
+        """
 
 
-class CoreReverse(nn.Module):
+class StandardTrainerCore(AbstractTrainerCore):
     """
-    An adapter class that calls the lm core reverse pass
-    mechanism. Exists to be compiled
+    The normal trainer core
     """
 
-    def __init__(self, model_core: CausalLMCore):
+    def __init__(self, core: CausalLMCore):
         super().__init__()
-        self.core = model_core
+        self.core = core
 
-    def forward(self,
+    def embed(self, token: torch.Tensor) -> torch.Tensor:
+        """
+        Embeds a token
+        :param token: The token to embed. Shape (...)
+        :return: The embedded token. shape (..., d_model)
+        """
+        return self.core.vocabulary.embeddings(token)
+
+    def logits(self, embedding: torch.Tensor) -> torch.Tensor:
+        """
+        Takes embeddings, and produces logits out of them
+        :param embedding: The embedding. Shape (..., d_model)
+        :return: Shape (..., num_logits)
+        """
+        return self.core.vocabulary.logit_projector(embedding)
+
+    def create_state(self, batch_shape: torch.Size) -> List[MemoryState]:
+        """
+        Sets up the recurrent state bound
+        to a particular batch shape
+
+        :param batch_shape: The batch shape to match
+        :return: A list of memory states. One for each layer.
+        """
+        return self.core.decoder.create_state(batch_shape)
+
+    def reverse(self,
                 embedding: torch.Tensor,
                 batch_mask: torch.Tensor,
                 next_memories: List[MemoryState]
@@ -280,159 +421,43 @@ class CoreReverse(nn.Module):
         """
         return self.core.decoder.reverse(embedding, batch_mask, next_memories)
 
-
-class CoreCreateState(nn.Module):
-    """
-    Runs the create state process from the lm core.
-    Mainly an adapter that is designed to be compiled
-    later on.
-    """
-
-    def __init__(self, model_core: CausalLMCore):
-        super().__init__()
-        self.core = model_core
-
-    def forward(self, batch_shape: torch.Size) -> List[MemoryState]:
+    def forward(self,
+                embedding: torch.Tensor,
+                batch_mask: torch.Tensor,
+                previous_memories: List[MemoryState]
+                ) -> Tuple[torch.Tensor, List[MemoryState]]:
         """
-        Sets up the recurrent state bound
-        to a particular batch shape
-
-        :param batch_shape: The batch shape to match
-        :return: A list of memory states. One for each layer.
+        The forward mechanism. Performs a forward pass through the model.
+        This will usually occur without gradients.
+        :param embedding: The embedding being processed
+        :param batch_mask: Shape (...). Indicates whether memory can be updated. True means No.
+        :param previous_memories: The memory states from the last timestep
+        :return:
+        - The output. Same whether forward or backwards
+        - The memory states for the next timestep.
         """
-        return self.core.decoder.create_state(batch_shape)
+        return self.core.decoder(embedding, batch_mask, previous_memories)
 
-
-class CoreEmbed(nn.Module):
-    """
-    Exposes the embedding process as a torch
-    layer that can be compiled. Mainly an
-    adapter.
-    """
-
-    def __init__(self, core: CausalLMCore):
-        super().__init__()
-        self.core = core
-
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+    def release_memory(self, *items: TensorTree):
         """
-        Turns a collection of tokens into embeddings
-        :param tokens: The tokens to embed
-        :return: The embeddings
+        Releases memory however is needed
+        :param items: The items whose memory is being released
         """
-        return self.core.vocabulary.embeddings(tokens)
 
+        def release_tensor(tensor: torch.Tensor):
+            del tensor
 
-class CoreLogits(nn.Module):
-    """
-    Exposes the creation of logits as a layer
-    that can be discretely compiled if needed.
-
-    Mainly an adapter for torchscript, torch.compile,
-    torch xla, etc.
-    """
-
-    def __init__(self, core: CausalLMCore):
-        super().__init__()
-        self.core = core
-
-    def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
-        """
-        The logit production process
-        :param embeddings: The embeddings to process. Shape (..., d_model)
-        :return: The logits. Shape (..., num_logits)
-        """
-        return self.core.vocabulary.logit_projector(embeddings)
-
-
-class AbstractTrainerCore(nn.Module, ABC):
-    """
-    An abstract trainer core takes in a set
-    of modules, compiles them or marks them
-    to be compiled, and exposes them
-    for downstream use
-    """
-
-    @abstractmethod
-    def setup_compilation(self, module: nn.Module) -> Any:
-        pass
-
-    @abstractmethod
-    def release_memory(self, *items: Any):
-        pass
-    def __init__(self, core: CausalLMCore):
-        super().__init__()
-
-        forward_call = CoreForward(core)
-        self.forward_call: CoreForward = self.setup_compilation(forward_call)
-
-        reverse = CoreReverse(core)
-        self.reverse: CoreReverse = self.setup_compilation(reverse)
-
-        create_state = CoreCreateState(core)
-        self.create_state: CoreCreateState = self.setup_compilation(create_state)
-
-        embed = CoreEmbed(core)
-        self.embed: CoreEmbed = self.setup_compilation(embed)
-
-        logits = CoreLogits(core)
-        self.logits = self.setup_compilation(logits)
-
-class UncompiledCore(AbstractTrainerCore):
-    """
-    A core that is not compiled in any way
-    """
-    def setup_compilation(self, module: nn.Module) -> Any:
-        return module
-
-    def release_memory(self, *items: Any):
+        parallel_pytree_map(release_tensor, items)
         for item in items:
             del item
-
-class TorchCompiledCore(AbstractTrainerCore):
-    """
-    A core that has been compiled using torch.compile
-    """
-
-    def setup_compilation(self, module: nn.Module) -> Any:
-        return torch.compile(module)
-
-
-class XLACompiledCore(AbstractTrainerCore):
-    """
-    A core that has been compiled to work with
-    xla, hopefully.
-    """
-
-    def setup_compilation(self, module: nn.Module) -> Any:
-        return torch_xla.compile(module, full_graph=True)
-
-    def release_memory(self, *items: Any):
-        """
-        Explicitly release memory of tensors, ensuring that they are properly marked for deletion.
-        :param items: Tensors or nested structures containing tensors.
-        """
-
-        def delete_tensors(tensor: torch.Tensor):
-            del tensor  # This should trigger the underlying C++ code to free memory
-
-        # Traverse and delete tensors within nested structures
-        parallel_pytree_map(delete_tensors, items)
-
-        # Delete references to the items themselves, if any remaining in the main scope
-        for item in items:
-            del item
-
-        # Ensure TPU operations are synchronized and memory is freed
-        xm.mark_step()
-
-# Logging
+        del items
 
 
 class Logger:
     """
     A logger that uses an existing executor to perform asynchronous logging.
     """
+
     def __init__(self,
                  executor: futures.Executor,
                  terminal_callback: Callable[[str], None],
@@ -452,6 +477,7 @@ class Logger:
         Submits a metrics update task to the executor.
         """
         self.executor.submit(self.metric_callback, metrics)
+
 
 class ForwardPassProgress:
     def __init__(self,
@@ -486,10 +512,11 @@ class ForwardPassProgress:
         self.n += 1
         elapsed_time = time.time() - self.start_time
         tokens_per_second = float(self.n * self.batch_width) / elapsed_time
+        accuracy = total_correct / total_examined if total_examined > 0 else 0
 
-        postfix = {"forward_loss" : f"{cumulative_loss:.4f}",
+        postfix = {"forward_loss": f"{cumulative_loss:.4f}",
                    "tokens_per_second": f"{tokens_per_second:.4f}",
-                   "running_accuracy" : f"{total_correct/total_examined:.4f}",
+                   "running_accuracy": f"{accuracy:.4f}",
                    }
 
         progress_string = tqdm.tqdm.format_meter(
@@ -499,6 +526,7 @@ class ForwardPassProgress:
             postfix=postfix
         )
         self.logger.update_terminal_status(progress_string)
+
     def __enter__(self):
         # Initialize tqdm progress bar if verbose is True
         self.start_time = time.time()
@@ -507,6 +535,8 @@ class ForwardPassProgress:
     def __exit__(self, exc_type, exc_value, traceback):
         # Store elapsed time if progress bar was initialized
         self.elapsed_time = time.time() - self.start_time
+
+
 class ReversePassProgress:
     def __init__(self,
                  total_tokens: int,
@@ -565,30 +595,12 @@ class ReversePassProgress:
         )
         self.logger.update_terminal_status(progress_string)
 
-
     def __enter__(self):
         self.start_time = time.time()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.elapsed_time = time.time() - self.start_time
-
-class TrainingDependencies(nn.Module):
-    """
-    Training interface which the model can
-    use to interact with the loss functions and the
-    display/logging callbacks
-    """
-
-    def __init__(self,
-                 main_loss: MainLossInterface,
-                 mem_loss: MemAccessLossInterface,
-                 gradient_normalization: AbstractGradientControl,
-                 ):
-        super().__init__()
-        self.main_loss = main_loss
-        self.mem_loss = mem_loss
-        self.gradient_normalization = gradient_normalization
 
 
 # Main trainer
@@ -669,35 +681,43 @@ class CausalLMTrainer(nn.Module):
     # calls the map function with all found leaves and rebuilds the tree.
 
     def __init__(self,
-                 model_core: CausalLMCore,
-                 training_interface: TrainingDependencies,
+                 trainer_core: AbstractTrainerCore,
+                 main_loss: MainLossInterface,
+                 mem_loss: MemAccessLossInterface,
+                 gradient_normalization: AbstractGradientControl,
+                 numeric_cache_rate: int = 1000,
+                 save_cached_to_cpu: bool = True,
                  verbose: bool = False,
-                 compile_type: str = "none"
+
                  ):
         super().__init__()
 
-        # Compile types
-        if compile_type == "none":
-            core = UncompiledCore(model_core)
-        elif compile_type == "torch":
-            core = TorchCompiledCore(model_core)
-        elif compile_type == "xla":
-            core = XLACompiledCore(model_core)
-        else:
-            raise ValueError(f"Unrecognized compile type: {compile_type}")
-
-        # Models
-        self.core = core
-        self.training_interface = training_interface
+        self.core = trainer_core
+        self.main_loss = main_loss
+        self.mem_loss = mem_loss
+        self.gradient_normalization = gradient_normalization
+        self.numeric_cache_rate = numeric_cache_rate
+        self.save_cached_to_cpu = save_cached_to_cpu
         self.mse_error = nn.MSELoss(reduction='mean')
         self.verbose = verbose
+
+    @staticmethod
+    def save_to_cpu(tensor: torch.Tensor):
+        with torch.no_grad():
+            tensor = tensor.to(device=torch.device("cpu"))
+            tensor = tensor.pin_memory()
+        return tensor
+
+    @staticmethod
+    def load_from_cpu(tensor: torch.Tensor, device: torch.device):
+        with torch.no_grad():
+            tensor = tensor.to(device=device)
+        return tensor
 
     def run_forward_pass(self,
                          tokens: torch.Tensor,
                          targets: torch.Tensor,
                          batch_mask: torch.Tensor,
-                         numerics_cache_rate: int,
-                         save_cached_to_cpu: bool,
                          main_schedule: float,
                          memories: List[MemoryState],
                          logger: Logger,
@@ -709,8 +729,6 @@ class CausalLMTrainer(nn.Module):
         :param tokens: The tokens to process. Shape (batch_size, items, d_model)
         :param targets: The target. Shape (batch_size, items)
         :param batch_mask: The batch mask. Shape (batch_size, items). True indicated padding.
-        :param numerics_cache_rate: The rate to cache numeric metrics and subsitutions
-        :param save_cached_to_cpu: Whether to save the numeric caches to cpu
         :param main_schedule: The weight for the main loss. Used when gathering the forward loss
         :param memories: The existing memories
         :param logger: The logging callback container.
@@ -734,7 +752,7 @@ class CausalLMTrainer(nn.Module):
         # Perform the forward pass to gain access to the
         # memories I shall need. This consists of recurrently
         # updating again and again. We discard the final state
-        save_to_cpu = lambda x: x.to(device=torch.device("cpu"))
+
         forward_loss = torch.tensor(0.0, device=tokens.device, dtype=tokens.dtype)
         with (torch.no_grad(), profiler.record_function("train_step: forward pass"),
               ForwardPassProgress(num_tokens,
@@ -750,12 +768,12 @@ class CausalLMTrainer(nn.Module):
 
                 # Run forward pass
                 rng_state = get_rng_state(embedding.device)
-                output_embedding, memories = self.core.forward_call(embedding, mask, memories)
+                output_embedding, memories = self.core.forward(embedding, mask, memories)
 
                 # Compute loss. We use this to monitor numeric divergence, among
                 # other things. However, it will not be used in backprop
                 logits: torch.Tensor = self.core.logits(output_embedding)
-                case_loss = self.training_interface.main_loss(logits, target, main_schedule)
+                case_loss = self.main_loss(logits, target, main_schedule)
                 forward_loss = forward_loss + case_loss
 
                 # Handle accuracy metric
@@ -774,9 +792,9 @@ class CausalLMTrainer(nn.Module):
                 # Integrate numeric checkpoints into the cache
                 #
                 # This includes moving it to the cpu if relevant
-                if i % numerics_cache_rate == 0:
-                    if save_cached_to_cpu:
-                        saved_memories = parallel_pytree_map(save_to_cpu, memories)
+                if i % self.numeric_cache_rate == 0:
+                    if self.save_cached_to_cpu:
+                        saved_memories = parallel_pytree_map(self.save_to_cpu, memories)
                     else:
                         saved_memories = memories
                     package = i, saved_memories
@@ -851,7 +869,7 @@ class CausalLMTrainer(nn.Module):
 
                 loss = torch.tensor(0.0, device=device, dtype=dtype)
                 for memory in memory_state:
-                    loss += self.training_interface.mem_loss(memory.write_probability_mass, access_schedule)
+                    loss += self.mem_loss(memory.write_probability_mass, access_schedule)
                 loss.backward()
 
             # Store the revised memories, and the beginnings of
@@ -869,7 +887,6 @@ class CausalLMTrainer(nn.Module):
                          targets: torch.Tensor,
                          batch_mask: torch.Tensor,
                          loss_schedule: Optional[float],
-                         save_cached_to_cpu: bool,
                          cache_dict: Dict[str, Any],
                          logger: Logger
                          ) -> Dict[int, Dict[str, torch.Tensor]]:
@@ -881,7 +898,6 @@ class CausalLMTrainer(nn.Module):
         :param targets: The target. Shape (..., items)
         :param batch_mask: The batch mask. Shape (batch_size, items). True indicated padding.
         :param loss_schedule: The schedule weight on the main loss functionm
-        :param save_cached_to_cpu: Whether the intermediate caches were saved to the cpu or gpu
         :param cache_dict: The main cache, containing memories
         :param logger: The logging class
 
@@ -891,6 +907,8 @@ class CausalLMTrainer(nn.Module):
         batch_width = tokens.shape[0]
         numeric_percent_error = 0.0
         numeric_error = 0.0
+
+        load_from_cpu = functools.partial(self.load_from_cpu, device=tokens.device)
 
         with (profiler.record_function("train_step: Reverse pass"),
               ReversePassProgress(num_tokens,
@@ -947,8 +965,7 @@ class CausalLMTrainer(nn.Module):
                     with torch.no_grad():
                         # Get forward statistics ready to go.
                         entry_num, forward_memories = numeric_cache
-                        if save_cached_to_cpu:
-                            load_from_cpu = lambda x: x.to(device=embedding.device)
+                        if self.save_cached_to_cpu:
                             forward_memories = parallel_pytree_map(load_from_cpu, forward_memories)
 
                         # Compute the numeric divergence
@@ -959,7 +976,7 @@ class CausalLMTrainer(nn.Module):
                             nonlocal case_numeric_percent_error
                             nonlocal case_numeric_error
 
-                            numeric_divergence = self.mse_metric(memory, actual_memory)
+                            numeric_divergence = self.mse_error(memory, actual_memory)
                             percent_error = numeric_divergence / (actual_memory.mean() + 1e-4)
 
                             case_numeric_error = max(numeric_divergence, case_numeric_error)
@@ -979,7 +996,7 @@ class CausalLMTrainer(nn.Module):
                 with profiler.record_function("train_step: computing loss"):
                     (output_embedding, next_memory), last_memory = self.core.reverse(embedding, mask, memories)
                     logits = self.core.logits(output_embedding)
-                    loss = self.training_interface.main_loss(logits, target, loss_schedule)
+                    loss = self.main_loss(logits, target, loss_schedule)
                     loss_metric += loss.detach()
 
                 # Integrate the gradients into the memories
@@ -1014,12 +1031,9 @@ class CausalLMTrainer(nn.Module):
                             parallel_pytree_map(write_it, mem_grads)
                         raise err
 
-
-
-
                 # Advance to the prior memory. Rescale and normalize if needed
                 mem_grads = parallel_pytree_map(get_mem_grads, last_memory)
-                mem_grads = self.training_interface.gradient_normalization(mem_grads)
+                mem_grads = self.gradient_normalization(mem_grads)
                 memories = parallel_pytree_map(lambda x: x.clone().detach(), last_memory)
 
                 # Explicitly clear out tensors and detach graphs
@@ -1051,6 +1065,7 @@ class CausalLMTrainer(nn.Module):
         metrics["reverse_time"] = progress.elapsed_time
         metrics["total_time"] = cache_dict["forward_time"] + cache_dict["setup_time"] + progress.elapsed_time
         return metrics
+
     def step(self,
              tokens: torch.Tensor,
              targets: torch.Tensor,
@@ -1058,8 +1073,6 @@ class CausalLMTrainer(nn.Module):
              logger: Logger,
              memories: Optional[List[MemoryState]] = None,
              scheduling_rates: Optional[Tuple[float, float]] = None,
-             numerics_cache_rate: int = 500,
-             save_cached_to_cpu: bool = False,
              ) -> List[MemoryState]:
         """
         Performs a single training step. This consists of
@@ -1088,11 +1101,6 @@ class CausalLMTrainer(nn.Module):
         :param scheduling_rates: Weights attached to the losses for #1: mem access, and
                                  #2: token loss. If none, no adjustment happens. See
                                  main class string for more details.
-        :param numerics_cache_rate: How frequently to perform numeric caching and how
-               frequently the numeric stability metrics will be checked
-        :param save_cached_to_cpu: Whether to save cached values to cpu. If
-                you are running out of gpu memory, this might help. It controls
-                where the numerics caches are stored.
         :return: The final memory state. In case you want to continue training or something.
         :return: The various metrics that are monitored.
         """
@@ -1114,8 +1122,6 @@ class CausalLMTrainer(nn.Module):
             tokens,
             targets,
             batch_mask,
-            numerics_cache_rate,
-            save_cached_to_cpu,
             main_schedule,
             memories,
             logger
@@ -1125,7 +1131,6 @@ class CausalLMTrainer(nn.Module):
                                         targets,
                                         batch_mask,
                                         main_schedule,
-                                        save_cached_to_cpu,
                                         pass_cache,
                                         logger
                                         )

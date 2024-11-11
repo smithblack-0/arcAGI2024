@@ -14,7 +14,7 @@ import threading
 import concurrent.futures as futures
 
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils import data
 from concurrent.futures import ThreadPoolExecutor, Future
 
 from transformers import PreTrainedTokenizer
@@ -34,6 +34,26 @@ except ImportError:
 
 # Define more concrete implementatons.
 
+@dataclass
+class TrainingConfig:
+    """
+    A central dataclass that can hold all
+    the dynamic features needed in order
+    to properly setup and run a training
+    instance.
+    """
+    # Training and logging niceties
+    training_run_prefix: str
+    metrics_logging_directory: str
+    checkpoint_save_directory: str
+    checkpoint_batch_frequency: int
+
+    # Important features
+    batch_size: int
+    num_workers: int
+    truncate_length: int
+    num_epochs: int
+    epoch_position: int # Usually should be zero
 
 class LoggingContext:
     """
@@ -54,33 +74,15 @@ class LoggingContext:
 
 
 class LogMetrics:
-    def __init__(self, file: str, start_epoch: Optional[int] = None):
+    def __init__(self, training_config: TrainingConfig):
         """
         A logging interface for saving metrics to an in-memory DataFrame and
         periodically writing epochs to a CSV file.
-
-        :param file: The file path to save the metrics.
-        :param start_epoch: The epoch to start from. If not None, assumes
-                            resuming.
         """
-        self.file = file
-        self.current_epoch = start_epoch if start_epoch is not None else 0
+        self.file = training_config.metrics_logging_directory
+        self.current_epoch = training_config.epoch_position
         self.data = None  # DataFrame initialized on first log call if not resuming
-        self._initialized = False
-
-        # If resuming, load headers from the existing file
-        if start_epoch is not None and os.path.exists(file):
-            self._initialize_from_existing_file()
-
-    def _initialize_from_existing_file(self):
-        """
-        Initializes the DataFrame with headers from an existing CSV file to
-        allow for resuming a session.
-        """
-        with open(self.file, 'r') as f:
-            headers = f.readline().strip().split(",")  # Read headers from the file
-            self.data = pd.DataFrame(columns=headers)
-            self._initialized = True
+        self._initialized = training_config.epoch_position > 0
 
     def make_logging_callback(self,
                               worker: int,
@@ -173,9 +175,7 @@ class TerminalDisplay:
 
     """
 
-    def __init__(self,
-                 num_workers: int
-                 ):
+    def __init__(self, training_config: TrainingConfig):
         """
         Initializes a terminal display for a certain number
         of workers. Each worker gets a line, and we use
@@ -183,9 +183,10 @@ class TerminalDisplay:
         :param num_workers: The number of workers to reserver
         space for.
         """
-        self.num_workers = num_workers
+        self.num_workers = training_config.num_workers
         self.metrics_status = []
-        self.worker_display_status = ["No status yet"] * num_workers
+        self.worker_display_status = ["No status yet"] * training_config.num_workers
+        self.render()
 
     def make_terminal_callback(self,
                                worker: int,
@@ -237,23 +238,16 @@ class CheckpointProcess:
     to a given location every so often.
     """
 
-    def __init__(self,
-                 checkpoint_directory: str,
-                 prefix: str,
-                 model: CausalLMCore,
-                 starting_epoch: int = 0,
-                 checkpoint_every_n_batches: int = 100,
-                 checkpoint_at_epoch_end=True,
-                 ):
-        self.epoch = starting_epoch
-        self.folder_path = checkpoint_directory
-        self.checkpoint_every_n_batches = checkpoint_every_n_batches
-        self.checkpoint_at_epoch_end = checkpoint_at_epoch_end
-        self.batch = 0
+    def __init__(self, model: CausalLMCore, training_config: TrainingConfig):
         self.model = model
-        self.prefix = prefix
 
-        os.makedirs(checkpoint_directory, exist_ok=True)
+        self.epoch = training_config.epoch_position
+        self.folder_path = training_config.checkpoint_save_directory
+        self.checkpoint_every_n_batches = training_config.checkpoint_batch_frequency
+        self.batch = 0
+        self.prefix = training_config.training_run_prefix
+
+        os.makedirs(self.folder_path, exist_ok=True)
 
     def save_checkpoint(self):
         name = self.prefix + "_" + f"epoch_{self.epoch}_batch_{self.batch}"
@@ -267,53 +261,58 @@ class CheckpointProcess:
         self.batch += 1
 
     def step_epoch(self):
-        if self.checkpoint_at_epoch_end:
-            self.save_checkpoint()
+        self.save_checkpoint()
         self.batch = 0
         self.epoch += 1
 
 
 @dataclass
-class LoggingResources:
+class TrainingResources:
     """
     Contains the resources used
     to log and display feedback
     while training the model
     """
+    # Device
+    device: torch.Device
+    num_workers: int
+
+    # Logging pieces
     metrics_logger: LogMetrics
     terminal_display: TerminalDisplay
     logging_thread: ThreadPoolExecutor
 
+    # Checkpointing and Optim
+    core: CausalLMCore
+    trainer: CausalLMTrainer
+    checkpointing: CheckpointProcess
+
+    #
+
 
 def run_training_epoch(
-        numbers: Dict[str, int],
-        loaders: Dict[str, DataLoader],
-        model: CausalLMCore,
-        model_options: Dict[str, Any],
-        optim: torch.optim.Optimizer,
-        logging_utils: LoggingResources,
-        model_checkpointing: CheckpointProcess,
-        device: torch.device
+        worker_num: int,
+        epoch_num: int,
+        train_loader: data.DataLoader,
+        training_resources: TrainingResources,
     ):
     """
     Runs a singlular training epoch. This includes taking the
     loaders, transferring the relevant bits, advancing optim,
     etc.
-
-    :param numbers: The worker and epoch number and the number of workers
-    :param loaders: The training and validation loaders
-    :param model: The model to train
-    :param model_options: Some auxiliary data
-    :param optim: The optimizer
-    :param logging_utils: The logging utils
-    :param model_checkpointing: The checkpointing util
+    :param worker_num: The worker num associated with this. Used for logging
+    :param epoch_num: The epoch num associated with this. Used for logging
+    :param train_loader: The training dataloader
+    :param training_resources: Various training resources. See the class
     """
 
     # Run training pass
-    for i, (tokens, targets, nonpadding_mask) in loaders["training_loader"]:
+    for i, (tokens, targets, nonpadding_mask) in train_loader:
+
         # If main process, advance checkpointing.
-        if numbers["worker_number"] == 0:
-            model_checkpointing.step_batch()
+        if worker_num == 0:
+            # The first worker is in charge of checkpointing
+
 
         # Move all to the right device
         tokens = tokens.to(device=device)
@@ -437,6 +436,8 @@ def run_distributed_epoch(numbers: Dict[str, int],
     logging_utils.terminal_display.store_epoch_message("during validation: " + summaries["validation_pass"])
 
 
+
+
 def data_collator(batch: List[Dict[str, List[int]]],
                   tokenizer: PreTrainedTokenizer,
                   truncate_length: int,
@@ -474,18 +475,24 @@ def data_collator(batch: List[Dict[str, List[int]]],
     # Return
     return inputs, targets, batch_mask
 
-def run_training_in_process(worker_number: int,
-                            num_workers: int,
-                            batch_size: int,
-                            epoch_length_schedule: List[int],
-                            logging_utils: LoggingResources,
-                            model_factory: Callable[[torch.device], Tuple[CausalLMCore, CausalLMTrainer]],
-                            optim_factory: Callable[[nn.Module], torch.optim.Optimizer],
-                            checkpoint_factory: Callable[[CausalLMCore], CheckpointProcess],
-                            pretokenized_datasets: Dict[str, torch.utils.data.Dataset],
-                            ):
+
+def prepare_dataloaders_for_epoch(datasets:
+                                  )
+
+def run_training_process(worker_number: int,
+                         num_workers: int,
+                         batch_size: int,
+                         num_epochs: int,
+                         truncation_length: int,
+                         logging_utils: LoggingResources,
+                         model_factory: Callable[[torch.device], Tuple[CausalLMCore, CausalLMTrainer]],
+                         optim_factory: Callable[[nn.Module], torch.optim.Optimizer],
+                         checkpoint_factory: Callable[[CausalLMCore], CheckpointProcess],
+                         pretokenized_datasets: Dict[str, torch.utils.data.Dataset],
+                         ):
     """
-    Runs a training process, presumably in parallel.
+    Runs a training process, in parallel, and presumably
+    on the GPU.
 
     :param worker_number: The worker number assigned
     :param batch_size: How wide the batches should be. This should generally be considerably wider than
@@ -503,35 +510,25 @@ def run_training_in_process(worker_number: int,
     optim = optim_factory(trainer)
     checkpointing_process = checkpoint_factory(core)
 
-    # Run the various epochs.
-    #
-    # Early ones will tend to have much shorter batch lengths than
-    # the later ones.
-    for sequence_length in epoch_length_schedule:
-        loaders = {}
+    # Setup the dataloaders.
+    for name, dataset in pretokenized_datasets.items():
 
-        for name, dataset in pretokenized_datasets.items():
-            distributed_sample = torch.utils.data.distributed.DistributedSampler(dataset,
-                                                                                 num_workers,
-                                                                                 worker_number,
-                                                                                 shuffle=True,
-                                                                                 )
 
-            collate_fn = functools.partial(data_collator,
-                                           tokenizer = core.vocabulary.tokenizer,
-                                           truncate_length = sequence_length)
+        collate_fn = functools.partial(data_collator,
+                                       tokenizer = core.vocabulary.tokenizer,
+                                       truncate_length = sequence_length)
 
-            loader = torch.utils.data.DataLoader(dataset,
-                                                 batch_size,
-                                                 shuffle=True,
-                                                 num_workers=1,
-                                                 sampler=distributed_sample,
-                                                 pin_memory=True,
-                                                 prefetch_factor=2,
-                                                 collate_fn=collate_fn
-                                                 )
-            loaders[name] = loader
-            epoch_loaders.append(loaders)
+        loader = torch.utils.data.DataLoader(dataset,
+                                             batch_size,
+                                             shuffle=True,
+                                             num_workers=1,
+                                             sampler=distributed_sample,
+                                             pin_memory=True,
+                                             prefetch_factor=2,
+                                             collate_fn=collate_fn
+                                             )
+        loaders[name] = loader
+        epoch_loaders.append(loaders)
 
     for epoch, epoch_loaders in enumerate(epoch_loaders):
         numbers = {

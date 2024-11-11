@@ -1,15 +1,20 @@
 import os
 import shutil
 import unittest
+from typing import Optional
+
 import torch
 import time
 from torch import nn
 
-from src.main.arcAGI2024.model import (CausalLMCore, CausalLMTrainer, CausalLMGenerator,
-                                       RecurrentDecoder, VocabularyStruct)
+from concurrent.futures import ThreadPoolExecutor
+from src.main.arcAGI2024.model import (CausalLMCore, CausalLMTrainer, CausalLMGenerator, StandardTrainerCore,
+                                       RecurrentDecoder, VocabularyStruct, CoreConfig, Logger)
 from src.main.arcAGI2024.losses import CrossEntropyLoss, UniformMemLoss
 from src.main.arcAGI2024.base import parallel_pytree_map
 from src.main.arcAGI2024.sampling import TopLogitSampling
+from src.main.arcAGI2024.grad_utils import AutorescaleGradientControl
+
 class TestCausalLMCore(unittest.TestCase):
 
     def setUp(self):
@@ -42,30 +47,33 @@ class TestCausalLMCore(unittest.TestCase):
 
 
     def test_basic_sanity(self):
-        model = CausalLMCore.build_model_on_top_of_pretrained_head(
-            head_model_name=self.head_name,
+
+        vocabulary = VocabularyStruct.auto_load_from_pretrained("gpt2")
+        config = CoreConfig(
             num_layers=2,
             num_read_heads=10,
             num_write_heads=10,
             num_memories=2,
             dropout_rate=0.1,
-            auxilary_dropout_rate=0.1
+            sublayers_dropout_rate=0.1
         )
+        model = CausalLMCore.build_model_using_config(vocabulary, config)
         self.initialized_correctly(model)
 
 
 
     def test_save_load_no_directory(self):
         # Initialize and save when the directory does not exist
-        model = CausalLMCore.build_model_on_top_of_pretrained_head(
-            head_model_name=self.head_name,
+        vocabulary = VocabularyStruct.auto_load_from_pretrained("gpt2")
+        config = CoreConfig(
             num_layers=2,
-            num_read_heads=1,
-            num_write_heads=1,
+            num_read_heads=10,
+            num_write_heads=10,
             num_memories=2,
             dropout_rate=0.1,
-            auxilary_dropout_rate=0.1
+            sublayers_dropout_rate=0.1
         )
+        model = CausalLMCore.build_model_using_config(vocabulary, config)
 
         # Ensure the directory does not exist before saving
         if os.path.exists(self.temp_directory):
@@ -80,15 +88,16 @@ class TestCausalLMCore(unittest.TestCase):
 
     def test_save_load_directory_exists(self):
         # Initialize and save when the directory exists (contains a junk file)
-        model = CausalLMCore.build_model_on_top_of_pretrained_head(
-            head_model_name=self.head_name,
+        vocabulary = VocabularyStruct.auto_load_from_pretrained("gpt2")
+        config = CoreConfig(
             num_layers=2,
-            num_read_heads=1,
-            num_write_heads=1,
+            num_read_heads=10,
+            num_write_heads=10,
             num_memories=2,
             dropout_rate=0.1,
-            auxilary_dropout_rate=0.1
+            sublayers_dropout_rate=0.1
         )
+        model = CausalLMCore.build_model_using_config(vocabulary, config)
 
         # Create the directory and add a junk file
         os.makedirs(self.temp_directory)
@@ -106,17 +115,19 @@ class TestCausalLMCore(unittest.TestCase):
         self.initialized_correctly(loaded_model)
 
     def test_masking_sanity(self):
-        model = CausalLMCore.build_model_on_top_of_pretrained_head(
-            head_model_name=self.head_name,
+        vocabulary = VocabularyStruct.auto_load_from_pretrained("gpt2")
+        config = CoreConfig(
             num_layers=2,
             num_read_heads=10,
             num_write_heads=10,
             num_memories=2,
             dropout_rate=0.1,
-            auxilary_dropout_rate=0.1
+            sublayers_dropout_rate=0.1
         )
+        model = CausalLMCore.build_model_using_config(vocabulary, config)
 
-        tokens = torch.randint(0, model.vocabulary.tokenizer.true_vocab_size, [3])
+
+        tokens = torch.randint(0, vocabulary.tokenizer.true_vocab_size, [3])
 
         # Test memory does not update when masked
         memories = model.decoder.create_state([3])
@@ -140,44 +151,39 @@ class TestCausalLMCore(unittest.TestCase):
 class TestCausalLMTrainer(unittest.TestCase):
     def setUp(self):
         # Setup model core
-        model_core = CausalLMCore.build_model_on_top_of_pretrained_head(
-            head_model_name="gpt2",
+        vocabulary = VocabularyStruct.auto_load_from_pretrained("gpt2")
+        config = CoreConfig(
             num_layers=2,
-            num_read_heads=2,
-            num_write_heads=2,
+            num_read_heads=10,
+            num_write_heads=10,
             num_memories=2,
             dropout_rate=0.1,
-            auxilary_dropout_rate=0.1
+            sublayers_dropout_rate=0.1
         )
-        self.model_core = model_core
+        model = CausalLMCore.build_model_using_config(vocabulary, config)
+        trainer_core = StandardTrainerCore(model)
+
+        self.trainer_core = trainer_core
+        self.vocabulary = vocabulary
 
         # Initialize loss functions
         self.main_loss_fn = CrossEntropyLoss(padding_token_id=0)
         self.mem_access_loss_fn = UniformMemLoss()
+        self.gradient_norm =AutorescaleGradientControl()
 
-    def test_initialization(self):
-        # Initialize the CausalLMTrainer
+    def create_trainer(self, save_cached_to_cpu: bool, device: Optional[torch.device] = None):
         trainer = CausalLMTrainer(
-            model_core=self.model_core,
-            main_loss_function=self.main_loss_fn,
-            mem_access_loss_function=self.mem_access_loss_fn
+            trainer_core=self.trainer_core,
+            main_loss=self.main_loss_fn,
+            mem_loss=self.mem_access_loss_fn,
+            gradient_normalization=self.gradient_norm,
+            numeric_cache_rate = 1,
+            save_cached_to_cpu=save_cached_to_cpu,
+            verbose=True
         )
-
-        # Check main attributes were set correctly
-        self.assertEqual(trainer.main_loss_function, self.main_loss_fn)
-        self.assertEqual(trainer.mem_access_loss_function, self.mem_access_loss_fn)
-        self.assertEqual(trainer.core, self.model_core)
-        self.assertEqual(trainer.decoder, self.model_core.decoder)
-        self.assertEqual(trainer.vocabulary, self.model_core.vocabulary)
-
-        # Confirming the type of decoder and vocabulary is maintained
-        self.assertIsInstance(trainer.decoder, RecurrentDecoder)
-        self.assertIsInstance(trainer.vocabulary, VocabularyStruct)
-
-        # Ensure model core's embedding and logit projection layers are accessible
-        self.assertIsInstance(trainer.vocabulary.embeddings, nn.Embedding)
-        self.assertIsInstance(trainer.vocabulary.logit_projector, nn.Linear)
-    def test_numeric_sanity(self):
+        trainer = trainer.to(device)
+        return trainer
+    def test_random_tokens(self):
         """
         Test the causal lm trainer using exact steps.
 
@@ -187,142 +193,92 @@ class TestCausalLMTrainer(unittest.TestCase):
         one.
         """
         # Initialize the CausalLMTrainer
-        trainer = CausalLMTrainer(
-            model_core=self.model_core,
-            main_loss_function=self.main_loss_fn,
-            mem_access_loss_function=self.mem_access_loss_fn
-        )
+        trainer = self.create_trainer(save_cached_to_cpu=False, device=torch.device("cpu"))
         torch.autograd.set_detect_anomaly(True)
 
         # Create some mock training data to utilize in the process
         #
         # It is 100 tokens in a batch of 3
-        tokens = torch.randint(0, self.model_core.vocabulary.tokenizer.true_vocab_size, [3, 100])
-        targets = torch.randint(0, self.model_core.vocabulary.tokenizer.true_vocab_size, [3, 100])
-        masks = torch.rand([3, 100]) > 0.5
-
-        # Setup an optim
-        optim = torch.optim.SGD(self.model_core.parameters(), lr=0.1)
-        memories, numeric_metrics, loss_metric = trainer.step(tokens, targets, masks, numerics_cache_rate=1)
-
-    def test_numeric_sanity_gpu(self):
-        """
-        Test the causal lm trainer using exact steps.
-
-        Does the forward and backwards pass match? If so
-        the numerics metrics should be small, since we
-        are not going any tensors without replacing the old
-        one.
-        """
-
-
-        # Create some mock training data to utilize in the process
-        #
-        # It is 100 tokens in a batch of 3
-        batch_size = 100
-        num_tokens = 50
-        cache_rate = 50
-
-        tokens = torch.randint(0, self.model_core.vocabulary.tokenizer.true_vocab_size, [batch_size, num_tokens])
-        targets = torch.randint(0, self.model_core.vocabulary.tokenizer.true_vocab_size, [batch_size, num_tokens])
+        batch_size = 3
+        num_tokens = 4
+        tokens = torch.randint(0, self.vocabulary.tokenizer.true_vocab_size, [batch_size, num_tokens])
+        targets = torch.randint(0, self.vocabulary.tokenizer.true_vocab_size, [batch_size, num_tokens])
         masks = torch.rand([batch_size, num_tokens]) > 0.5
 
-        device = torch.device("cuda")
-        model = self.model_core.to(device=device)
-        tokens = tokens.to(device=device)
-        targets = targets.to(device=device)
-        masks = masks.to(device=device)
+        # Setup the logger. We are just going to print to the terminal
+
+        with ThreadPoolExecutor(3) as executer:
+
+            logger = Logger(executer, lambda x : print(x), lambda x : print(x))
+
+            # Setup an optim
+            optim = torch.optim.SGD(trainer.parameters(), lr=0.1)
+            memories = trainer.step(tokens, targets, masks, logger)
+            optim.step()
+    def test_random_tokens_on_gpu(self):
 
         # Initialize the CausalLMTrainer
-        trainer = CausalLMTrainer(
-            model_core=model,
-            main_loss_function=self.main_loss_fn,
-            mem_access_loss_function=self.mem_access_loss_fn
-        )
+        device = torch.device("cuda")
+        trainer = self.create_trainer(save_cached_to_cpu=False, device=device)
+        torch.autograd.set_detect_anomaly(True)
 
-        # Setup an optim
-        optim = torch.optim.SGD(model.parameters(), lr=0.1)
-        torch.compile()
-        # Run steps
-        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
-                                                torch.profiler.ProfilerActivity.CUDA],
-                                    record_shapes=True, profile_memory=True) as prof:
-            memories, numeric_metrics, loss_metric = trainer.step(tokens, targets, masks, numerics_cache_rate=cache_rate)
-            optim.step()
-            optim.zero_grad()
-
-        print(numeric_metrics)
-        print(prof.key_averages())
-        print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=10))
-        print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
-
-    def test_cpu_transfer(self):
         # Create some mock training data to utilize in the process
         #
         # It is 100 tokens in a batch of 3
         batch_size = 3
-        num_tokens = 100
-        cache_rate = 50
-
-        tokens = torch.randint(0, self.model_core.vocabulary.tokenizer.true_vocab_size, [batch_size, num_tokens])
-        targets = torch.randint(0, self.model_core.vocabulary.tokenizer.true_vocab_size, [batch_size, num_tokens])
+        num_tokens = 4
+        tokens = torch.randint(0, self.vocabulary.tokenizer.true_vocab_size, [batch_size, num_tokens])
+        targets = torch.randint(0, self.vocabulary.tokenizer.true_vocab_size, [batch_size, num_tokens])
         masks = torch.rand([batch_size, num_tokens]) > 0.5
 
-        device = torch.device("cuda")
-        model = self.model_core.to(device=device)
-        tokens = tokens.to(device=device)
-        targets = targets.to(device=device)
-        masks = masks.to(device=device)
+
+        tokens = tokens.to(device)
+        targets = targets.to(device)
+        masks = masks.to(device)
+
+        # Setup the logger. We are just going to print to the terminal
+
+        with ThreadPoolExecutor(1) as executer:
+
+            logger = Logger(executer, lambda x : print(x), lambda x : print(x))
+
+            # Setup an optim
+            optim = torch.optim.SGD(trainer.parameters(), lr=0.1)
+            memories = trainer.step(tokens, targets, masks, logger)
+            optim.step()
+
+    def test_caching_on_cpu(self):
 
         # Initialize the CausalLMTrainer
-        trainer = CausalLMTrainer(
-            model_core=model,
-            main_loss_function=self.main_loss_fn,
-            mem_access_loss_function=self.mem_access_loss_fn
-        )
-
-        # Run pass
-        memories, numeric_metrics = trainer(tokens, targets, masks,
-                                            numerics_cache_rate=cache_rate,
-                                            save_cached_to_cpu=True
-                                            )
-    def test_normal_parameters(self):
-        # Test with more typical parameters
-        model_core = CausalLMCore.build_model_on_top_of_pretrained_head(
-            head_model_name="gpt2",
-            num_layers=10,
-            num_read_heads=10,
-            num_write_heads=10,
-            num_memories=80,
-            dropout_rate=0.1,
-            auxilary_dropout_rate=0.1
-        )
-        trainer = CausalLMTrainer(model_core, self.main_loss_fn, self.mem_access_loss_fn)
+        device = torch.device("cuda")
+        trainer = self.create_trainer(save_cached_to_cpu=True, device=device)
+        torch.autograd.set_detect_anomaly(True)
 
         # Create some mock training data to utilize in the process
         #
-        batch_size = 10
-        num_tokens = 100
-        cache_rate = 50
-
-        tokens = torch.randint(0, self.model_core.vocabulary.tokenizer.true_vocab_size, [batch_size, num_tokens])
-        targets = torch.randint(0, self.model_core.vocabulary.tokenizer.true_vocab_size, [batch_size, num_tokens])
+        # It is 100 tokens in a batch of 3
+        batch_size = 3
+        num_tokens = 4
+        tokens = torch.randint(0, self.vocabulary.tokenizer.true_vocab_size, [batch_size, num_tokens])
+        targets = torch.randint(0, self.vocabulary.tokenizer.true_vocab_size, [batch_size, num_tokens])
         masks = torch.rand([batch_size, num_tokens]) > 0.5
 
-        device = torch.device("cuda")
-        trainer = trainer.to(device=device)
-        tokens = tokens.to(device=device)
-        targets = targets.to(device=device)
-        masks = masks.to(device=device)
 
-        # Run pass
-        start_time = time.time()
-        memories, numeric_metrics, loss_metric = trainer(tokens, targets, masks,
-                                            numerics_cache_rate=cache_rate,
-                                            save_cached_to_cpu=True
-                                            )
-        end_time = time.time()
-        print(f"Time taken: {end_time - start_time} seconds")
+        tokens = tokens.to(device)
+        targets = targets.to(device)
+        masks = masks.to(device)
+
+        # Setup the logger. We are just going to print to the terminal
+
+        with ThreadPoolExecutor(1) as executer:
+
+            logger = Logger(executer, lambda x : print(x), lambda x : print(x))
+
+            # Setup an optim
+            optim = torch.optim.SGD(trainer.parameters(), lr=0.1)
+            memories = trainer.step(tokens, targets, masks, logger)
+            optim.step()
+
 
 
 class TestCausalLMGen(unittest.TestCase):

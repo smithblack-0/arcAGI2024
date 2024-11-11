@@ -119,7 +119,8 @@ class TestDecoder(unittest.TestCase):
 
     def make_model(self, dropout_rate: float, main_dropout_rate: float)->RecurrentDecoder:
         layers = [self.make_decoder_layer(dropout_rate) for _ in range(3)]
-        return RecurrentDecoder(self.d_main, dropout_rate=main_dropout_rate, decoder_layers=layers)
+        return RecurrentDecoder(self.d_main, dropout_rate=main_dropout_rate, decoder_layers=layers,
+                                dtype=self.dtype, device=self.device)
     def test_forward_backward_syncronous(self):
         # Create the mock test data
         batch_size = 10
