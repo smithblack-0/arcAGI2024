@@ -1050,16 +1050,17 @@ class CausalLMTrainer(nn.Module):
             }
         metrics["reverse_time"] = progress.elapsed_time
         metrics["total_time"] = cache_dict["forward_time"] + cache_dict["setup_time"] + progress.elapsed_time
-        logger.commit_metrics(metrics)
+        return metrics
     def step(self,
              tokens: torch.Tensor,
              targets: torch.Tensor,
              batch_mask: torch.Tensor,
+             logger: Logger,
              memories: Optional[List[MemoryState]] = None,
              scheduling_rates: Optional[Tuple[float, float]] = None,
              numerics_cache_rate: int = 500,
              save_cached_to_cpu: bool = False,
-             ) -> Tuple[List[MemoryState], Dict[int, torch.Tensor]]:
+             ) -> List[MemoryState]:
         """
         Performs a single training step. This consists of
         embedding, going through the forward pass, and accumulating
@@ -1116,7 +1117,8 @@ class CausalLMTrainer(nn.Module):
             numerics_cache_rate,
             save_cached_to_cpu,
             main_schedule,
-            memories
+            memories,
+            logger
         )
         final_memory, final_rng = self.setup_reverse_pass(access_schedule, pass_cache, tokens.device)
         metrics = self.run_reverse_pass(tokens,
@@ -1124,13 +1126,14 @@ class CausalLMTrainer(nn.Module):
                                         batch_mask,
                                         main_schedule,
                                         save_cached_to_cpu,
-                                        pass_cache
+                                        pass_cache,
+                                        logger
                                         )
 
         # Perform restoration of final rng state
         set_rng_state(final_rng, tokens.device)
-
-        return final_memory, metrics
+        logger.commit_metrics(metrics)
+        return final_memory
 
 
 class CausalLMGenerator(nn.Module):
