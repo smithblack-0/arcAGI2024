@@ -13,10 +13,12 @@ import pandas as pd
 import threading
 import concurrent.futures as futures
 
+from tinycss2 import tokenizer
 from torch import nn
 from torch.utils import data
 from concurrent.futures import ThreadPoolExecutor, Future
 
+from datasets import DatasetDict, Dataset
 from transformers import PreTrainedTokenizer
 
 from .base import TensorTree, parallel_pytree_map
@@ -42,6 +44,9 @@ class TrainingConfig:
     to properly setup and run a training
     instance.
     """
+    # Data sources
+    pretokenized_datasets: DatasetDict
+
     # Training and logging niceties
     training_run_prefix: str
     metrics_logging_directory: str
@@ -265,6 +270,10 @@ class CheckpointProcess:
         self.batch = 0
         self.epoch += 1
 
+class TruncatedDataset(data.Dataset):
+    """
+    Special dataset.
+    """
 
 @dataclass
 class TrainingResources:
@@ -396,6 +405,50 @@ def run_validation_epoch(
         training_resources.optim.zero_grad()
 
 
+def run_test_epoch(
+        worker_num: int,
+        epoch_num: int,
+        test_loader: data.DataLoader,
+        training_resources: TrainingResources,
+    ):
+    """
+    Runs a validation epoch process
+    :param worker_num: The worker num associated with this. Used for logging
+    :param epoch_num: The epoch num associated with this. Used for logging
+    :param test_loader: The validation dataloader
+    :param training_resources: Various training resources. See the class
+    """
+    # Run training pass
+    for i, (tokens, targets, nonpadding_mask) in test_loader:
+        # Move all to the right device
+        tokens = tokens.to(device=training_resources.device)
+        targets = targets.to(device=training_resources.device)
+        nonpadding_mask = nonpadding_mask.to(device=training_resources.device)
+
+        # Compute the scaling factor. This is used to perform an average over all the active tokens
+        scaling_factor = (nonpadding_mask).sum().to(training_resources.core.dtype)
+        scaling_factor = 1 / scaling_factor
+        scaling_factor = float(scaling_factor)
+
+        # Setup the logging and feedback
+        terminal_callback = training_resources.terminal_display.make_terminal_callback(worker_num,
+                                                                                       epoch_num,
+                                                                                       i)
+        metrics_callback = training_resources.metrics_logger.make_logging_callback(worker_num,
+                                                                                   epoch_num,
+                                                                                   i,
+                                                                          "test_pass")
+        logging_case = Logger(training_resources.logging_thread, terminal_callback, metrics_callback)
+
+        # Perform the training step. Most of your time is spent here.
+        training_resources.trainer.step(tokens, targets, ~nonpadding_mask, logging_case,
+                                        scheduling_rates=(scaling_factor, scaling_factor))
+
+
+        # Zero the grads. We do not need them. But we cannot let them get full and give us NAN's
+        training_resources.optim.zero_grad()
+
+
 def run_distributed_epoch(worker_num: int,
                           epoch_num: int,
                           loaders: Dict[str, data.DataLoader],
@@ -412,11 +465,6 @@ def run_distributed_epoch(worker_num: int,
     run_training_epoch(worker_num, epoch_num, loaders["train_loader"], resources)
     run_validation_epoch(worker_num, epoch_num, loaders["validation_loader"], resources)
 
-    # Perform end of epoch processes, such as checkpointing and advancement
-    resources.checkpointing.step_epoch()
-    summaries = resources.metrics_logger.write_epoch()
-    resources.terminal_display.store_epoch_message("during training: " + summaries["training_pass"])
-    resources.terminal_display.store_epoch_message("during validation: " + summaries["validation_pass"])
 
 
 
@@ -458,86 +506,118 @@ def data_collator(batch: List[Dict[str, List[int]]],
     # Return
     return inputs, targets, batch_mask
 
-
-def prepare_dataloaders_for_epoch(datasets:
-                                  )
-
-
-def run_training_on_device(worker_num: int,
-                           loaders: Dict[str, data.DataLoader],
-                           resources: TrainingResources,
-                           ):
+def create_dataloaders(worker_rank: int,
+                       total_workers: int,
+                       truncate_length: int,
+                       batch_size: int,
+                       tokenizer: PreTrainedTokenizer,
+                       datasets: DatasetDict
+                       )->Dict[str, data.DataLoader]:
     """
-    Runs training while associated with a particular device,
-    in a safe distributed manner.
+    Creates the dataloaders for the training, validation, test datasets.
 
-    :param worker_num: The worker num associated with this
-    :param loaders: The loaders to use.
-    :param resources:
-    :return:
+    :param worker_rank: The number associated with this particular worker
+    :param total_workers: The total number of workers
+    :param truncate_length: The length to truncate to
+    :param batch_size: The batch size to use
+    :param tokenizer: The tokenizer to use.
+    :param datasets: Has a 'test', 'train', 'validation' split with 'tokens' features in the validators.
+    :return: The setup dataloaders, one for each split
     """
+    collater = functools.partial(data_collator, tokenizer=tokenizer, truncate_length=truncate_length)
+    loaders: Dict[str, data.DataLoader] = {}
+    for dataset in datasets:
+        sampler = data.DistributedSampler(dataset, total_workers, worker_rank)
+        loader = data.DataLoader(dataset,
+                                 batch_size,
+                                 sampler=sampler,
+                                 shuffle=True,
+                                 collate_fn=collater,
+                                 num_workers=1,
+                                 prefetch_factor=2,
+                                 pin_memory=True,
+        )
+        loaders[dataset] = loader
+    return loaders
+
+
 def run_training_process(worker_num: int,
                          training_configs: List[TrainingConfig],
                          model_factory: Callable[[torch.device], Tuple[CausalLMCore, CausalLMTrainer]],
                          optim_factory: Callable[[nn.Module], torch.optim.Optimizer],
                          schedule_factory: Callable[[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LRScheduler]],
-                         pretokenized_datasets: Dict[str, torch.utils.data.Dataset],
                          ):
     """
     Runs a training process, in parallel, and presumably
     on the GPU.
 
-    :param worker_number: The worker number assigned. Given out by spawn
+    :param worker_num: The worker number assigned. Given out by spawn
     :param training_configs: The training configs to use. Each will be used in sequence, advancing from the first
                              batch length.
     :param model_factory: A factory method capable of making a model given a device
     :param optim_factory: A factory method capable of providing an optim when given a model.
     :param schedule_factory: A factory method capable of making a schedule given an optimizer.
-    :param pretokenized_datasets: training, test, and validation datasets.
-        - These have been tokenized, but not padded, truncated, or placed into a batch
     """
     # Setup the models and training mechanisms
-    device = torch.device(f"cuda:{worker_number}" if torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda:{worker_num}" if torch.cuda.is_available() else "cpu")
     core, trainer = model_factory(device)
     optim = optim_factory(trainer)
     checkpointing = CheckpointProcess(training_configs)
-
-    for training_config in training_configs:
-        # Create the loaders associated with the config case
-
-
-    # Setup the dataloaders.
-    for name, dataset in pretokenized_datasets.items():
+    schedule = schedule_factory(optim)
+    epoch_num = training_configs[0].epoch_position
+    num_workers = training_configs[0].num_workers
 
 
-        collate_fn = functools.partial(data_collator,
-                                       tokenizer = core.vocabulary.tokenizer,
-                                       truncate_length = sequence_length)
+    with ThreadPoolExecutor(max_workers=2) as logging_threads:
+        # Run training under configurations
+        for training_config in training_configs:
+            training_config.epoch_position = epoch_num
 
-        loader = torch.utils.data.DataLoader(dataset,
-                                             batch_size,
-                                             shuffle=True,
-                                             num_workers=1,
-                                             sampler=distributed_sample,
-                                             pin_memory=True,
-                                             prefetch_factor=2,
-                                             collate_fn=collate_fn
-                                             )
-        loaders[name] = loader
-        epoch_loaders.append(loaders)
+            terminal_display = TerminalDisplay(training_config)
+            metrics_logger = LogMetrics(training_config)
 
-    for epoch, epoch_loaders in enumerate(epoch_loaders):
-        numbers = {
-            "epoch_number" : epoch,
-            "worker_number" : worker_number,
-            "num_workers" : num_workers,
-        }
+            # Create the training resources
+            resources = TrainingResources(
+                device=device,
+                num_workers=num_workers,
+                logging_thread=logging_threads,
+                terminal_display=terminal_display,
+                metrics_logger=metrics_logger,
+                core=core,
+                trainer=trainer,
+                checkpointing=checkpointing,
+                optim=optim,
+            )
+
+            # Create the dataloaders
+            loaders = create_dataloaders(worker_num,
+                                         training_config.num_workers,
+                                         training_config.truncate_length,
+                                         training_config.batch_size,
+                                         core.vocabulary.tokenizer,
+                                         training_config.pretokenized_datasets
+                                         )
 
 
+            for _ in range(training_config.num_epochs):
+                # Run primary epochs
+                run_training_epoch(worker_num, epoch_num, loaders["train_loader"], resources)
+                run_validation_epoch(worker_num, epoch_num, loaders["validation_loader"], resources)
+
+                # Perform end of epoch processes, such as checkpointing and advancement
+                resources.checkpointing.step_epoch()
+                summaries = resources.metrics_logger.write_epoch()
+                resources.terminal_display.store_epoch_message("during training: " + summaries["training_pass"])
+                resources.terminal_display.store_epoch_message("during validation: " + summaries["validation_pass"])
+                if schedule is not None:
+                    schedule.step()
+
+                # advance epoch
+                epoch_num += 1
+
+            # Done with this configuration, so we run the test set
+            run_test_epoch(worker_num, epoch_num, loaders["test_loader"], resources)
+            epoch_num += 1
 
 
-
-
-
-
-
+def run_distributed_cuda_training(num_)
