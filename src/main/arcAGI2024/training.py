@@ -448,27 +448,6 @@ def run_test_epoch(
         # Zero the grads. We do not need them. But we cannot let them get full and give us NAN's
         training_resources.optim.zero_grad()
 
-
-def run_distributed_epoch(worker_num: int,
-                          epoch_num: int,
-                          loaders: Dict[str, data.DataLoader],
-                          resources: TrainingResources,
-                          ):
-    """
-    Runs a training epoch in a distributed manner.
-    :param worker_num: The worker num associated with this. Used for logging
-    :param epoch_num: The epoch num associated with this. Used for logging
-    :param loaders: The loaders. train_loader, validation_loader, test_loader
-    :param resource: Training resources. See class definition.
-    """
-    # Run the training, validation epochs
-    run_training_epoch(worker_num, epoch_num, loaders["train_loader"], resources)
-    run_validation_epoch(worker_num, epoch_num, loaders["validation_loader"], resources)
-
-
-
-
-
 def data_collator(batch: List[Dict[str, List[int]]],
                   tokenizer: PreTrainedTokenizer,
                   truncate_length: int,
@@ -618,6 +597,3 @@ def run_training_process(worker_num: int,
             # Done with this configuration, so we run the test set
             run_test_epoch(worker_num, epoch_num, loaders["test_loader"], resources)
             epoch_num += 1
-
-
-def run_distributed_cuda_training(num_)
