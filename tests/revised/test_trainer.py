@@ -1,8 +1,14 @@
 import unittest
 import pandas as pd
 import os
-from src.main.arcAGI2024.training import LogMetrics  # assuming the class is saved in log_metrics.py
-
+import shutil
+from src.main.arcAGI2024.training import (LogMetrics, TerminalDisplay,
+                                          TrainingConfig, CheckpointProcess)
+import os
+from unittest.mock import MagicMock, patch
+import torch.multiprocessing as mp
+from unittest import TestCase, mock
+from tempfile import TemporaryDirectory
 
 class TestLogMetrics(unittest.TestCase):
     @classmethod
@@ -80,5 +86,93 @@ class TestLogMetrics(unittest.TestCase):
         self.assertEqual(df_written["accuracy"].iloc[1], 0.90)
 
 
-if __name__ == '__main__':
-    unittest.main()
+class TestCheckpointProcess(unittest.TestCase):
+    def setUp(self):
+        # Create a temporary directory for checkpoints
+        self.checkpoint_dir = "test_checkpoints"
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+
+        # Configure TrainingConfig
+        self.config = TrainingConfig(
+            pretokenized_datasets=None,  # Not used in this test
+            training_run_prefix="test_run",
+            metrics_logging_directory="",
+            checkpoint_save_directory=self.checkpoint_dir,
+            checkpoint_batch_frequency=2,
+            batch_size=8,
+            num_workers=1,
+            truncate_length=128,
+            num_epochs=10,
+            epoch_position=0
+        )
+
+        # Mock model with a save_to_folder method that writes a test file
+        self.mock_model = MagicMock()
+
+        def mock_save_to_folder(path):
+            # Ensure the directory exists before saving the checkpoint file
+            os.makedirs(path, exist_ok=True)
+            with open(os.path.join(path, "checkpoint.txt"), "w") as f:
+                f.write("Checkpoint saved.")
+
+        self.mock_model.save_to_folder.side_effect = mock_save_to_folder
+
+        # Initialize CheckpointProcess with the mock model and config
+        self.checkpoint_process = CheckpointProcess(self.mock_model, self.config)
+
+    def tearDown(self):
+        # Clean up by removing the temporary checkpoint directory after each test
+        shutil.rmtree(self.checkpoint_dir)
+
+    def test_checkpoint_saving_frequency(self):
+        # Simulate stepping through batches and check file creation
+        for i in range(5):
+            self.checkpoint_process.step_batch()
+
+        # Check that the expected checkpoint files are saved
+        expected_files = [
+            os.path.join(self.checkpoint_dir, "test_run_epoch_0_batch_0", "checkpoint.txt"),
+            os.path.join(self.checkpoint_dir, "test_run_epoch_0_batch_2", "checkpoint.txt"),
+            os.path.join(self.checkpoint_dir, "test_run_epoch_0_batch_4", "checkpoint.txt"),
+        ]
+        for file_path in expected_files:
+            self.assertTrue(os.path.exists(file_path))
+            with open(file_path, "r") as f:
+                content = f.read()
+                self.assertEqual(content, "Checkpoint saved.")
+
+    def test_checkpoint_on_epoch_step(self):
+        # Ensure a checkpoint is saved at the end of each epoch
+        self.checkpoint_process.step_epoch()
+        first_checkpoint = os.path.join(self.checkpoint_dir, "test_run_epoch_0_batch_0", "checkpoint.txt")
+        self.assertTrue(os.path.exists(first_checkpoint))
+
+        # Simulate moving to the next epoch and check the new checkpoint location
+        self.checkpoint_process.step_epoch()
+        second_checkpoint = os.path.join(self.checkpoint_dir, "test_run_epoch_1_batch_0", "checkpoint.txt")
+        self.assertTrue(os.path.exists(second_checkpoint))
+
+        # Verify file contents
+        for checkpoint in [first_checkpoint, second_checkpoint]:
+            with open(checkpoint, "r") as f:
+                content = f.read()
+                self.assertEqual(content, "Checkpoint saved.")
+
+    def test_increment_batch_and_epoch(self):
+        # Check if batch and epoch counters increment correctly
+        self.assertEqual(self.checkpoint_process.batch, 0)
+        self.assertEqual(self.checkpoint_process.epoch, 0)
+
+        # Step through a few batches
+        self.checkpoint_process.step_batch()
+        self.assertEqual(self.checkpoint_process.batch, 1)
+
+        # Step through an epoch
+        self.checkpoint_process.step_epoch()
+        self.assertEqual(self.checkpoint_process.epoch, 1)
+        self.assertEqual(self.checkpoint_process.batch, 0)  # batch should reset after epoch
+
+class TestDistributedTraining(unittest.TestCase):
+    """
+
+    """

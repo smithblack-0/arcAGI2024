@@ -5,3 +5,4 @@ from .losses import *
 from .sampling import *
 from .vocabulary import *
 from .model import *
+from .training import *
