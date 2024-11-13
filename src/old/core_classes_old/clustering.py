@@ -506,7 +506,7 @@ def constrained_kmeans(datapoints: np.ndarray,
         - Keep in mind n_features_compound may contain concatenation of multiple points
     :param section_lengths:
         - How many elements are used to specify a particular datapoint or centroid
-        - Directly controls  a numpy.split. Keep this in mind.
+        - Directly controls a numpy.split. Keep this in mind.
     :param k:
         - The number of clusters to create
     :param n:

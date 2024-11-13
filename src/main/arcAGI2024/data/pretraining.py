@@ -6,7 +6,6 @@ from torch.utils import data
 from typing import Dict, List, Tuple, Callable
 
 
-class LoaderConfig
 def create_pretokenized_datasets(datasets: DatasetDict,
                                  tokenizer: PreTrainedTokenizer
                                  ) -> DatasetDict:
@@ -127,3 +126,26 @@ def create_dataloader_factory(total_workers: int,
                              tokenizer=tokenizer,
                              datasets=datasets
                              )
+
+
+
+def build_pretraining_pipeline(total_workers: int,
+                               truncate_length: int,
+                               batch_size: int,
+                               tokenizer: PreTrainedTokenizer,
+                               huggingface_name: str,
+                               huggingface_version: str,
+                               )-> Callable[[int], Dict[str, data.DataLoader]]:
+    """
+    Builds a pretraining pipeline out of a huggingface
+    dataset with features named "text"
+
+    :param total_workers:
+    :param truncate_length:
+    :param batch_size:
+    :param tokenizer:
+    :param huggingface_name:
+    :param huggingface_version:
+    :return:
+    """
+
