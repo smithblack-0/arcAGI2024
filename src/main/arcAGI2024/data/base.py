@@ -1,10 +1,12 @@
 import numpy as np
 import torch
+from torch.nn import functional as F
 from torch.utils import data
 from torch.utils.data import Dataset, IterableDataset
 from typing import Iterable, List
 from collections.abc import Sized
-class NumpyBufferStream:
+
+class NumpyBufferedStream:
     """
     A specialized buffer that can perform
     a vectorized pop, push, and length process.
@@ -14,6 +16,7 @@ class NumpyBufferStream:
     possible if items are popped, and allows a vectorized
     pop process.
     """
+
     def pop(self, indices: np.ndarray) -> np.ndarray:
         """
         Pops the given indices out of the array,
@@ -24,34 +27,54 @@ class NumpyBufferStream:
         :param indices: The indices to pop.
         :return: The popped array.
         """
-        vector_mask = np.zeros_like(self.buffer.)
+        chosen_mask = np.zeros(len(self.buffer), dtype=bool)
+        chosen_mask[indices] = True
+        output = self.buffer[chosen_mask]
+        self.buffer = self.buffer[~chosen_mask]
+        self.refill_buffer()
+        return output
 
-
-    def get_lengths(self)->np.ndarray:
+    def get_lengths(self) -> np.ndarray:
         """
         Gets the length of each item in the buffer,
         and returns it as an array.
         """
         return np.array([len(item) for item in self.buffer])
+
     def refill_buffer(self):
-        required_cases = self.buffer_size - len(self.buffer)
+        """
+        Refill the buffer by loading batches from the stream.
+        """
+        # Load a batch from the stream, appending it to the buffer
         try:
-            update = []
-            while len(update) < required_cases:
-                update.append(next(self.stream))
+            while len(self.buffer) < self.buffer_size:
+                batch = next(self.stream)
+                # Flatten batch to 1D array if needed and append to the buffer
+                batch = np.array(batch, dtype=object)
+                self.buffer = np.concatenate([self.buffer, batch])
         except StopIteration:
+            # Stop if the stream is exhausted
             pass
 
+    def is_buffer_empty(self) -> bool:
+        """Returns True if the buffer is empty."""
+        return len(self.buffer) == 0
+
     def __init__(self,
-                 stream: Iterable,
-                 buffer_size: int
-                 ):
-        self.stream = stream
-        self.buffer = np.array([])
+                 stream: Iterable[Sized],
+                 buffer_size: int):
+        """
+        Initialize the NumpyBufferedStream.
+
+        :param stream: A batched iterable where each item is a batch of data.
+        :param buffer_size: The maximum size of the buffer.
+        """
+        self.stream = iter(stream)
+        self.buffer = np.array([], dtype=object)
         self.buffer_size = buffer_size
         self.refill_buffer()
 
-class BatchBufferedDataset(data.IterableDataset):
+class BatchingBufferedDataset(data.IterableDataset):
     """
     An important prefetching and dataset tool.
     This class will finish tokenization, pad, and
@@ -79,19 +102,6 @@ class BatchBufferedDataset(data.IterableDataset):
 
         return indexes[best_centroid_index]
 
-    def load_data_into_buffer(self, data_iterator: Iterable):
-        """
-        Loads data into the buffer up to the buffer size if possible,
-        handling the end of the data iterator gracefully.
-
-        :param data_iterator: The data source to pull from.
-        """
-        try:
-            while len(self.buffer) < self.buffer_size:
-                self.buffer.append(next(data_iterator))
-        except StopIteration:
-            pass
-
     def pad_sequence(self, sequence: List[int], max_length: int) -> List[int]:
         """
         Pads a sequence to the specified max_length with zeros.
@@ -100,8 +110,9 @@ class BatchBufferedDataset(data.IterableDataset):
         :param max_length: The desired length after padding.
         :return: The padded sequence.
         """
+        sequence = torch.tensor(sequence, dtype=torch.int64)
         padding_length = max_length - len(sequence)
-        return sequence + [self.padding_id] * padding_length
+        return F.pad(sequence, (0, padding_length))
     def __init__(self,
                  batch_size: int,
                  num_workers: int,
@@ -110,40 +121,36 @@ class BatchBufferedDataset(data.IterableDataset):
                  pretokenized_dataset: Dataset,
                  buffer_size: int = 10000,
                  shuffle: bool = True):
+
         sampler = data.DistributedSampler(pretokenized_dataset,
-                                          num_workers=num_workers,
+                                          num_replicas=num_workers,
                                           rank=worker_rank,
                                           shuffle=shuffle)
 
         self.unbatched_loader = data.DataLoader(pretokenized_dataset,
                                                 shuffle=False,
-                                                batch_size=None,
-                                                sampler=sampler)
+                                                collate_fn=lambda x : x,
+                                                batch_size=batch_size,
+                                                sampler=sampler,
+                                                )
 
         self.padding_id = padding_id
         self.batch_size = batch_size
         self.buffer_size = buffer_size
-        self.buffer = []
 
     def __iter__(self):
-        data_generator = iter(self.unbatched_loader)
-
-        while True:
-            # Load data into buffer until it reaches buffer_size
-            self.load_data_into_buffer(data_generator)
-            if len(self.buffer) == 0:
-                break  # Exit if there are no more items to load
-
+        unbatched_tokens_buffer = NumpyBufferedStream(self.unbatched_loader, self.buffer_size)
+        while not unbatched_tokens_buffer.is_buffer_empty():
             # Get lengths for clustering
-            lengths = np.array([len(tokenized_text) for tokenized_text in self.buffer])
+            lengths = unbatched_tokens_buffer.get_lengths()
             batch_indices = self.select_batch_indices_using_clustoid(self.batch_size, lengths)
 
             # Create the batch by popping selected items from the buffer
-            batch = [self.buffer.pop(i) for i in batch_indices]
+            batch = unbatched_tokens_buffer.pop(batch_indices)
 
             # Pad the batch to make all sequences of equal length
             max_length = max(len(tokenized_text) for tokenized_text in batch)
-            padded_batch = [self.pad_sequence(tokenized_text, max_length) for tokenized_text in batch]
-            tensor_batch = torch.tensor(padded_batch, dtype=torch.long, pin_memory=True)
-            yield tensor_batch
+            padded_tensors = [self.pad_sequence(tokenized_text, max_length) for tokenized_text in batch]
+            batched_tensors = torch.stack(padded_tensors, dim=0)
+            yield batched_tensors
 
