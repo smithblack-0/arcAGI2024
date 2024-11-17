@@ -171,8 +171,3 @@ class TestCheckpointProcess(unittest.TestCase):
         self.checkpoint_process.step_epoch()
         self.assertEqual(self.checkpoint_process.epoch, 1)
         self.assertEqual(self.checkpoint_process.batch, 0)  # batch should reset after epoch
-
-class TestDistributedTraining(unittest.TestCase):
-    """
-
-    """

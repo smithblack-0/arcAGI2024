@@ -10,7 +10,7 @@ from src.main.arcAGI2024.base import TensorTree, DeviceDtypeWatch, SavableState,
 
 
 # Define the memory state
-class MemoryState(SavableState):
+class FastMemoryState(SavableState):
     """
     The memory state. Contains within it
     the linear kernel attention matrix
@@ -81,19 +81,17 @@ class CreateState(nn.Module):
         return self.__metainfo.dtype
 
     def __init__(self,
-                 d_address: int,
                  d_memory: int,
                  num_memories: int,
                  dtype: Optional[torch.dtype] = None,
                  device: Optional[torch.device] = None,
                  ):
         super().__init__()
-        self.d_address = d_address
         self.d_memory = d_memory
         self.num_memories = num_memories
         self.__metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
 
-    def forward(self, batch_shape: torch.Size) -> MemoryState:
+    def forward(self, batch_shape: torch.Size) -> FastMemoryState:
         """
         Sets up the state.
         :param batch_shape: The batch shape that is correlated with the memories
@@ -107,7 +105,7 @@ class CreateState(nn.Module):
         write_probability_mass = torch.zeros([*batch_shape, self.num_memories],
                                              dtype=self.dtype, device=self.device, requires_grad=True)
 
-        return MemoryState(memories, write_probability_mass)
+        return FastMemoryState(memories, write_probability_mass)
 
 
 class LinearAttention(nn.Module):
@@ -242,7 +240,7 @@ class ReadMemory(nn.Module):
     def forward(self,
                 query: torch.Tensor,
                 addresses: torch.Tensor,
-                memory: MemoryState
+                memory: FastMemoryState
                 ) -> torch.Tensor:
         """
         :param query:
@@ -335,9 +333,11 @@ class WriteMemory(nn.Module):
         self.linear_attn = LinearAttention(linear_kernel_activation)
 
         # Create the addresses projection mechanisms. Also, create
-        # the attention addresses
+        # the attention addresses. Note the value projector is
+        # twice as wide as you might expect. This provides fodder for both the update
+        # and the write gate logits
 
-        self.key_head_projector = nn.Linear(d_model, 2*d_memory * num_write_heads, dtype=dtype, device=device)
+        self.key_head_projector = nn.Linear(d_model, d_memory * num_write_heads, dtype=dtype, device=device)
         self.value_head_projector = nn.Linear(d_model, 2*d_memory * num_write_heads, dtype=dtype, device=device)
 
         # Create the interpolation rate logits.
@@ -364,7 +364,7 @@ class WriteMemory(nn.Module):
             return logits
 
         # Create the probability projectors and interpolation logits
-        self.interpolation_logits = initialize_based_on_half_lives([num_memories, d_address],
+        self.interpolation_logits = initialize_based_on_half_lives([num_memories, d_memory],
                                                                    1,
                                                                    30)
         self.write_logits = nn.Linear(d_memory, 1, dtype=dtype, device=device)
@@ -415,7 +415,7 @@ class WriteMemory(nn.Module):
 
         # Place write heads on the key, value features
         key = self.key_head_projector(key)
-        key = key.unflatten(dim=-1, sizes=[self.num_write_heads, 2*self.d_memory])  # (..., num_heads, 2*d_memory)
+        key = key.unflatten(dim=-1, sizes=[self.num_write_heads, self.d_memory])  # (..., num_heads, d_memory)
 
         values = self.value_head_projector(values)
         values = values.unflatten(dim=-1, sizes=[self.num_write_heads, 2*self.d_memory])  # ( ..., num_heads, 2*d_memory)
@@ -454,8 +454,8 @@ class WriteMemory(nn.Module):
                        update: Tuple[torch.Tensor, torch.Tensor],
                        write_factor: torch.Tensor,
                        batch_mask: torch.Tensor,
-                       memory: MemoryState,
-                       ) -> MemoryState:
+                       memory: FastMemoryState,
+                       ) -> FastMemoryState:
         """
         Figures out the previous memory state from the
         current and the various update factors.
@@ -478,14 +478,14 @@ class WriteMemory(nn.Module):
         cum_prob = self.broadcasted_where(batch_mask, next_cum_prob, cum_prob)
 
         # Return the original memory state
-        return MemoryState(memory, cum_prob)
+        return FastMemoryState(memory, cum_prob)
 
     def advance_memory(self,
                        update: torch.Tensor,
                        write_factor: torch.Tensor,
                        batch_mask: torch.Tensor,
-                       memory: MemoryState,
-                       ) -> MemoryState:
+                       memory: FastMemoryState,
+                       ) -> FastMemoryState:
         """
         Commits the computed update into the long term memory.
         Commits using interpolation.
@@ -508,7 +508,7 @@ class WriteMemory(nn.Module):
         cum_prob = self.broadcasted_where(batch_mask, last_cum_prob, cum_prob)
 
         # Return the new memory
-        return MemoryState(memory, cum_prob)
+        return FastMemoryState(memory, cum_prob)
 
 class FastLinearMemory(nn.Module):
     """
@@ -536,7 +536,6 @@ class FastLinearMemory(nn.Module):
 
     def __init__(self,
                  d_model: int,
-                 d_address: int,
                  d_memory: int,
                  num_read_heads: int,
                  num_write_heads: int,
@@ -549,7 +548,6 @@ class FastLinearMemory(nn.Module):
                  ):
         """
         :param d_model: The arcAGI2024 dimensionality
-        :param d_address: The address dimensionality. Should generally be much smaller. Think d_head
         :param d_memory: The memory storage space. Can be quite a bit larger.
         :param num_read_heads: The number of read heads. 4-8 is fine.
         :param num_write_heads: The number of write heads. 4-8 is fine.
@@ -573,14 +571,14 @@ class FastLinearMemory(nn.Module):
         super().__init__()
 
         # Define address creation
-        self.addresses = nn.Parameter(torch.randn([num_memories, d_address], dtype=dtype, device=device),
+        self.addresses = nn.Parameter(torch.randn([num_memories, d_memory], dtype=dtype, device=device),
                                       requires_grad=True)
 
         # Create the various other control features
-        self.state_creator = CreateState(d_address, d_memory, num_memories, dtype=dtype, device=device)
-        self.memory_reader = ReadMemory(d_model, d_address, d_memory, num_read_heads, linear_kernel_activation,
+        self.state_creator = CreateState(d_memory, num_memories, dtype=dtype, device=device)
+        self.memory_reader = ReadMemory(d_model, d_memory, num_read_heads, linear_kernel_activation,
                                         device=device, dtype=dtype)
-        self.memory_writer = WriteMemory(d_model, d_address, d_memory, num_write_heads, num_memories,
+        self.memory_writer = WriteMemory(d_model, d_memory, num_write_heads, num_memories,
                                          dropout_rate, max_write_factor, linear_kernel_activation,
                                          dtype=dtype, device=device)
 
@@ -589,7 +587,7 @@ class FastLinearMemory(nn.Module):
 
     def create_state(self,
                      batch_shape: torch.Size
-                     ) -> MemoryState:
+                     ) -> FastMemoryState:
         """
         Creates and returns the blank memory state
         :param batch_shape: the batch shape to match
@@ -600,8 +598,8 @@ class FastLinearMemory(nn.Module):
     def reverse(self,
                 tensor: torch.Tensor,
                 batch_mask: torch.Tensor,
-                next_memory: MemoryState,
-                ) -> Tuple[torch.Tensor, MemoryState]:
+                next_memory: FastMemoryState,
+                ) -> Tuple[torch.Tensor, FastMemoryState]:
         """
         The reverse implementation. Training is actually
         intended to occur in this one. A memory state consisting
@@ -647,8 +645,8 @@ class FastLinearMemory(nn.Module):
     def forward(self,
                 tensor: torch.Tensor,
                 batch_mask: torch.Tensor,
-                memory: MemoryState,
-                ) -> Tuple[torch.Tensor, MemoryState]:
+                memory: FastMemoryState,
+                ) -> Tuple[torch.Tensor, FastMemoryState]:
         """
         Forward pass for the fast linear memory unit.
         :param tensor: The tensor to use to access and update the mem state. Shape (..., d_model)

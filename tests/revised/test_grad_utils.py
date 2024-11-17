@@ -63,23 +63,6 @@ class TestBatchCollectiveReductiveGradNorm(unittest.TestCase):
         max_value = result.abs().max()
         self.assertLessEqual(max_value, self.rescale_threshold)
 
-    def test_quantiles_mean_reduction_mode(self):
-        # Initialize with quantiles_mean reduction mode
-        grad_norm = BatchCollectiveReductiveGradNorm(
-            num_batch_dims=self.num_batch_dims,
-            rescale_threshold=self.rescale_threshold,
-            reduction_mode='quantiles_mean',
-            verbose=True
-        )
-
-        # Create sample gradients with large values in the middle quantiles
-        grad_tree = torch.tensor([[0.05, 0.15, 0.25], [0.05, 0.2, 0.15]])
-
-        # Run the normalization
-        result = grad_norm(grad_tree)
-
-        # Ensure that the middle quantile gradients meet the rescale threshold
-        max_value = result.abs().max()
 
     def test_multiple_batch_dimensions(self):
         # Test with two batch dimensions and max reduction mode

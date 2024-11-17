@@ -10,7 +10,7 @@ from src.main.arcAGI2024.base import TensorTree, DeviceDtypeWatch, SavableState,
 
 
 # Define the memory state
-class MemoryState(SavableState):
+class DeepMemoryState(SavableState):
     """
     The memory state. Contains within it
     the linear kernel attention matrix
@@ -96,7 +96,7 @@ class CreateState(nn.Module):
         self.num_memories = num_memories
         self.__metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
 
-    def forward(self, batch_shape: torch.Size) -> MemoryState:
+    def forward(self, batch_shape: torch.Size) -> DeepMemoryState:
         """
         Sets up the state.
         :param batch_shape: The batch shape that is correlated with the memories
@@ -112,7 +112,7 @@ class CreateState(nn.Module):
         write_probability_mass = torch.zeros([*batch_shape, self.num_memories],
                                              dtype=self.dtype, device=self.device, requires_grad=True)
 
-        return MemoryState(matrix, normalizer, write_probability_mass)
+        return DeepMemoryState(matrix, normalizer, write_probability_mass)
 
 
 class LinearAttention(nn.Module):
@@ -255,7 +255,7 @@ class ReadMemory(nn.Module):
     def forward(self,
                 query: torch.Tensor,
                 addresses: torch.Tensor,
-                memory: MemoryState
+                memory: DeepMemoryState
                 ) -> torch.Tensor:
         """
         :param query:
@@ -493,8 +493,8 @@ class WriteMemory(nn.Module):
                        update: Tuple[torch.Tensor, torch.Tensor],
                        write_factor: torch.Tensor,
                        batch_mask: torch.Tensor,
-                       memory: MemoryState,
-                       ) -> MemoryState:
+                       memory: DeepMemoryState,
+                       ) -> DeepMemoryState:
         """
         Figures out the previous memory state from the
         current and the various update factors.
@@ -520,14 +520,14 @@ class WriteMemory(nn.Module):
         cum_prob = self.broadcasted_where(batch_mask, next_cum_prob, cum_prob)
 
         # Return the original memory state
-        return MemoryState(matrix, normalizer, cum_prob)
+        return DeepMemoryState(matrix, normalizer, cum_prob)
 
     def advance_memory(self,
                        update: Tuple[torch.Tensor, torch.Tensor],
                        write_factor: torch.Tensor,
                        batch_mask: torch.Tensor,
-                       memory: MemoryState,
-                       ) -> MemoryState:
+                       memory: DeepMemoryState,
+                       ) -> DeepMemoryState:
         """
         Commits the computed update into the long term memory.
         Commits using interpolation.
@@ -553,7 +553,7 @@ class WriteMemory(nn.Module):
         cum_prob = self.broadcasted_where(batch_mask, last_cum_prob, cum_prob)
 
         # Return the new memory
-        return MemoryState(matrix, normalizer, cum_prob)
+        return DeepMemoryState(matrix, normalizer, cum_prob)
 
 class DeepLinearMemory(nn.Module):
     """
@@ -634,7 +634,7 @@ class DeepLinearMemory(nn.Module):
 
     def create_state(self,
                      batch_shape: torch.Size
-                     ) -> MemoryState:
+                     ) -> DeepMemoryState:
         """
         Creates and returns the blank memory state
         :param batch_shape: the batch shape to match
@@ -645,8 +645,8 @@ class DeepLinearMemory(nn.Module):
     def reverse(self,
                 tensor: torch.Tensor,
                 batch_mask: torch.Tensor,
-                next_memory: MemoryState,
-                ) -> Tuple[torch.Tensor, MemoryState]:
+                next_memory: DeepMemoryState,
+                ) -> Tuple[torch.Tensor, DeepMemoryState]:
         """
         The reverse implementation. Training is actually
         intended to occur in this one. A memory state consisting
@@ -692,8 +692,8 @@ class DeepLinearMemory(nn.Module):
     def forward(self,
                 tensor: torch.Tensor,
                 batch_mask: torch.Tensor,
-                memory: MemoryState,
-                ) -> Tuple[torch.Tensor, MemoryState]:
+                memory: DeepMemoryState,
+                ) -> Tuple[torch.Tensor, DeepMemoryState]:
         """
         Forward pass for the fast linear memory unit.
         :param tensor: The tensor to use to access and update the mem state. Shape (..., d_model)

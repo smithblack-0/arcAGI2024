@@ -1,6 +1,6 @@
 import unittest
 import torch
-from src.main.arcAGI2024 import DecoderLayer, RecurrentDecoder, parallel_pytree_map, get_rng_state, set_rng_state
+from src.main.arcAGI2024 import DeepDecoderLayer, RecurrentDecoder, parallel_pytree_map, get_rng_state, set_rng_state
 class TestDecoderLayer(unittest.TestCase):
     def setUp(self):
 
@@ -17,8 +17,8 @@ class TestDecoderLayer(unittest.TestCase):
         self.device = torch.device("cpu")
         self.dtype = torch.float32
 
-    def make_model(self, dropout_rate: float)->DecoderLayer:
-        return DecoderLayer(
+    def make_model(self, dropout_rate: float)->DeepDecoderLayer:
+        return DeepDecoderLayer(
             self.d_model,
             self.d_hidden,
             self.d_address,
@@ -102,8 +102,8 @@ class TestDecoder(unittest.TestCase):
         self.device = torch.device("cpu")
         self.dtype = torch.float32
 
-    def make_decoder_layer(self, dropout_rate: float)->DecoderLayer:
-        return DecoderLayer(
+    def make_decoder_layer(self, dropout_rate: float)->DeepDecoderLayer:
+        return DeepDecoderLayer(
             self.d_model,
             self.d_hidden,
             self.d_address,

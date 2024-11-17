@@ -3,8 +3,11 @@ from typing import Tuple, List
 import torch
 from torch import nn
 
-from .memory.deep_memory import MemoryState, DeepLinearMemory
+from .memory.deep_memory import DeepMemoryState, DeepLinearMemory
+from .memory.fast_memory import FastLinearMemory, FastMemoryState
 from .base import DeviceDtypeWatch
+
+
 class Feedforward(nn.Module):
     """
     A classic feedforward implementation.
@@ -34,7 +37,7 @@ class Feedforward(nn.Module):
         return tensor
 
 
-class DecoderLayer(nn.Module):
+class DeepDecoderLayer(nn.Module):
     """
     A deep transformer decoder layer
 
@@ -101,7 +104,7 @@ class DecoderLayer(nn.Module):
         # Define the dropout layer
         self.dropout = nn.Dropout(dropout)
 
-    def create_state(self, batch_shape: torch.Size) -> MemoryState:
+    def create_state(self, batch_shape: torch.Size) -> DeepMemoryState:
         """
         Creates a blank memory state associated with the
         given batch size.
@@ -113,8 +116,8 @@ class DecoderLayer(nn.Module):
     def reverse(self,
                 tensor: torch.Tensor,
                 batch_mask: torch.Tensor,
-                next_memory: MemoryState
-                ) -> Tuple[Tuple[torch.Tensor, MemoryState], MemoryState]:
+                next_memory: DeepMemoryState
+                ) -> Tuple[Tuple[torch.Tensor, DeepMemoryState], DeepMemoryState]:
         """
         The reverse mechanism. Able to perform the same computation,
         but with the notable complication of also returning the
@@ -131,10 +134,8 @@ class DecoderLayer(nn.Module):
 
         # Perform the deep memory access pattern
 
-
         (update, next_memory), previous_memory = self.deep_memories.reverse(tensor, batch_mask, next_memory)
         tensor = self.deep_layernorm(tensor + self.dropout(update))
-
 
         # Perform the feedforward
         update = self.feedforward(tensor)
@@ -146,7 +147,7 @@ class DecoderLayer(nn.Module):
     def forward(self,
                 tensor: torch.Tensor,
                 batch_mask: torch.Tensor,
-                previous_memory: MemoryState) -> Tuple[torch.Tensor, MemoryState]:
+                previous_memory: DeepMemoryState) -> Tuple[torch.Tensor, DeepMemoryState]:
         """
         The forward mechanism. Performs a forward pass through the mode
         :param tensor: The input.
@@ -158,10 +159,137 @@ class DecoderLayer(nn.Module):
         """
         # Perform the deep memory access pattern
 
-
         update, next_memory = self.deep_memories(tensor, batch_mask, previous_memory)
         tensor = self.deep_layernorm(tensor + self.dropout(update))
 
+        # Perform the feedforward
+        update = self.feedforward(tensor)
+        tensor = self.ff_layernorm(tensor + self.dropout(update))
+
+        # Return
+        return tensor, next_memory
+
+
+class FastDecoderLayer(nn.Module):
+    """
+    A fast transformer decoder layer
+
+    Consists of the fast memory unit,
+    and the feedforward block. Can
+    operate in both forward and reverse
+    modes.
+    """
+
+    def __init__(self,
+                 d_model: int,
+                 d_hidden: int,
+                 d_memory: int,
+                 num_read_heads: int,
+                 num_write_heads: int,
+                 num_memories: int,
+                 numeric_write_factor: float,
+                 dropout: float,
+                 device: torch.device,
+                 dtype: torch.dtype
+                 ):
+        """
+        :param d_model: The main model dimensions, as the embeddings come in as
+        :param d_hidden: The dimensions of the feedforward process
+        :param d_memory: The dimensions used for memory storage
+        :param num_read_heads: The number of memory read heads
+        :param num_write_heads: The numbery of memory write heads
+        :param num_memories: The number of discrete memories
+        :param dropout: The dropout probability
+        :param device: The device we are on
+        :param dtype: The dtype we are on
+        """
+        super().__init__()
+
+        self.d_model = d_model
+        self.d_hidden = d_hidden
+        self.d_memory = d_memory
+        self.num_read_heads = num_read_heads
+        self.num_write_heads = num_write_heads
+        self.num_memories = num_memories
+        self.dropout_rate = dropout
+
+        # Define the deep memory layer
+
+        self.fast_memories = FastLinearMemory(d_model,
+                                              d_memory,
+                                              num_read_heads,
+                                              num_write_heads,
+                                              num_memories,
+                                              dropout,
+                                              max_write_factor=numeric_write_factor,
+                                              device=device,
+                                              dtype=dtype)
+        self.deep_layernorm = nn.LayerNorm(d_model, device=device, dtype=dtype)
+
+        # Define the feedforward layer
+        self.feedforward = Feedforward(d_model, d_hidden, device=device, dtype=dtype)
+        self.ff_layernorm = nn.LayerNorm(d_model, device=device, dtype=dtype)
+
+        # Define the dropout layer
+        self.dropout = nn.Dropout(dropout)
+
+    def create_state(self, batch_shape: torch.Size) -> FastMemoryState:
+        """
+        Creates a blank memory state associated with the
+        given batch size.
+        :param batch_shape: The batch shape to match
+        :return: The setup memory state
+        """
+        return self.fast_memories.create_state(batch_shape)
+
+    def reverse(self,
+                tensor: torch.Tensor,
+                batch_mask: torch.Tensor,
+                next_memory: DeepMemoryState
+                ) -> Tuple[Tuple[torch.Tensor, FastMemoryState], FastMemoryState]:
+        """
+        The reverse mechanism. Able to perform the same computation,
+        but with the notable complication of also returning the
+        prior memory state, setup to accumulate gradients.
+
+        :param tensor: The tensor input to use
+        :param batch_mask: Shape (...). Indicates whether memory can be updated. True means No.
+        :param next_memory: The next memory state during the forward pass
+        :return:
+        -Tuple:
+            - The original output, but with a graph on it.
+            - The previous memory state .
+        """
+
+        # Perform the deep memory access pattern
+
+        (update, next_memory), previous_memory = self.fast_memories.reverse(tensor, batch_mask, next_memory)
+        tensor = self.deep_layernorm(tensor + self.dropout(update))
+
+        # Perform the feedforward
+        update = self.feedforward(tensor)
+        tensor = self.ff_layernorm(tensor + self.dropout(update))
+
+        # Return
+        return (tensor, next_memory), previous_memory
+
+    def forward(self,
+                tensor: torch.Tensor,
+                batch_mask: torch.Tensor,
+                previous_memory: DeepMemoryState) -> Tuple[torch.Tensor, DeepMemoryState]:
+        """
+        The forward mechanism. Performs a forward pass through the mode
+        :param tensor: The input.
+        :param batch_mask: Shape (...). Indicates whether memory can be updated. True means No.
+        :param previous_memory: The current memory state.
+        :return:
+            - The output.
+            - The next memory state.
+        """
+        # Perform the deep memory access pattern
+
+        update, next_memory = self.fast_memories(tensor, batch_mask, previous_memory)
+        tensor = self.deep_layernorm(tensor + self.dropout(update))
 
         # Perform the feedforward
         update = self.feedforward(tensor)
@@ -192,17 +320,19 @@ class RecurrentDecoder(nn.Module):
     You can fetch the old decoder layers feature, and use
     it to initialize a new recurrent decoder.
     """
+
     @property
-    def device(self)->torch.device:
+    def device(self) -> torch.device:
         return self._metainfo.device
 
     @property
-    def dtype(self)->torch.dtype:
+    def dtype(self) -> torch.dtype:
         return self._metainfo.dtype
+
     def __init__(self,
                  d_model: int,
                  dropout_rate: float,
-                 decoder_layers: List[DecoderLayer],
+                 decoder_layers: List[DeepDecoderLayer],
                  dtype: torch.dtype,
                  device: torch.device
                  ):
@@ -245,7 +375,7 @@ class RecurrentDecoder(nn.Module):
         return RecurrentDecoder(d_model, self.dropout_rate, self.decoder_layers,
                                 dtype=self.dtype, device=self.device)
 
-    def create_state(self, batch_shape: torch.Size) -> List[MemoryState]:
+    def create_state(self, batch_shape: torch.Size) -> List[DeepMemoryState]:
         """
         Sets up the recurrent state bound
         to a particular batch shape
@@ -261,8 +391,8 @@ class RecurrentDecoder(nn.Module):
     def reverse(self,
                 embedding: torch.Tensor,
                 batch_mask: torch.Tensor,
-                next_memories: List[MemoryState]
-                ) -> Tuple[Tuple[torch.Tensor, List[MemoryState]], List[MemoryState]]:
+                next_memories: List[DeepMemoryState]
+                ) -> Tuple[Tuple[torch.Tensor, List[DeepMemoryState]], List[DeepMemoryState]]:
         """
         Runs the reverse process. This means figuring out the
         previous memory states and setting them up for gradient
@@ -285,8 +415,8 @@ class RecurrentDecoder(nn.Module):
             # Bottleneck, process, and unbottleneck
             bottlenecked_embedding = bottleneck(embedding)
             (bottlenecked_embedding, next_memory), previous_memory = decoder_layer.reverse(bottlenecked_embedding,
-                                                                                              batch_mask,
-                                                                                              next_memory)
+                                                                                           batch_mask,
+                                                                                           next_memory)
 
             update = unbottleneck(bottlenecked_embedding)
 
@@ -301,8 +431,8 @@ class RecurrentDecoder(nn.Module):
     def forward(self,
                 embedding: torch.Tensor,
                 batch_mask: torch.Tensor,
-                previous_memories: List[MemoryState]
-                ) -> Tuple[torch.Tensor, List[MemoryState]]:
+                previous_memories: List[DeepMemoryState]
+                ) -> Tuple[torch.Tensor, List[DeepMemoryState]]:
         """
         The forward mechanism. Performs a forward pass through the model.
         This will usually occur without gradients.
@@ -334,6 +464,7 @@ def build_decoder(
         # Primary specifications
         d_model: int,
         num_layers: int,
+        decoder_flavor: str,
 
         # Helper specifics
         d_core: int,
@@ -366,6 +497,9 @@ def build_decoder(
     :param num_layers:
     - Number of transformer layers.
     - Each is a DecoderLayer
+    :param decoder_flavor:
+    - One of ("deep", "fast")
+    - Controls the kind of memory used.
     :param dropout_rate:
     - Dropout rate, within the primary recurrent model
     :param auxilary_dropout_rate:
@@ -402,21 +536,39 @@ def build_decoder(
     """
 
     # Create the decoder layer stack
-    layers = [
-        DecoderLayer(d_core,
-                     d_hidden,
-                     d_address,
-                     d_memory,
-                     num_read_heads,
-                     num_write_heads,
-                     num_memories,
-                     numeric_write_factor,
-                     auxilary_dropout_rate,
-                     device=device,
-                     dtype=dtype
-                     )
-        for _ in range(num_layers)
-    ]
+    if decoder_flavor == "deep":
+        layers = [
+            DeepDecoderLayer(d_core,
+                             d_hidden,
+                             d_address,
+                             d_memory,
+                             num_read_heads,
+                             num_write_heads,
+                             num_memories,
+                             numeric_write_factor,
+                             auxilary_dropout_rate,
+                             device=device,
+                             dtype=dtype
+                             )
+            for _ in range(num_layers)
+        ]
+    elif decoder_flavor == "fast":
+        layers = [
+            FastDecoderLayer(d_core,
+                             d_hidden,
+                             d_memory,
+                             num_read_heads,
+                             num_write_heads,
+                             num_memories,
+                             numeric_write_factor,
+                             auxilary_dropout_rate,
+                             device=device,
+                             dtype=dtype
+                             )
+            for _ in range(num_layers)
+        ]
+    else:
+        raise NotImplementedError(decoder_flavor)
 
     # Create and return the model
     return RecurrentDecoder(d_model, dropout_rate, layers, dtype=dtype, device=device)

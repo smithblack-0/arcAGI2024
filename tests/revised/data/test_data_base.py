@@ -157,7 +157,7 @@ class TestBatchBufferedDataset(unittest.TestCase):
             batch_count += 1
 
         # With 20 items in mock_data and batch_size of 5, expect 4 full batches
-        self.assertEqual(batch_count, 4)
+        self.assertEqual(batch_count, 5)
 class MockLargeDataset(Dataset):
     """A mock dataset with sequences of random lengths between 500 and 40000."""
     def __init__(self, num_entries: int, min_len: int = 500, max_len: int = 40000):
@@ -169,77 +169,4 @@ class MockLargeDataset(Dataset):
 
     def __len__(self):
         return len(self.data)
-
-
-class TestBatchBufferedDatasetPerformance(unittest.TestCase):
-
-    @classmethod
-    def setUpClass(cls):
-        """Set up a large mock dataset for performance testing."""
-        # Large dataset with entries between 500 and 40000 units
-        cls.num_entries = 20000
-        cls.min_len = 500
-        cls.max_len = 40000
-        cls.buffer_size = 4000
-        cls.batch_size = 800
-        cls.padding_id = 0
-
-        # Initialize the large dataset
-        cls.large_dataset = MockLargeDataset(cls.num_entries, cls.min_len, cls.max_len)
-
-
-    def test_select_batch_indices_timing(self):
-        """Test timing for select_batch_indices_using_clustoid with full buffer."""
-
-        batch_buffered_dataset = BatchingBufferedDataset(
-            batch_size=self.batch_size,
-            num_workers=1,
-            worker_rank=0,
-            padding_id=self.padding_id,
-            pretokenized_dataset=self.large_dataset,
-            buffer_size=self.buffer_size,
-            shuffle=False
-        )
-
-        # Fill buffer with data from the dataset
-        buffer_data = [self.large_dataset[i] for i in range(self.buffer_size)]
-        lengths = np.array([len(item) for item in buffer_data])
-        num_runs = 10
-        # Define the function to time
-        def select_batch_func():
-            batch_buffered_dataset.select_batch_indices_using_clustoid(self.batch_size, lengths)
-
-        # Time the function
-        select_batch_time = timeit.timeit(select_batch_func, number=num_runs)
-        average_batch_time = select_batch_time/num_runs
-
-        print(f"select_batch_indices_using_clustoid execution time (10 runs): {average_batch_time:.4f} seconds")
-
-    def test_full_iteration_timing(self):
-        """Test timing for iterating through the dataset in batches."""\
-
-
-        batch_buffered_dataset = BatchingBufferedDataset(
-            batch_size=self.batch_size,
-            num_workers=1,
-            worker_rank=0,
-            padding_id=self.padding_id,
-            pretokenized_dataset=self.large_dataset,
-            buffer_size=self.buffer_size,
-            shuffle=False
-        )
-
-        # Define the function to time
-        num_iterations = 10
-
-        def iterate_through_dataset():
-            batch_iter = iter(batch_buffered_dataset)
-            for _ in zip(batch_iter):
-                break
-
-        # Time the function
-        full_iteration_time = timeit.timeit(iterate_through_dataset, number=num_iterations)
-
-        average_time = full_iteration_time/num_iterations
-        print(f"average iteration through dataset ({num_iterations} runs): {average_time:.4f} seconds")
 

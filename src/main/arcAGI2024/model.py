@@ -20,7 +20,7 @@ from torch.nn import functional as F
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
 
-from .decoder import RecurrentDecoder, MemoryState, build_decoder
+from .decoder import RecurrentDecoder, DeepMemoryState, build_decoder
 from .vocabulary import Vocabulary, AdditionalSpecialTokens
 from .base import (get_rng_state, set_rng_state, parallel_pytree_map,
                    DeviceDtypeWatch, GradientSubstitutionEndpoint, TensorTree)
@@ -43,6 +43,9 @@ class CoreConfig:
     - Dropout rate, within the primary recurrent model
     :param sublayers_dropout_rate:
     - Dropout rate, within sublayers rather than the core proces.
+    :param decoder_flavor:
+    - What kind of decoder to use.
+    - Can currently use "fast" or "deep".
 
     --- DecoderLayer Parameters
     Everything here is occurring with respect to d_core.
@@ -56,6 +59,7 @@ class CoreConfig:
     :param d_address:
     - A smaller subset of d_core. Can be anything.
     - Represents the width of the attn memory addresses.
+    - Not used when decoder flavor is fast.
     :param d_memory:
     - Represents the width of the memory value addresses.
     - Can be different.
@@ -74,6 +78,7 @@ class CoreConfig:
       some fidelity.
 
     ---- final ---
+    :param numeric_write_factor: The factor that controls the maximum commitment to writing the model can make
     :param dtype: The dtype
     :param device: The device
     :return: A setup RecurrentDecoder
@@ -83,6 +88,7 @@ class CoreConfig:
     num_read_heads: int
     num_write_heads: int
     num_memories: int
+    decoder_flavor: str
 
     # Helper specifics
 
@@ -178,12 +184,13 @@ class CausalLMCore(nn.Module):
         if config.device is None:
             config.device = torch.device("cpu")
         if config.numeric_write_factor is None:
-            config.numeric_write_factor = 0.9
+            config.numeric_write_factor = 0.999
 
         # Setup the model for training
         decoder = build_decoder(
             d_model,
             config.num_layers,
+            config.decoder_flavor,
             config.d_core,
             config.d_hidden,
             config.d_address,
@@ -310,7 +317,7 @@ class AbstractTrainerCore(nn.Module, ABC):
         """
 
     @abstractmethod
-    def create_state(self, batch_shape: torch.Size) -> List[MemoryState]:
+    def create_state(self, batch_shape: torch.Size) -> List[DeepMemoryState]:
         """
         Sets up the recurrent state bound
         to a particular batch shape
@@ -323,8 +330,8 @@ class AbstractTrainerCore(nn.Module, ABC):
     def reverse(self,
                 embedding: torch.Tensor,
                 batch_mask: torch.Tensor,
-                next_memories: List[MemoryState]
-                ) -> Tuple[Tuple[torch.Tensor, List[MemoryState]], List[MemoryState]]:
+                next_memories: List[DeepMemoryState]
+                ) -> Tuple[Tuple[torch.Tensor, List[DeepMemoryState]], List[DeepMemoryState]]:
         """
         Runs the reverse process. This means figuring out the
         previous memory states and setting them up for gradient
@@ -344,8 +351,8 @@ class AbstractTrainerCore(nn.Module, ABC):
     def forward(self,
                 embedding: torch.Tensor,
                 batch_mask: torch.Tensor,
-                previous_memories: List[MemoryState]
-                ) -> Tuple[torch.Tensor, List[MemoryState]]:
+                previous_memories: List[DeepMemoryState]
+                ) -> Tuple[torch.Tensor, List[DeepMemoryState]]:
         """
         The forward mechanism. Performs a forward pass through the model.
         This will usually occur without gradients.
@@ -390,7 +397,7 @@ class StandardTrainerCore(AbstractTrainerCore):
         """
         return self.core.vocabulary.logit_projector(embedding)
 
-    def create_state(self, batch_shape: torch.Size) -> List[MemoryState]:
+    def create_state(self, batch_shape: torch.Size) -> List[DeepMemoryState]:
         """
         Sets up the recurrent state bound
         to a particular batch shape
@@ -403,8 +410,8 @@ class StandardTrainerCore(AbstractTrainerCore):
     def reverse(self,
                 embedding: torch.Tensor,
                 batch_mask: torch.Tensor,
-                next_memories: List[MemoryState]
-                ) -> Tuple[Tuple[torch.Tensor, List[MemoryState]], List[MemoryState]]:
+                next_memories: List[DeepMemoryState]
+                ) -> Tuple[Tuple[torch.Tensor, List[DeepMemoryState]], List[DeepMemoryState]]:
         """
         Runs the reverse process. This means figuring out the
         previous memory states and setting them up for gradient
@@ -424,8 +431,8 @@ class StandardTrainerCore(AbstractTrainerCore):
     def forward(self,
                 embedding: torch.Tensor,
                 batch_mask: torch.Tensor,
-                previous_memories: List[MemoryState]
-                ) -> Tuple[torch.Tensor, List[MemoryState]]:
+                previous_memories: List[DeepMemoryState]
+                ) -> Tuple[torch.Tensor, List[DeepMemoryState]]:
         """
         The forward mechanism. Performs a forward pass through the model.
         This will usually occur without gradients.
@@ -719,7 +726,7 @@ class CausalLMTrainer(nn.Module):
                          targets: torch.Tensor,
                          batch_mask: torch.Tensor,
                          main_schedule: float,
-                         memories: List[MemoryState],
+                         memories: List[DeepMemoryState],
                          logger: Logger,
                          ) -> Dict[str, Any]:
         """
@@ -826,7 +833,7 @@ class CausalLMTrainer(nn.Module):
                            access_schedule: Optional[float],
                            cache_dict: Dict[str, Any],
                            device: torch.device,
-                           ) -> Tuple[List[MemoryState], torch.Tensor]:
+                           ) -> Tuple[List[DeepMemoryState], torch.Tensor]:
         """
         Sets up state to be used in the reverse pass.
 
@@ -843,7 +850,7 @@ class CausalLMTrainer(nn.Module):
         """
         with profiler.record_function("train_step: Setup for reverse pass"):
             start_time = time.time()
-            memory_state: List[MemoryState] = cache_dict["memories"]
+            memory_state: List[DeepMemoryState] = cache_dict["memories"]
 
             # Make a copy pf the final rng state,
             # to restore it later. Also copy the final memories
@@ -917,7 +924,7 @@ class CausalLMTrainer(nn.Module):
                                   logger)
               as progress):
             # Setup states, and grad cache containers
-            memories: List[MemoryState] = cache_dict["memories"]
+            memories: List[DeepMemoryState] = cache_dict["memories"]
             loss_metric = cache_dict["reverse_loss"].clone().detach()
 
             def get_mem_grads(tensor: torch.Tensor) -> torch.Tensor:
@@ -1071,9 +1078,9 @@ class CausalLMTrainer(nn.Module):
              targets: torch.Tensor,
              batch_mask: torch.Tensor,
              logger: Logger,
-             memories: Optional[List[MemoryState]] = None,
+             memories: Optional[List[DeepMemoryState]] = None,
              scheduling_rates: Optional[Tuple[float, float]] = None,
-             ) -> List[MemoryState]:
+             ) -> List[DeepMemoryState]:
         """
         Performs a single training step. This consists of
         embedding, going through the forward pass, and accumulating
@@ -1229,8 +1236,8 @@ class CausalLMGenerator(nn.Module):
     def read_prompt(self,
                     tokens: torch.Tensor,
                     batch_mask: torch.Tensor,
-                    memories: List[MemoryState],
-                    ) -> List[MemoryState]:
+                    memories: List[DeepMemoryState],
+                    ) -> List[DeepMemoryState]:
         """
         Reads the prompt into the memory state,
         then returns the new state.
@@ -1249,8 +1256,8 @@ class CausalLMGenerator(nn.Module):
                           batch_width: int,
                           max_generated_tokens: int,
                           temperature: float,
-                          memories: List[MemoryState],
-                          ) -> Tuple[torch.Tensor, List[MemoryState]]:
+                          memories: List[DeepMemoryState],
+                          ) -> Tuple[torch.Tensor, List[DeepMemoryState]]:
         """
         Generates a response based on the given memory collection,
         by priming the model into the response mode.
@@ -1313,8 +1320,8 @@ class CausalLMGenerator(nn.Module):
                 text: Union[str, List[str]],
                 temperature: float = 1.0,
                 max_gen_tokens: int = 10000,
-                memories: Optional[List[MemoryState]] = None,
-                ) -> Tuple[Union[str, List[str]], List[MemoryState]]:
+                memories: Optional[List[DeepMemoryState]] = None,
+                ) -> Tuple[Union[str, List[str]], List[DeepMemoryState]]:
         """
         Performs the generation action. This consists of reading
         in any additional context, then predicting the next token

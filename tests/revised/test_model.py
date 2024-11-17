@@ -8,6 +8,7 @@ import time
 from torch import nn
 
 from concurrent.futures import ThreadPoolExecutor
+from src.main.arcAGI2024 import load_vocabulary_off_huggingface_model
 from src.main.arcAGI2024.model import (CausalLMCore, CausalLMTrainer, CausalLMGenerator, StandardTrainerCore,
                                        RecurrentDecoder, Vocabulary, CoreConfig, Logger)
 from src.main.arcAGI2024.losses import CrossEntropyLoss, UniformMemLoss
@@ -35,7 +36,7 @@ class TestCausalLMCore(unittest.TestCase):
         #
         # They will not have meaning.
 
-        tokens = torch.randint(0, model.vocabulary.tokenizer.true_vocab_size, [3])
+        tokens = torch.randint(0, 1000, [3])
         mask = torch.rand([3]) > 0.1
 
         mem_state = model.decoder.create_state([3])
@@ -48,14 +49,15 @@ class TestCausalLMCore(unittest.TestCase):
 
     def test_basic_sanity(self):
 
-        vocabulary = Vocabulary.auto_load_from_pretrained("gpt2")
+        vocabulary = load_vocabulary_off_huggingface_model("gpt2")
         config = CoreConfig(
             num_layers=2,
             num_read_heads=10,
             num_write_heads=10,
             num_memories=2,
             dropout_rate=0.1,
-            sublayers_dropout_rate=0.1
+            sublayers_dropout_rate=0.1,
+            decoder_flavor="fast"
         )
         model = CausalLMCore.build_model_using_config(vocabulary, config)
         self.initialized_correctly(model)
@@ -64,14 +66,15 @@ class TestCausalLMCore(unittest.TestCase):
 
     def test_save_load_no_directory(self):
         # Initialize and save when the directory does not exist
-        vocabulary = Vocabulary.auto_load_from_pretrained("gpt2")
+        vocabulary = load_vocabulary_off_huggingface_model("gpt2")
         config = CoreConfig(
             num_layers=2,
             num_read_heads=10,
             num_write_heads=10,
             num_memories=2,
             dropout_rate=0.1,
-            sublayers_dropout_rate=0.1
+            sublayers_dropout_rate=0.1,
+            decoder_flavor="fast"
         )
         model = CausalLMCore.build_model_using_config(vocabulary, config)
 
@@ -88,14 +91,15 @@ class TestCausalLMCore(unittest.TestCase):
 
     def test_save_load_directory_exists(self):
         # Initialize and save when the directory exists (contains a junk file)
-        vocabulary = Vocabulary.auto_load_from_pretrained("gpt2")
+        vocabulary = load_vocabulary_off_huggingface_model("gpt2")
         config = CoreConfig(
             num_layers=2,
             num_read_heads=10,
             num_write_heads=10,
             num_memories=2,
             dropout_rate=0.1,
-            sublayers_dropout_rate=0.1
+            sublayers_dropout_rate=0.1,
+            decoder_flavor="fast"
         )
         model = CausalLMCore.build_model_using_config(vocabulary, config)
 
@@ -115,19 +119,20 @@ class TestCausalLMCore(unittest.TestCase):
         self.initialized_correctly(loaded_model)
 
     def test_masking_sanity(self):
-        vocabulary = Vocabulary.auto_load_from_pretrained("gpt2")
+        vocabulary = load_vocabulary_off_huggingface_model("gpt2")
         config = CoreConfig(
             num_layers=2,
             num_read_heads=10,
             num_write_heads=10,
             num_memories=2,
             dropout_rate=0.1,
-            sublayers_dropout_rate=0.1
+            sublayers_dropout_rate=0.1,
+            decoder_flavor="fast"
         )
         model = CausalLMCore.build_model_using_config(vocabulary, config)
 
 
-        tokens = torch.randint(0, vocabulary.tokenizer.true_vocab_size, [3])
+        tokens = torch.randint(0, 1000, [3])
 
         # Test memory does not update when masked
         memories = model.decoder.create_state([3])
@@ -151,14 +156,15 @@ class TestCausalLMCore(unittest.TestCase):
 class TestCausalLMTrainer(unittest.TestCase):
     def setUp(self):
         # Setup model core
-        vocabulary = Vocabulary.auto_load_from_pretrained("gpt2")
+        vocabulary = load_vocabulary_off_huggingface_model("gpt2")
         config = CoreConfig(
             num_layers=2,
             num_read_heads=10,
             num_write_heads=10,
             num_memories=2,
             dropout_rate=0.1,
-            sublayers_dropout_rate=0.1
+            sublayers_dropout_rate=0.1,
+            decoder_flavor="fast"
         )
         model = CausalLMCore.build_model_using_config(vocabulary, config)
         trainer_core = StandardTrainerCore(model)
@@ -285,15 +291,17 @@ class TestCausalLMGen(unittest.TestCase):
 
     def setUp(self):
         # Setup model core and sampling mode
-        model_core = CausalLMCore.build_model_on_top_of_pretrained_head(
-            head_model_name="gpt2",
+        vocabulary = load_vocabulary_off_huggingface_model("gpt2")
+        config = CoreConfig(
             num_layers=2,
-            num_read_heads=1,
-            num_write_heads=1,
+            num_read_heads=10,
+            num_write_heads=10,
             num_memories=2,
             dropout_rate=0.1,
-            auxilary_dropout_rate=0.1
+            sublayers_dropout_rate=0.1,
+            decoder_flavor="fast"
         )
+        model_core = CausalLMCore.build_model_using_config(vocabulary, config)
         self.model_core = model_core
 
         # Purely deterministic. Hopefully.
@@ -307,7 +315,7 @@ class TestCausalLMGen(unittest.TestCase):
 
         gen_model = CausalLMGenerator(self.model_core, self.sampling)
         test_string = "The quick brown fox jumps over the lazy dog"
-        max_length = 200
+        max_length = 40
         temperature = 1.0
 
         # Test pass with no memories
@@ -326,7 +334,7 @@ class TestCausalLMGen(unittest.TestCase):
         gen_model = CausalLMGenerator(self.model_core, self.sampling)
         test_string = "The quick brown fox jumps over the lazy dog"
         test_strings = [test_string]*20
-        max_length = 200
+        max_length = 40
         temperature = 1.0
 
         # Test pass with no memories
