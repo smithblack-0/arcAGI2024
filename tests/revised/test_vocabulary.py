@@ -3,7 +3,8 @@ import os
 import shutil
 import torch
 from transformers import AutoTokenizer
-from src.main.arcAGI2024.vocabulary import VocabularyStruct, SpecialTokens, AdditionalSpecialTokens
+from src.main.arcAGI2024.vocabulary import (Vocabulary, SpecialTokens, AdditionalSpecialTokens,
+                                            load_vocabulary_off_huggingface_model)
 
 
 class TestVocabularyStruct(unittest.TestCase):
@@ -56,17 +57,18 @@ class TestVocabularyStruct(unittest.TestCase):
 
     def test_basic_sanity(self):
         """Test basic initialization and validation with a model."""
-        vocab = VocabularyStruct.auto_load_from_pretrained(self.MODEL_NAME)
+
+        vocab = load_vocabulary_off_huggingface_model(self.MODEL_NAME)
         self.is_correct_initialize(vocab)
 
     def test_save_load(self):
         """Test saving and loading the vocabulary."""
         # Initialize and save vocabulary
-        vocab = VocabularyStruct.auto_load_from_pretrained(self.MODEL_NAME)
+        vocab = load_vocabulary_off_huggingface_model(self.MODEL_NAME)
         vocab.save_pretrained_vocabulary(self.TEST_DIR)
 
         # Load vocabulary
-        loaded_vocab = VocabularyStruct.load_pretrained_vocabulary(self.TEST_DIR)
+        loaded_vocab = Vocabulary.load_pretrained_vocabulary(self.TEST_DIR)
 
         # Run initialization checks on loaded vocabulary
         self.is_correct_initialize(loaded_vocab)

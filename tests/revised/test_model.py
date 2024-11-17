@@ -9,7 +9,7 @@ from torch import nn
 
 from concurrent.futures import ThreadPoolExecutor
 from src.main.arcAGI2024.model import (CausalLMCore, CausalLMTrainer, CausalLMGenerator, StandardTrainerCore,
-                                       RecurrentDecoder, VocabularyStruct, CoreConfig, Logger)
+                                       RecurrentDecoder, Vocabulary, CoreConfig, Logger)
 from src.main.arcAGI2024.losses import CrossEntropyLoss, UniformMemLoss
 from src.main.arcAGI2024.base import parallel_pytree_map
 from src.main.arcAGI2024.sampling import TopLogitSampling
@@ -48,7 +48,7 @@ class TestCausalLMCore(unittest.TestCase):
 
     def test_basic_sanity(self):
 
-        vocabulary = VocabularyStruct.auto_load_from_pretrained("gpt2")
+        vocabulary = Vocabulary.auto_load_from_pretrained("gpt2")
         config = CoreConfig(
             num_layers=2,
             num_read_heads=10,
@@ -64,7 +64,7 @@ class TestCausalLMCore(unittest.TestCase):
 
     def test_save_load_no_directory(self):
         # Initialize and save when the directory does not exist
-        vocabulary = VocabularyStruct.auto_load_from_pretrained("gpt2")
+        vocabulary = Vocabulary.auto_load_from_pretrained("gpt2")
         config = CoreConfig(
             num_layers=2,
             num_read_heads=10,
@@ -88,7 +88,7 @@ class TestCausalLMCore(unittest.TestCase):
 
     def test_save_load_directory_exists(self):
         # Initialize and save when the directory exists (contains a junk file)
-        vocabulary = VocabularyStruct.auto_load_from_pretrained("gpt2")
+        vocabulary = Vocabulary.auto_load_from_pretrained("gpt2")
         config = CoreConfig(
             num_layers=2,
             num_read_heads=10,
@@ -115,7 +115,7 @@ class TestCausalLMCore(unittest.TestCase):
         self.initialized_correctly(loaded_model)
 
     def test_masking_sanity(self):
-        vocabulary = VocabularyStruct.auto_load_from_pretrained("gpt2")
+        vocabulary = Vocabulary.auto_load_from_pretrained("gpt2")
         config = CoreConfig(
             num_layers=2,
             num_read_heads=10,
@@ -151,7 +151,7 @@ class TestCausalLMCore(unittest.TestCase):
 class TestCausalLMTrainer(unittest.TestCase):
     def setUp(self):
         # Setup model core
-        vocabulary = VocabularyStruct.auto_load_from_pretrained("gpt2")
+        vocabulary = Vocabulary.auto_load_from_pretrained("gpt2")
         config = CoreConfig(
             num_layers=2,
             num_read_heads=10,

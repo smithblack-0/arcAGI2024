@@ -47,6 +47,7 @@ class BatchCollectiveReductiveGradNorm:
         self.rescale_threshold = rescale_threshold
         self.reduction_mode = reduction_mode
         self.verbose = verbose
+        self.warned = False
 
     def collect_gradients(self,
                           grads: torch.Tensor,
@@ -63,6 +64,8 @@ class BatchCollectiveReductiveGradNorm:
         grads = grads.flatten(self.num_batch_dims, -1)
         accumulator.append(grads)
 
+    def reset_warning(self):
+        self.warned = False
     @staticmethod
     def rescale_gradients(grads: torch.Tensor, rescale_factor: torch.Tensor) -> torch.Tensor:
         """
@@ -200,8 +203,6 @@ class BatchCollectiveQuantileClipping:
 
         threshold = observed_grads * self.clip_factor
         threshold = threshold.clip(min=self.protection_threshold)
-        if self.verbose:
-            print(threshold)
 
         # Perform any required clipping.
         clip_gradients = functools.partial(self.clip_gradients, clip_threshold=threshold)
@@ -263,6 +264,9 @@ class AutorescaleGradientControl(AbstractGradientControl):
         super().__init__()
         self.rescaling = BatchCollectiveReductiveGradNorm(num_batch_dims, rescale_threshold, rescale_reduction_mode)
         self.clipper = GradClip(clip_factor*rescale_threshold)
+
+    def reset_warning(self):
+        self.rescaling.reset_warning()
     def forward(self, gradient_tree: TensorTree) -> TensorTree:
         """
         Runs the actual gradient control process.

@@ -3,8 +3,9 @@ import torch
 from torch.nn import functional as F
 from torch.utils import data
 from torch.utils.data import Dataset, IterableDataset
-from typing import Iterable, List
+from typing import Iterable, List, Callable, Any
 from collections.abc import Sized
+
 
 class NumpyBufferedStream:
     """
@@ -74,11 +75,12 @@ class NumpyBufferedStream:
         self.buffer_size = buffer_size
         self.refill_buffer()
 
-class BatchingBufferedDataset(data.IterableDataset):
+
+class BufferedBatchSampler(data.Sampler):
     """
-    An important prefetching and dataset tool.
-    This class will finish tokenization, pad, and
-    minimize necessary padding using prefetching.
+    A Buffered batch sampler, responsible
+    for sampling from an entire batch with
+    a buffer for like sized collating
     """
 
     @staticmethod
@@ -102,55 +104,73 @@ class BatchingBufferedDataset(data.IterableDataset):
 
         return indexes[best_centroid_index]
 
-    def pad_sequence(self, sequence: List[int], max_length: int) -> List[int]:
-        """
-        Pads a sequence to the specified max_length with zeros.
-
-        :param sequence: The sequence to be padded.
-        :param max_length: The desired length after padding.
-        :return: The padded sequence.
-        """
-        sequence = torch.tensor(sequence, dtype=torch.int64)
-        padding_length = max_length - len(sequence)
-        return F.pad(sequence, (0, padding_length))
     def __init__(self,
                  batch_size: int,
-                 num_workers: int,
-                 worker_rank: int,
-                 padding_id: int,
-                 pretokenized_dataset: Dataset,
-                 buffer_size: int = 10000,
-                 shuffle: bool = True):
-
-        sampler = data.DistributedSampler(pretokenized_dataset,
-                                          num_replicas=num_workers,
-                                          rank=worker_rank,
-                                          shuffle=shuffle)
-
-        self.unbatched_loader = data.DataLoader(pretokenized_dataset,
-                                                shuffle=False,
-                                                collate_fn=lambda x : x,
-                                                batch_size=batch_size,
-                                                sampler=sampler,
-                                                )
-
-        self.padding_id = padding_id
+                 stream_head: data.DataLoader,
+                 num_batches_in_buffer: int = 20,
+                 ):
+        super().__init__(stream_head)
+        self.buffer_stream_head = stream_head
+        self.buffer_size = batch_size * num_batches_in_buffer
         self.batch_size = batch_size
-        self.buffer_size = buffer_size
+
+    def __len__(self) -> int:
+        return len(self.buffer_stream_head)
 
     def __iter__(self):
-        unbatched_tokens_buffer = NumpyBufferedStream(self.unbatched_loader, self.buffer_size)
-        while not unbatched_tokens_buffer.is_buffer_empty():
+        buffer = NumpyBufferedStream(self.buffer_stream_head, self.buffer_size)
+        while not buffer.is_buffer_empty():
             # Get lengths for clustering
-            lengths = unbatched_tokens_buffer.get_lengths()
+            lengths = buffer.get_lengths()
             batch_indices = self.select_batch_indices_using_clustoid(self.batch_size, lengths)
 
             # Create the batch by popping selected items from the buffer
-            batch = unbatched_tokens_buffer.pop(batch_indices)
+            batch = buffer.pop(batch_indices)
+            yield batch
 
-            # Pad the batch to make all sequences of equal length
-            max_length = max(len(tokenized_text) for tokenized_text in batch)
-            padded_tensors = [self.pad_sequence(tokenized_text, max_length) for tokenized_text in batch]
-            batched_tensors = torch.stack(padded_tensors, dim=0)
-            yield batched_tensors
+
+def make_buffered_pipeline(batch_size: int,
+                           num_workers: int,
+                           worker_rank: int,
+                           collate_fn: Callable[[Any], torch.Tensor],
+                           pretokenized_dataset: Dataset,
+                           num_batches_in_buffer: int = 20,
+                           shuffle: bool = True,
+                           num_prefetch_threads: int = 4,
+                           prefetch_factor: int = 2
+                           ) -> data.DataLoader:
+    """
+    Creates a distributed buffered dataloader out of the
+    given parameters including a pretokenized dataset
+    returns: A setup dataloader.
+    """
+
+    # Create the primary loader. This will be responsible
+    # for shuffling and accommodation of distribute processes,
+    # and getting data off the hard drive.
+    distributed_sampler = data.DistributedSampler(pretokenized_dataset,
+                                                  num_replicas=num_workers,
+                                                  rank=worker_rank,
+                                                  shuffle=shuffle)
+
+    stream_loader = data.DataLoader(pretokenized_dataset,
+                                    batch_size=batch_size,
+                                    shuffle=False,
+                                    collate_fn=lambda x : x,
+                                    sampler=distributed_sampler)
+
+    # Create the buffered loader. This will accept the primary
+    # loader, and loads a certain number of the cases that it
+    # keeps in a buffer. It chooses to batch cases that
+    # have similar lengths
+
+    batch_sampler = BufferedBatchSampler(batch_size, stream_loader, num_batches_in_buffer)
+
+    return data.DataLoader(pretokenized_dataset,
+                           batch_sampler=batch_sampler,
+                           num_workers=num_prefetch_threads,
+                           prefetch_factor=prefetch_factor,
+                           collate_fn=collate_fn,
+                           pin_memory=True)
+
 

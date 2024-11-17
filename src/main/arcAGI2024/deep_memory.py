@@ -407,7 +407,7 @@ class WriteMemory(nn.Module):
         # Create the probability projectors and interpolation logits
         self.interpolation_logits = initialize_based_on_half_lives([num_memories, d_address],
                                                                    1,
-                                                                   60)
+                                                                   10)
         self.write_logits = nn.Linear(d_address, 1, dtype=dtype, device=device)
         self.dropout_logits = DropoutLogits(dropout_rate)
 
@@ -426,7 +426,6 @@ class WriteMemory(nn.Module):
         while batch_mask.dim() < masked_case.dim():
             batch_mask = batch_mask.unsqueeze(-1)
         return torch.where(batch_mask, masked_case, update_case)
-
 
     def compute_common(self,
                        key: torch.Tensor,
@@ -509,8 +508,8 @@ class WriteMemory(nn.Module):
         matrix_update, normalizer_update = update
 
         # Run the inverse of the original update factor.
-        normalizer = (next_normalizer  - normalizer_update * write_factor)/(1 - write_factor)
-        matrix = (next_matrix  - matrix_update * write_factor.unsqueeze(-1))/(1 - write_factor.unsqueeze(-1))
+        normalizer = (next_normalizer - normalizer_update * write_factor)/(1 - write_factor)
+        matrix = (next_matrix - matrix_update * write_factor.unsqueeze(-1))/(1 - write_factor.unsqueeze(-1))
         cum_prob = next_cum_prob - write_factor.mean(dim=-1)
 
         # Mask out anything that was not able to be updated

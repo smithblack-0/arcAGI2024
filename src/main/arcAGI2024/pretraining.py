@@ -39,13 +39,32 @@ except ImportError:
 @dataclass
 class TrainingConfig:
     """
-    A central dataclass that can hold all
-    the dynamic features needed in order
-    to properly setup and run a training
-    instance.
+    A central dataclass that holds all the dynamic features needed to
+    properly set up and run a training instance.
+
+    Fields:
+    --------
+    loader_factories: Callable[[int], Dict[str, data.DataLoader]]
+        A function that produces data loaders for training and validation,
+        keyed by dataset names. Takes the worker num as input
+    training_run_prefix: str
+        Prefix for naming or identifying this training run.
+    metrics_logging_directory: str
+        Directory where metrics logs will be saved.
+    checkpoint_save_directory: str
+        Directory where model checkpoints will be saved.
+    checkpoint_batch_frequency: int
+        Frequency (in batches) at which checkpoints are saved.
+    num_workers: int
+        Number of workers used for data loading.
+    num_epochs: int
+        Total number of epochs for the training run.
+    epoch_position: Optional[int]
+        Current epoch position in the training process. Useful for resuming
+        from checkpoints. Defaults to None if starting from the beginning.
     """
     # Data sources
-    pretokenized_datasets: DatasetDict
+    loader_factories: Callable[[int], Dict[str, data.DataLoader]]
 
     # Training and logging niceties
     training_run_prefix: str
@@ -55,7 +74,6 @@ class TrainingConfig:
 
     # Important features
     num_workers: int
-    truncate_length: int
     num_epochs: int
     epoch_position: Optional[int] = None
 
@@ -448,7 +466,6 @@ def run_test_epoch(
 
 def run_training_process(worker_num: int,
                          training_configs: List[TrainingConfig],
-
                          model_factory: Callable[[torch.device], Tuple[CausalLMCore, CausalLMTrainer]],
                          optim_factory: Callable[[nn.Module], torch.optim.Optimizer],
                          schedule_factory: Callable[[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LRScheduler]],
@@ -468,7 +485,7 @@ def run_training_process(worker_num: int,
     device = torch.device(f"cuda:{worker_num}" if torch.cuda.is_available() else "cpu")
     core, trainer = model_factory(device)
     optim = optim_factory(trainer)
-    checkpointing = CheckpointProcess(training_configs)
+    checkpointing = CheckpointProcess(core, training_configs)
     schedule = schedule_factory(optim)
     epoch_num = training_configs[0].epoch_position
     num_workers = training_configs[0].num_workers
@@ -496,11 +513,7 @@ def run_training_process(worker_num: int,
             )
 
             # Create the dataloaders
-            loaders = create_dataloaders(worker_num,
-                                         training_config.num_workers,
-                                         core.vocabulary.tokenizer,
-                                         training_config.pretokenized_datasets
-                                         )
+            loaders = training_config.loader_factories(worker_num)
 
 
             for _ in range(training_config.num_epochs):

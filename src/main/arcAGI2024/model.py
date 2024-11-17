@@ -21,7 +21,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
 
 from .decoder import RecurrentDecoder, MemoryState, build_decoder
-from .vocabulary import VocabularyStruct, AdditionalSpecialTokens
+from .vocabulary import Vocabulary, AdditionalSpecialTokens
 from .base import (get_rng_state, set_rng_state, parallel_pytree_map,
                    DeviceDtypeWatch, GradientSubstitutionEndpoint, TensorTree)
 from .losses import MainLossInterface, MemAccessLossInterface
@@ -149,7 +149,7 @@ class CausalLMCore(nn.Module):
 
     @classmethod
     def build_model_using_config(cls,
-                                 vocabulary: VocabularyStruct,
+                                 vocabulary: Vocabulary,
                                  config: CoreConfig
                                  ) -> 'CausalLMCore':
         """
@@ -201,7 +201,7 @@ class CausalLMCore(nn.Module):
         # Return instance
         return cls(vocabulary, decoder, config)
 
-    def rebase_model_onto_vocabulary(self, vocabulary: VocabularyStruct) -> 'CausalLMCore':
+    def rebase_model_onto_vocabulary(self, vocabulary: Vocabulary) -> 'CausalLMCore':
         """
         Rebases the model to interface with a different vocabulary struct.
         Note this will require fine tuning or even pretraining a bit.
@@ -247,7 +247,7 @@ class CausalLMCore(nn.Module):
             dtype = torch.float32
 
         decoder = torch.load(os.path.join(directory, "decoder.pt"))
-        vocabulary = VocabularyStruct.load_pretrained_vocabulary(directory)
+        vocabulary = Vocabulary.load_pretrained_vocabulary(directory)
 
         decoder = decoder.to(dtype=dtype, device=device)
         vocabulary = vocabulary.to(dtype=dtype, device=device)
@@ -256,7 +256,7 @@ class CausalLMCore(nn.Module):
         return cls(vocabulary, decoder, config)
 
     def __init__(self,
-                 vocabulary: VocabularyStruct,
+                 vocabulary: Vocabulary,
                  decoder: RecurrentDecoder,
                  config: CoreConfig,
                  device: Optional[torch.device] = None,
@@ -265,7 +265,7 @@ class CausalLMCore(nn.Module):
         super().__init__()
         assert decoder.d_model == vocabulary.d_model, "Decoder and vocabularies had different widths."
         self._metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
-        self.vocabulary: VocabularyStruct = vocabulary.to(device=device, dtype=dtype)
+        self.vocabulary: Vocabulary = vocabulary.to(device=device, dtype=dtype)
         self.decoder: RecurrentDecoder = decoder.to(device=device, dtype=dtype)
         self.config = config
 

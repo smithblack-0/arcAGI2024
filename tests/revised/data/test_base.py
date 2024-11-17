@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import timeit
 from typing import List, Iterable
-from src.main.arcAGI2024.data.base import NumpyBufferedStream, BatchingBufferedDataset
+from src.main.arcAGI2024.data.base import NumpyBufferedStream, make_buffered_pipeline, BufferedBatchSampler
 from torch.utils.data import Dataset
 class TestNumpyBufferedStream(unittest.TestCase):
 
@@ -84,10 +84,21 @@ class MockDataset(Dataset):
         self.data = data
 
     def __getitem__(self, index):
-        return self.data[index]
+
+        if isinstance(index, list):
+            output = []
+            for item in index:
+                output.append(self.data[item])
+        else:
+            return self.data[index]
+
+        return output
 
     def __len__(self):
         return len(self.data)
+
+def collate_passthrough(x):
+    return x
 class TestBatchBufferedDataset(unittest.TestCase):
 
     def setUp(self):
@@ -98,28 +109,22 @@ class TestBatchBufferedDataset(unittest.TestCase):
         self.padding_id = 0
         self.buffer_size = 10
         self.batch_size = 5
-
         # Create an instance of BatchBufferedDataset
-        self.batch_buffered_dataset = BatchingBufferedDataset(
-            batch_size=self.batch_size,
-            num_workers=1,
-            worker_rank=0,
-            padding_id=self.padding_id,
-            pretokenized_dataset=self.dataset,
-            buffer_size=self.buffer_size,
-            shuffle=False
-        )
 
-    def test_initialization(self):
-        """Test if BatchBufferedDataset initializes correctly with proper settings."""
-        self.assertEqual(self.batch_buffered_dataset.batch_size, self.batch_size)
-        self.assertEqual(self.batch_buffered_dataset.padding_id, self.padding_id)
-        self.assertEqual(self.batch_buffered_dataset.buffer_size, self.buffer_size)
+        data = [[i for i in range(j)] for j in range(1,24)]
+        self.dataset = MockDataset(data)
 
+    def make_loader(self):
+        return make_buffered_pipeline(self.batch_size,
+                                      num_workers=1,
+                                      worker_rank=0,
+                                      pretokenized_dataset=self.dataset,
+                                      collate_fn=collate_passthrough
+                                      )
     def test_select_batch_indices_using_clustoid(self):
         """Test the selection of batch indices based on clustering."""
         lengths = np.array([len(item) for item in self.mock_data[:self.buffer_size]])
-        batch_indices = self.batch_buffered_dataset.select_batch_indices_using_clustoid(self.batch_size, lengths)
+        batch_indices = BufferedBatchSampler.select_batch_indices_using_clustoid(self.batch_size, lengths)
 
         # Check if correct number of indices is returned
         self.assertEqual(len(batch_indices), self.batch_size)
@@ -127,37 +132,24 @@ class TestBatchBufferedDataset(unittest.TestCase):
         # Check if the indices are within the bounds of the buffer
         self.assertTrue(all(0 <= idx < self.buffer_size for idx in batch_indices))
 
-    def test_pad_sequence(self):
-        """Test if pad_sequence correctly pads sequences to the specified max length."""
-        sequence = [1, 2, 3]
-        max_length = 5
-        padded_sequence = self.batch_buffered_dataset.pad_sequence(sequence, max_length)
-
-        # Check if the sequence is padded to the max length
-        self.assertEqual(len(padded_sequence), max_length)
-
-        # Check if padding was added correctly with the padding_id
-        self. assertTrue(torch.all(padded_sequence[-2:] == torch.tensor([self.padding_id, self.padding_id])))
-
     def test_iter_batches(self):
         """Test the batching, padding, and yielding of batches from the dataset."""
-        batch_iter = iter(self.batch_buffered_dataset)
+
+        loader = self.make_loader()
+        batch_iter = iter(loader)
 
         for _ in range(4):  # Assuming 20 items in mock_data / batch_size = 4 batches
             batch = next(batch_iter)
 
             # Check if the batch is of the correct shape
-            self.assertEqual(batch.shape[0], self.batch_size)
+            self.assertEqual(len(batch), self.batch_size)
 
-            # Ensure all sequences in the batch have the same length
-            max_length = batch.shape[1]
-            for seq in batch:
-                # Check if each sequence in the batch is padded correctly to max length
-                self.assertEqual(len(seq), max_length)
+
 
     def test_stream_exhaustion(self):
         """Test that the iterator stops yielding batches when the data is exhausted."""
-        batch_iter = iter(self.batch_buffered_dataset)
+        loader = self.make_loader()
+        batch_iter = iter(loader)
         batch_count = 0
 
         # Count the number of batches yielded

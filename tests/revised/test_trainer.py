@@ -2,8 +2,8 @@ import unittest
 import pandas as pd
 import os
 import shutil
-from src.main.arcAGI2024.training import (LogMetrics, TerminalDisplay,
-                                          TrainingConfig, CheckpointProcess)
+from src.main.arcAGI2024.pretraining import (LogMetrics, TerminalDisplay,
+                                             TrainingConfig, CheckpointProcess)
 import os
 from unittest.mock import MagicMock, patch
 import torch.multiprocessing as mp
