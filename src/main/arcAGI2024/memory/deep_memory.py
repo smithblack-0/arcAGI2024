@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from torch import nn
 from torch.nn import functional as F
 from torch.autograd.function import Function, FunctionCtx
-from .base import TensorTree, DeviceDtypeWatch, SavableState, DropoutLogits, parallel_pytree_map
+from src.main.arcAGI2024.base import TensorTree, DeviceDtypeWatch, SavableState, DropoutLogits, parallel_pytree_map
 
 
 # Define the memory state
@@ -458,7 +458,7 @@ class WriteMemory(nn.Module):
         values = self.value_head_projector(values)
         values = values.unflatten(dim=-1, sizes=[self.num_write_heads, self.d_memory])  # ( ..., num_heads, d_memory)
 
-        # Transfer using linear attention. Bind to addresses. Na
+        # Transfer using linear attention. Bind to addresses.
         value = self.linear_attn(addresses, key, values)  # (..., num_memories, d_memory)
         key = self.linear_attn(addresses, key, key)  # (..., num_memories, d_addresses)
 
@@ -475,10 +475,11 @@ class WriteMemory(nn.Module):
         write_logits = self.dropout_logits(self.write_logits(key))
         write_probability = torch.sigmoid(write_logits)  # (..., num_memories, 1)
         interpolation_factor = torch.sigmoid(self.interpolation_logits)  # (num_memories, d_address)
-        write_factor = write_probability * interpolation_factor
+        write_factor = write_probability * interpolation_factor # (..., num_memories, d_address)
 
         # In order to prevent numeric explosion, we must limit the maximum available write factor
         # Otherwise, the reverse pass can divide by zero
+
         write_factor = self.max_write_factor*write_factor
 
         # Create kernel update. Unsqueeze to fit linear attn mechanism format.
@@ -554,7 +555,7 @@ class WriteMemory(nn.Module):
         # Return the new memory
         return MemoryState(matrix, normalizer, cum_prob)
 
-class FastLinearMemory(nn.Module):
+class DeepLinearMemory(nn.Module):
     """
     A linear transformer fast memory system. It is designed to contain
     a very large, fast to address, memory collection optimized

@@ -3,7 +3,6 @@ import functools
 import torch
 import torch.distributed as dist
 from torch import nn
-from datasets import load_dataset
 from src.main import arcAGI2024
 import torch.multiprocessing as mp
 
@@ -84,5 +83,4 @@ dist.init_process_group(
 )
 
 mp.spawn(run_process, nprocs=total_workers, join=True)
-
 dist.destroy_process_group()

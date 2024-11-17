@@ -7,8 +7,7 @@ from datasets import DatasetDict, Dataset, load_dataset
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from torch.utils import data
 from typing import Dict, List, Tuple, Callable, Union, Optional, Any
-from ..vocabulary import Vocabulary
-
+from .base import make_buffered_pipeline
 
 @dataclass
 class PretrainingLoaderConfig:
@@ -21,7 +20,12 @@ class PretrainingLoaderConfig:
     huggingface_dataset_version: str
     batch_size: int
     truncate_length: int
-    loader_kwargs: Dict[str, Any] = field(default_factory= lambda : {})
+    shuffle: bool = True
+    num_batches_in_buffer: int = 20
+    num_prefetch_threads: int = 4
+    prefetch_factor = 4
+    loader_kwargs: Dict[str, Any] = field(default_factory= lambda : {})\
+
 def create_pretokenized_datasets(datasets: DatasetDict,
                                  tokenizer: PreTrainedTokenizer,
                                  use_cache: bool = True,
@@ -108,36 +112,35 @@ def data_collator(batch: List[Dict[str, List[int]]],
 
 def make_dataloaders(worker_rank: int,
                      total_workers: int,
-                     truncate_length: int,
-                     batch_size: int,
-                     tokenizer: PreTrainedTokenizer,
+                     config: PretrainingLoaderConfig,
+                     padding_id: int,
                      datasets: DatasetDict
                      ) -> Dict[str, data.DataLoader]:
     """
-    Creates the dataloaders for the training, validation, test datasets.
+    Creates the dataloaders for the given dataset dictionaries.
 
-    :param worker_rank: The number associated with this particular worker
+    :param worker_rank: The rank of the worker under consideration
     :param total_workers: The total number of workers
-    :param truncate_length: The length to truncate to
-    :param batch_size: The batch size to use
-    :param tokenizer: The tokenizer to use.
-    :param datasets: Has a 'test', 'train', 'validation' split with 'tokens' features in the validators.
-    :return: The setup dataloaders, one for each split
+    :param config: The config we are working
+    :param padding_id: The integer to use when padding.
+    :param datasets: The datasets to convert
+    :return: The dataloaders
     """
-    collater = functools.partial(data_collator, pad_id=tokenizer.pad_token_id, truncate_length=truncate_length)
+
+    bound_collate_fn = functools.partial(data_collator, pad_id=padding_id, truncate_length=config.truncate_length)
     loaders: Dict[str, data.DataLoader] = {}
-    for dataset in datasets:
-        sampler = data.DistributedSampler(dataset, total_workers, worker_rank)
-        loader = data.DataLoader(dataset,
-                                 batch_size,
-                                 sampler=sampler,
-                                 shuffle=True,
-                                 collate_fn=collater,
-                                 num_workers=1,
-                                 prefetch_factor=2,
-                                 pin_memory=True,
-                                 )
-        loaders[dataset] = loader
+    for name, dataset in datasets.items():
+        loader = make_buffered_pipeline(config.batch_size,
+                                        total_workers,
+                                        worker_rank,
+                                        bound_collate_fn,
+                                        dataset,
+                                        num_batches_in_buffer=config.num_batches_in_buffer,
+                                        shuffle=config.shuffle,
+                                        num_prefetch_threads=config.num_prefetch_threads,
+                                        prefetch_factor=config.prefetch_factor
+                                        )
+        loaders[name] = loader
     return loaders
 
 
@@ -153,11 +156,19 @@ def create_dataloader_factory(total_workers: int,
     :param config: The loader config to use
     :return: The loaders. 'train_loader', 'test_loader', 'validation_loader'
     """
-    data = load_dataset(config.huggingface_dataset_name, config.huggingface_dataset_version, **config.loader_kwargs)
+
+    # Setup the tokenized datasets
+    raw_dataset = load_dataset(config.huggingface_dataset_name,
+                               config.huggingface_dataset_version,
+                               **config.loader_kwargs)
+    pretokenized_dataset = create_pretokenized_datasets(raw_dataset, tokenizer)
+
+    # Bind the factory. It now is looking only for the
+    # worker number in order to finish initializing.
+
     return functools.partial(make_dataloaders,
                              total_workers=total_workers,
-                             truncate_length=config.truncate_length,
-                             batch_size=config.batch_size,
-                             tokenizer=tokenizer,
-                             datasets=data
+                             config=config,
+                             padding_id=tokenizer.pad_token_id,
+                             datasets=pretokenized_dataset
                              )

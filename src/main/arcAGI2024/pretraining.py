@@ -63,8 +63,6 @@ class TrainingConfig:
         Current epoch position in the training process. Useful for resuming
         from checkpoints. Defaults to None if starting from the beginning.
     """
-    # Data sources
-    loader_factories: Callable[[int], Dict[str, data.DataLoader]]
 
     # Training and logging niceties
     training_run_prefix: str
@@ -76,6 +74,13 @@ class TrainingConfig:
     num_workers: int
     num_epochs: int
     epoch_position: Optional[int] = None
+
+    # Data source. Frequently starts as none, and
+    # is bound later
+    loader_factories: Optional[Callable[[int], Dict[str, data.DataLoader]]] = None
+
+    def bind_loader_factories(self, factory: Callable[[int], Dict[str, data.DataLoader]]):
+        self.loader_factories = factory
 
 class LoggingContext:
     """

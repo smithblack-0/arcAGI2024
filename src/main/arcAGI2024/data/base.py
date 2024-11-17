@@ -132,7 +132,7 @@ class BufferedBatchSampler(data.Sampler):
 def make_buffered_pipeline(batch_size: int,
                            num_workers: int,
                            worker_rank: int,
-                           collate_fn: Callable[[Any], torch.Tensor],
+                           collate_fn: Callable[[List[int]], torch.Tensor],
                            pretokenized_dataset: Dataset,
                            num_batches_in_buffer: int = 20,
                            shuffle: bool = True,
@@ -140,9 +140,19 @@ def make_buffered_pipeline(batch_size: int,
                            prefetch_factor: int = 2
                            ) -> data.DataLoader:
     """
-    Creates a distributed buffered dataloader out of the
-    given parameters including a pretokenized dataset
-    returns: A setup dataloader.
+    Creates a buffered pipeline out of the
+    given parameters
+
+    :param batch_size: Size of batch
+    :param num_workers: Total number of workers
+    :param worker_rank: The rank of this worker
+    :param collate_fn: The batch collator. Will accept pretokenized inputs
+    :param pretokenized_dataset: The pretokenized dataset
+    :param num_batches_in_buffer: The number of batches in the buffer
+    :param shuffle: Whether to shuffle each iteration
+    :param num_prefetch_threads: The number of prefetch threads
+    :param prefetch_factor: The number of batches to prefetch
+    :return: The dataloader
     """
 
     # Create the primary loader. This will be responsible

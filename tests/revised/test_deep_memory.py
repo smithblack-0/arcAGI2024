@@ -1,8 +1,7 @@
-import copy
 import unittest
 import torch
-from src.main.arcAGI2024.deep_memory import (CreateState, LinearAttention,
-                                             ReadMemory, WriteMemory, FastLinearMemory)
+from src.main.arcAGI2024.memory.deep_memory import (CreateState, LinearAttention,
+                                                    ReadMemory, WriteMemory, DeepLinearMemory)
 
 class TestCreateState(unittest.TestCase):
 
@@ -128,7 +127,7 @@ class TestFastLinearMemory(unittest.TestCase):
         self.dropout_rate = 0.01
         self.device = torch.device('cpu')
         self.dtype = torch.float32
-        self.fast_memory = FastLinearMemory(self.d_model, self.d_address, self.d_memory,
+        self.fast_memory = DeepLinearMemory(self.d_model, self.d_address, self.d_memory,
                                             self.num_read_heads, self.num_write_heads,
                                             self.num_memories, self.dropout_rate,
                                             dtype=self.dtype, device=self.device)

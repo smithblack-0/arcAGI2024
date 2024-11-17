@@ -1,5 +1,5 @@
 from .base import *
-from .deep_memory import *
+from src.main.arcAGI2024.memory.deep_memory import *
 from .decoder import *
 from .losses import *
 from .sampling import *

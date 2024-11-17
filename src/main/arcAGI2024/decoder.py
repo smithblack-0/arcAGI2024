@@ -3,8 +3,8 @@ from typing import Tuple, List
 import torch
 from torch import nn
 
-from .deep_memory import MemoryState, FastLinearMemory
-from .base import get_rng_state, DeviceDtypeWatch
+from .memory.deep_memory import MemoryState, DeepLinearMemory
+from .base import DeviceDtypeWatch
 class Feedforward(nn.Module):
     """
     A classic feedforward implementation.
@@ -82,7 +82,7 @@ class DecoderLayer(nn.Module):
 
         # Define the deep memory layer
 
-        self.deep_memories = FastLinearMemory(d_model,
+        self.deep_memories = DeepLinearMemory(d_model,
                                               d_address,
                                               d_memory,
                                               num_read_heads,
