@@ -25,6 +25,7 @@ from .base import TensorTree, parallel_pytree_map
 from .grad_utils import AbstractGradientControl, AutorescaleGradientControl
 from .losses import MainLossInterface, MemAccessLossInterface
 from .model import CausalLMTrainer, Logger, CausalLMCore
+from .data.pretraining import PretrainingLoaderConfig, create_dataloader_factory
 
 try:
     from IPython.display import clear_output
@@ -63,6 +64,15 @@ class TrainingConfig:
         Current epoch position in the training process. Useful for resuming
         from checkpoints. Defaults to None if starting from the beginning.
     """
+    @property
+    def num_workers(self)->int:
+        return len(self.devices)
+
+    # devices
+    devices: List[torch.device]
+
+    # Loader config
+    loader_config: PretrainingLoaderConfig
 
     # Training and logging niceties
     training_run_prefix: str
@@ -75,12 +85,6 @@ class TrainingConfig:
     num_epochs: int
     epoch_position: Optional[int] = None
 
-    # Data source. Frequently starts as none, and
-    # is bound later
-    loader_factories: Optional[Callable[[int], Dict[str, data.DataLoader]]] = None
-
-    def bind_loader_factories(self, factory: Callable[[int], Dict[str, data.DataLoader]]):
-        self.loader_factories = factory
 
 class LoggingContext:
     """
@@ -158,7 +162,7 @@ class LogMetrics:
         row = {"epoch": epoch, "batch": batch, "worker": worker, "pass_type": pass_type, **metrics}
         self.data = pd.concat([self.data, pd.DataFrame([row])], ignore_index=True)
 
-    def write_epoch(self,) -> Dict[str, str]:
+    def write_epoch(self, ) -> Dict[str, str]:
         """
         Writes the accumulated data for the current epoch to the CSV file and
         returns a dictionary with formatted strings of average metrics, organized
@@ -282,7 +286,6 @@ class CheckpointProcess:
         self.model.save_to_folder(path)
 
     def step_batch(self):
-
         if self.batch % self.checkpoint_every_n_batches == 0:
             self.save_checkpoint()
         self.batch += 1
@@ -291,6 +294,7 @@ class CheckpointProcess:
         self.save_checkpoint()
         self.batch = 0
         self.epoch += 1
+
 
 @dataclass
 class TrainingResources:
@@ -320,7 +324,7 @@ def run_training_epoch(
         epoch_num: int,
         train_loader: data.DataLoader,
         training_resources: TrainingResources,
-    ):
+):
     """
     Runs a singlular training epoch. This includes taking the
     loaders, transferring the relevant bits, advancing optim,
@@ -351,8 +355,8 @@ def run_training_epoch(
 
         # Setup the logging and feedback
         terminal_callback = training_resources.terminal_display.make_terminal_callback(worker_num,
-                                                                                      epoch_num,
-                                                                                      i)
+                                                                                       epoch_num,
+                                                                                       i)
         metrics_callback = training_resources.metrics_logger.make_logging_callback(worker_num,
                                                                                    epoch_num,
                                                                                    i,
@@ -361,7 +365,7 @@ def run_training_epoch(
 
         # Perform the training step. Most of your time is spent here.
         training_resources.trainer.step(tokens, targets, ~nonpadding_mask, logging_case,
-                   scheduling_rates=(scaling_factor, scaling_factor))
+                                        scheduling_rates=(scaling_factor, scaling_factor))
 
         # Fetch the gradients off the model. Perform our all reduce. Then integrate
         # the results back into the model.
@@ -378,12 +382,13 @@ def run_training_epoch(
         training_resources.optim.step()
         training_resources.optim.zero_grad()
 
+
 def run_validation_epoch(
         worker_num: int,
         epoch_num: int,
         validation_loader: data.DataLoader,
         training_resources: TrainingResources,
-    ):
+):
     """
     Runs a validation epoch process
     :param worker_num: The worker num associated with this. Used for logging
@@ -410,13 +415,12 @@ def run_validation_epoch(
         metrics_callback = training_resources.metrics_logger.make_logging_callback(worker_num,
                                                                                    epoch_num,
                                                                                    i,
-                                                                          "validation_pass")
+                                                                                   "validation_pass")
         logging_case = Logger(training_resources.logging_thread, terminal_callback, metrics_callback)
 
         # Perform the training step. Most of your time is spent here.
         training_resources.trainer.step(tokens, targets, ~nonpadding_mask, logging_case,
                                         scheduling_rates=(scaling_factor, scaling_factor))
-
 
         # Zero the grads. We do not need them. But we cannot let them get full and give us NAN's
         training_resources.optim.zero_grad()
@@ -427,7 +431,7 @@ def run_test_epoch(
         epoch_num: int,
         test_loader: data.DataLoader,
         training_resources: TrainingResources,
-    ):
+):
     """
     Runs a validation epoch process
     :param worker_num: The worker num associated with this. Used for logging
@@ -454,26 +458,24 @@ def run_test_epoch(
         metrics_callback = training_resources.metrics_logger.make_logging_callback(worker_num,
                                                                                    epoch_num,
                                                                                    i,
-                                                                          "test_pass")
+                                                                                   "test_pass")
         logging_case = Logger(training_resources.logging_thread, terminal_callback, metrics_callback)
 
         # Perform the training step. Most of your time is spent here.
         training_resources.trainer.step(tokens, targets, ~nonpadding_mask, logging_case,
                                         scheduling_rates=(scaling_factor, scaling_factor))
 
-
         # Zero the grads. We do not need them. But we cannot let them get full and give us NAN's
         training_resources.optim.zero_grad()
 
 
-
-
-
 def run_training_process(worker_num: int,
                          training_configs: List[TrainingConfig],
+                         loader_factory: Callable[[int], data.DataLoader],
                          model_factory: Callable[[torch.device], Tuple[CausalLMCore, CausalLMTrainer]],
                          optim_factory: Callable[[nn.Module], torch.optim.Optimizer],
-                         schedule_factory: Callable[[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LRScheduler]],
+                         schedule_factory: Callable[
+                             [torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LRScheduler]],
                          ):
     """
     Runs a training process, in parallel, and presumably
@@ -482,19 +484,19 @@ def run_training_process(worker_num: int,
     :param worker_num: The worker number assigned. Given out by spawn
     :param training_configs: The training configs to use. Each will be used in sequence, advancing from the first
                              batch length.
+    :param loader_factory: A factory that when given a rank returns a working loader set
     :param model_factory: A factory method capable of making a model given a device
     :param optim_factory: A factory method capable of providing an optim when given a model.
     :param schedule_factory: A factory method capable of making a schedule given an optimizer.
     """
     # Setup the models and training mechanisms
-    device = torch.device(f"cuda:{worker_num}" if torch.cuda.is_available() else "cpu")
+    device = training_configs[0].devices[worker_num]
     core, trainer = model_factory(device)
     optim = optim_factory(trainer)
     checkpointing = CheckpointProcess(core, training_configs)
     schedule = schedule_factory(optim)
     epoch_num = training_configs[0].epoch_position
     num_workers = training_configs[0].num_workers
-
 
     with ThreadPoolExecutor(max_workers=2) as logging_threads:
         # Run training under configurations
@@ -518,8 +520,7 @@ def run_training_process(worker_num: int,
             )
 
             # Create the dataloaders
-            loaders = training_config.loader_factories(worker_num)
-
+            loaders = loader_factory(worker_num)
 
             for _ in range(training_config.num_epochs):
                 # Run primary epochs
@@ -540,5 +541,47 @@ def run_training_process(worker_num: int,
             # Done with this configuration, so we run the test set
             run_test_epoch(worker_num, epoch_num, loaders["test_loader"], resources)
             epoch_num += 1
+
+
+def spawn_process_factory(training_configs: List[TrainingConfig],
+                          core: CausalLMCore,
+                          trainer: CausalLMTrainer,
+                          optim_factory: Callable[[nn.Module], torch.optim.Optimizer],
+                          schedule_factory: Callable[[torch.optim.Optimizer], torch.optim.lr_scheduler.LRScheduler],
+                          ) -> Callable[[int], None]:
+
+    """
+    Provided with everything except the process number, and this
+    will give you back something that can accept that process number
+    in order to spawn a config bound to the device.
+
+    :param training_configs:
+    :param core:
+    :param trainer:
+    :param optim_factory:
+    :param schedule_factory:
+    :return:
+    """
+    template_config = training_configs[0]
+    num_workers = template_config.num_workers
+    def spawn_model(worker_num: int, core=core, trainer=trainer)->Tuple[CausalLMCore, CausalLMTrainer]:
+        device = template_config.devices[worker_num]
+        core = core.to(device)
+        trainer = trainer.to(device)
+        return core, trainer
+
+    loader_factory = create_dataloader_factory(num_workers,
+                                               core.vocabulary.tokenizer,
+                                               template_config.loader_config)
+
+    run_spawned_process = functools.partial(run_training_process,
+                                            training_configs=training_configs,
+                                            loader_factory=loader_factory,
+                                            model_factory=spawn_model,
+                                            optim_factory=optim_factory,
+                                            schedule_factory=schedule_factory
+                                            )
+    return run_spawned_process
+
 
 
