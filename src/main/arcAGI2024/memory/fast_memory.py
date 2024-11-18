@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from torch import nn
 from torch.nn import functional as F
 from torch.autograd.function import Function, FunctionCtx
-from src.main.arcAGI2024.base import TensorTree, DeviceDtypeWatch, SavableState, DropoutLogits, parallel_pytree_map
+from ..base import TensorTree, DeviceDtypeWatch, SavableState, DropoutLogits, parallel_pytree_map
 
 
 # Define the memory state
