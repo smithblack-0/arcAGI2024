@@ -16,7 +16,6 @@ from typing import Any, List, Tuple, Dict, Union, Callable, Optional
 import torch
 from torch import nn
 from torch.autograd import profiler
-from torch.nn import functional as F
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
 
@@ -26,7 +25,7 @@ from .base import (get_rng_state, set_rng_state, parallel_pytree_map,
                    DeviceDtypeWatch, GradientSubstitutionEndpoint, TensorTree)
 from .losses import MainLossInterface, MemAccessLossInterface
 from .sampling import SamplingInterface
-from .grad_utils import GradClip, BatchCollectiveReductiveGradNorm, AbstractGradientControl
+from .grad_utils import AbstractGradientControl
 
 
 @dataclass
