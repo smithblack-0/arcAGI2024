@@ -32,7 +32,7 @@ core = arcAGI2024.CausalLMCore.build_model_using_config(vocabulary, model_config
 trainer_core = arcAGI2024.StandardTrainerCore(core)
 
 # Create rest of the training config, including the link to the datasource
-training_config = arcAGI2024.TrainingConfig(
+training_config = arcAGI2024.TrainingConfigOld(
     arcAGI2024.create_dataloader_factory(total_workers, vocabulary.tokenizer, loader_config),
     "debug_run_1",
     metrics_logging_directory="/metrics",

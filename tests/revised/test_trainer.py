@@ -2,8 +2,8 @@ import unittest
 import pandas as pd
 import os
 import shutil
-from src.main.arcAGI2024.pretraining import (LogMetrics, TerminalDisplay,
-                                             TrainingConfig, CheckpointProcess)
+from src.main.arcAGI2024.training import (LogMetrics, TerminalDisplay,
+                                          TrainingConfigOld, CheckpointProcess)
 import os
 from unittest.mock import MagicMock, patch
 import torch.multiprocessing as mp
@@ -93,7 +93,7 @@ class TestCheckpointProcess(unittest.TestCase):
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
         # Configure TrainingConfig
-        self.config = TrainingConfig(
+        self.config = TrainingConfigOld(
             pretokenized_datasets=None,  # Not used in this test
             training_run_prefix="test_run",
             metrics_logging_directory="",

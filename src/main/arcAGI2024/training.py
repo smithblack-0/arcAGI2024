@@ -2,18 +2,17 @@
 Training interfaces are stored here
 """
 import functools
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Callable, Tuple, List, Dict, Any, Union
 from abc import ABC, abstractmethod
 
 import torch
-import csv
+import time
 import os
 import pandas as pd
 import threading
 import concurrent.futures as futures
 
-from tinycss2 import tokenizer
 from torch import nn
 from torch.utils import data
 from concurrent.futures import ThreadPoolExecutor, Future
@@ -25,8 +24,7 @@ from .base import TensorTree, parallel_pytree_map
 from .grad_utils import AbstractGradientControl, AutorescaleGradientControl
 from .losses import MainLossInterface, MemAccessLossInterface
 from .model import CausalLMTrainer, Logger, CausalLMCore
-from .data.pretraining import PretrainingLoaderConfig, create_dataloader_factory
-
+from .data import LoaderConfig, setup_loader, ProcessLoaderBinder
 try:
     from IPython.display import clear_output
 
@@ -37,73 +35,97 @@ except ImportError:
 
 # Define more concrete implementatons.
 
-@dataclass
+def _get_formatted_time()->str:
+    current_utc_time = time.gmtime()
+    return time.strftime("%Y-%m-%d_%H-%M", current_utc_time)
+@dataclass(frozen=True)
 class TrainingConfig:
     """
-    A central dataclass that holds all the dynamic features needed to
-    properly set up and run a training instance.
+    A dataclass containing configuration information of concern
+    to the entire training process over all data sources. This
+    includes things like what models are being used for training,
+    what devices are available, and other things that are not
+    specific to the data source being processed.
 
-    Fields:
-    --------
-    loader_factories: Callable[[int], Dict[str, data.DataLoader]]
-        A function that produces data loaders for training and validation,
-        keyed by dataset names. Takes the worker num as input
-    training_run_prefix: str
-        Prefix for naming or identifying this training run.
-    metrics_logging_directory: str
-        Directory where metrics logs will be saved.
-    checkpoint_save_directory: str
-        Directory where model checkpoints will be saved.
-    checkpoint_batch_frequency: int
-        Frequency (in batches) at which checkpoints are saved.
-    num_epochs: int
-        Total number of epochs for the training run.
-    epoch_position: Optional[int]
-        Current epoch position in the training process. Useful for resuming
-        from checkpoints. Defaults to None if starting from the beginning.
+    Fields (required):
+    training_prefix: An identifier for things trained on this config.
+    save_directory: Where to save metrics, logs, and checkpoints
+    devices: A list of the torch devices which we can run on.
+             Will be used to spawn distributed workers
+    model_core: The causalLMCore that will be trained
+    model_trainer: The instanced trainer.
+    optim_factory: Creates an optim bound to a model. Used to build it on the correct device
+    scheduler_factory: Creates an scheduler bound to a model. Used to build it on the correct device
+    early_stopping_epoch_patience: Patience for early stopping. This many epochs will pass before
+                                   we stop using a datasource.
+
+    Fields: (optional)
+
+    early_stopping_metric: The metric to monitor at epoch level for early stopping. Default is "average forward_loss"
+    scheduler_metrics: Any metrics the scheduler should watch. Default is none, passing nothing in. Otherwise,
+                       should be a list of metrics to pass in.
     """
     @property
-    def num_workers(self)->int:
-        return len(self.devices)
-    # devices
+    def training_directory(self) -> str:
+        folder_name = "/" + self.training_prefix + "_" + self.time_of_generation
+        return os.path.join(self.save_directory, folder_name)
+    @property
+    def metrics_directory(self)->str:
+        return os.path.join(self.training_directory, "metrics")
+    @property
+    def checkpoint_directory(self)->str:
+        return os.path.join(self.training_directory, "checkpoints")
+
+
+    # Training config
+    training_prefix: str
+    save_directory: str
+
+    # Model config
     devices: List[torch.device]
+    model_trainer: CausalLMTrainer
+    optim_factory: Callable[[nn.Module], torch.optim.Optimizer]
+    scheduler_factory: Callable[[torch.optim.Optimizer], torch.optim.lr_scheduler.LRScheduler]
 
-    # Loader config
-    loader_config: PretrainingLoaderConfig
+    # Early stopping
+    early_stopping_epoch_patience: int
+    early_stopping_metric: str = "average forward_loss"
+    scheduler_metrics: Optional[List[str]] = None
 
-    # Training and logging niceties
-    training_run_prefix: str
-    metrics_logging_directory: str
-    checkpoint_save_directory: str
-    checkpoint_batch_frequency: int
+    # Time. Should not be touched by user.
+    time_of_generation: str = field(default_factory=lambda : _get_formatted_time())
 
-    # Important features
+
+
+
+class SourceConfig:
+    """
+    A configuration for processing a particular source of training
+    data. Under a single training config multiple sources may
+    be processed in a row, with for instance a warmup source and
+    then a main training source. Or a pretraining source, followed
+    by a fine tuning source.
+
+    Fields (loaders):
+
+    One of these two fields must be specified. You can either specify
+    a pretraining loader config, which is designed to facilitate pretraining,
+    or create your own factory that will return a loader bound to a particular
+    device based on the passed in rank.
+
+    loader_config: Usually a PretrainedLoaderConfig. See class for details. The model knows how to set up the
+                   loader stream using it.
+    loader_factory: Your own loader factory. Should accept the rank of the process, and setup the loader
+                    for distributed training. Resources in data.base may be useful for this.
+
+    """
     num_epochs: int
-    epoch_position: Optional[int] = None
-
-
-
-
-class LoggingContext:
-    """
-    Context manager to provide a thread pool executor for logging or other
-    asynchronous tasks.
-    """
-
-    def __init__(self, max_workers: int = 2):
-        self.max_workers = max_workers
-        self.executor = None
-
-    def __enter__(self):
-        self.executer = ThreadPoolExecutor(max_workers=self.max_workers)
-        return self.executor
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.executor.shutdown(wait=True)
+    loader_config: Optional[LoaderConfig] = None
+    loader_factory: Optional[ProcessLoaderBinder] = None
 
 
 class LogMetrics:
-    def __init__(self, training_config: TrainingConfig):
+    def __init__(self, training_config: TrainingConfigOld):
         """
         A logging interface for saving metrics to an in-memory DataFrame and
         periodically writing epochs to a CSV file.
@@ -204,7 +226,7 @@ class TerminalDisplay:
 
     """
 
-    def __init__(self, training_config: TrainingConfig):
+    def __init__(self, training_config: TrainingConfigOld):
         """
         Initializes a terminal display for a certain number
         of workers. Each worker gets a line, and we use
@@ -267,7 +289,7 @@ class CheckpointProcess:
     to a given location every so often.
     """
 
-    def __init__(self, model: CausalLMCore, training_config: TrainingConfig):
+    def __init__(self, model: CausalLMCore, training_config: TrainingConfigOld):
         self.model = model
 
         self.epoch = training_config.epoch_position
@@ -468,7 +490,7 @@ def run_test_epoch(
 
 
 def run_training_process(worker_num: int,
-                         training_configs: List[TrainingConfig],
+                         training_configs: List[TrainingConfigOld],
                          loader_factory: Callable[[int], data.DataLoader],
                          model_factory: Callable[[torch.device], Tuple[CausalLMCore, CausalLMTrainer]],
                          optim_factory: Callable[[nn.Module], torch.optim.Optimizer],
@@ -541,7 +563,7 @@ def run_training_process(worker_num: int,
             epoch_num += 1
 
 
-def spawn_process_factory(training_configs: List[TrainingConfig],
+def spawn_process_factory(training_configs: List[TrainingConfigOld],
                           core: CausalLMCore,
                           trainer: CausalLMTrainer,
                           optim_factory: Callable[[nn.Module], torch.optim.Optimizer],

@@ -1,19 +1,13 @@
-import os
-import torch.distributed as dist
+import torch
 
-# Set environment variables explicitly
-os.environ['MASTER_ADDR'] = '127.0.0.1'
-os.environ['MASTER_PORT'] = '28000'
+# Example tensor
+tensor = torch.tensor([1.0, 2.0, 3.0], device="cuda:0", dtype=torch.float32)
 
-# Initialize the process group using use_libuv=0
-dist.init_process_group(
-    backend='nccl',  # Or 'gloo' if using CPU
-    init_method='tcp://127.0.0.1:28000?use_libuv=0',  # Keep use_libuv=0 parameter
-    world_size=1,  # Total number of processes
-    rank=0         # Rank of the current process
-)
+# Get the device as a string
+device_str = str(tensor.device)
 
-print("NCCL backend initialized successfully with use_libuv=0.")
+print(f"Device string: {device_str}")
 
-# Cleanup
-dist.destroy_process_group()
+# Example: Use the string to initialize a new tensor
+new_tensor = torch.tensor([4.0, 5.0, 6.0], device=device_str)
+print(f"New tensor is on: {new_tensor.device}")

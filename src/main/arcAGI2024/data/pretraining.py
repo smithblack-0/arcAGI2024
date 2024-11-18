@@ -7,39 +7,62 @@ from datasets import DatasetDict, Dataset, load_dataset
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from torch.utils import data
 from typing import Dict, List, Tuple, Callable, Union, Optional, Any
-from .base import make_buffered_pipeline
+from .base import make_buffered_pipeline, LoaderConfig, register_loader_factory, ProcessLoaderBinder
 
 @dataclass
-class PretrainingLoaderConfig:
+class PretrainingLoaderConfig(LoaderConfig):
     """
     A configuration class for holding configuration
     details for a pretraining loader, sans external
     dependencies
+
+    Fields (required)
+
+    huggingface_dataset_name: The name of the huggingface dataset
+    huggingface_dataset_version: The version to use
+    dataset_text_name: The schema name of the text in the dataset.
+    batch_size: The batch size. Generally quite large
+    truncate_length: The truncate length. Longer than this is truncated
+
+    Fields (optional)
+
+    shuffle: Whether to shuffle. Defaults to true
+    num_batches_in_buffer: How many batches to keep in the lengths buffer.
+                           Since we are dealing with wildly varying lengths,
+                           and enormous batches that amplify any issues,
+                           some special logic attempts to minimize the
+                           amount of needed padding
+    num_prefetch_threads: Exactly what it saids
+    prefetch_factor: How many batches to keep in a prefetched state as tensors.
+    huggingface_loader_kwargs: Any additional arguments the huggingface loader needs
     """
     huggingface_dataset_name: str
     huggingface_dataset_version: str
+    dataset_text_name: str
     batch_size: int
     truncate_length: int
     shuffle: bool = True
     num_batches_in_buffer: int = 20
     num_prefetch_threads: int = 4
-    prefetch_factor = 4
-    loader_kwargs: Dict[str, Any] = field(default_factory= lambda : {})\
+    prefetch_factor: int = 4
+    huggingface_loader_kwargs: Dict[str, Any] = field(default_factory= lambda : {})
 
 def create_pretokenized_datasets(datasets: DatasetDict,
                                  tokenizer: PreTrainedTokenizer,
+                                 text_storage_name: str,
                                  use_cache: bool = True,
                                  ) -> DatasetDict:
     """
     Creates a pretokenized datasets collection
     :param datasets: A huggingface datasets collection of text.
     :param tokenizer: The tokenizer to use for this process
+    :param text_storage_name: The name text is stored under in the dataset
     :param use_cache: Whether to use the pretokenized cache if available, or force a rebuild
     :return: The pretokenized dataset.
     """
 
     def batch_tokenize(examples: Dataset):
-        texts = examples["text"]
+        texts = examples[text_storage_name]
         encodings = tokenizer(
             text=texts,
             truncation=False,
@@ -147,7 +170,7 @@ def make_dataloaders(worker_rank: int,
 def create_dataloader_factory(total_workers: int,
                               tokenizer: PreTrainedTokenizer,
                               config: PretrainingLoaderConfig
-                              ) -> Callable[[int], Dict[str, data.DataLoader]]:
+                              ) -> ProcessLoaderBinder:
     """
     Creates a multiprocessing factory that is designed to produce
     data loader factories compatible with a particular device
@@ -160,8 +183,8 @@ def create_dataloader_factory(total_workers: int,
     # Setup the tokenized datasets
     raw_dataset = load_dataset(config.huggingface_dataset_name,
                                config.huggingface_dataset_version,
-                               **config.loader_kwargs)
-    pretokenized_dataset = create_pretokenized_datasets(raw_dataset, tokenizer)
+                               **config.huggingface_loader_kwargs)
+    pretokenized_dataset = create_pretokenized_datasets(raw_dataset, tokenizer, config.dataset_text_name)
 
     # Bind the factory. It now is looking only for the
     # worker number in order to finish initializing.
@@ -172,3 +195,5 @@ def create_dataloader_factory(total_workers: int,
                              padding_id=tokenizer.pad_token_id,
                              datasets=pretokenized_dataset
                              )
+
+register_loader_factory(LoaderConfig, create_dataloader_factory)

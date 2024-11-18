@@ -3,9 +3,67 @@ import torch
 from torch.nn import functional as F
 from torch.utils import data
 from torch.utils.data import Dataset, IterableDataset
-from typing import Iterable, List, Callable, Any
+from typing import Iterable, List, Callable, Any, Union, Dict, Protocol, Type
 from collections.abc import Sized
+from dataclasses import dataclass
+from transformers import PreTrainedTokenizerFast, PreTrainedTokenizer
 
+TokenizerAlias = Union[PreTrainedTokenizerFast, PreTrainedTokenizer]
+@dataclass
+class LoaderConfig:
+    """
+    Base class for loader configs
+    """
+    batch_size: int
+    truncate_length: int
+    shuffle: bool
+    num_batches_in_buffer: int
+    num_prefetch_threads: int
+    prefetch_factor: int
+
+
+class ProcessLoaderBinder(Protocol):
+    """
+    Invoke to bind a dataloader onto a particular
+    distributed processor. We get provided the
+    process number. Intended to be used within
+    spawn.
+    """
+    def __call__(self, rank: int)->Dict[str, data.DataLoader]:
+        """
+        Interface. We accept a rank, and return a dictionary of
+        dataloaders
+        :param rank: The rank we are working under
+        :return: A dictionary of dataloaders.
+        """
+class LoaderFactory(Protocol):
+    """
+    Intended to be invoked in order to setup a
+    singular loader and return a process binder.
+    Invoked with the total world size, a tokenizer,
+    and a loader config.
+    """
+    def __call__(self, world_size: int, tokenizer: TokenizerAlias, config: LoaderConfig)->ProcessLoaderBinder:
+        """
+        Call with the provided features to bind a factory to the provided context
+        :param world_size: Size of the distributed world
+        :param tokenizer: The tokenizer to use
+        :param config: The config to use
+        :return: The bound loader. Ready for use in distributed processing.
+        """
+
+loader_factories: Dict[Type[LoaderFactory], LoaderFactory] = {}
+def register_loader_factory(config: Type[LoaderConfig], factory: LoaderFactory):
+    loader_factories[config] = factory
+def setup_loader(world_size: int, tokenizer: TokenizerAlias, config: LoaderConfig)->ProcessLoaderBinder:
+    """
+    Sets up the loader based on the config, and returns the process binder.
+    :param world_size: The size of the world under consideration
+    :param tokenizer: The tokenizer to use
+    :param config: The config to use
+    :return: The setup loader binder.
+    """
+    return loader_factories[config](world_size, tokenizer, config)
 
 class NumpyBufferedStream:
     """
@@ -182,5 +240,4 @@ def make_buffered_pipeline(batch_size: int,
                            prefetch_factor=prefetch_factor,
                            collate_fn=collate_fn,
                            pin_memory=True)
-
 

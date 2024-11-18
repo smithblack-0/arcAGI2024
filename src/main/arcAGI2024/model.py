@@ -11,7 +11,7 @@ import shutil
 import json
 
 from concurrent import futures
-from typing import Callable, List
+from typing import Callable, List, Type
 from typing import Any, List, Tuple, Dict, Union, Callable, Optional
 import torch
 from torch import nn
@@ -102,7 +102,7 @@ class CoreConfig:
     d_address: Optional[int] = None
     d_hidden: Optional[int] = None
     dtype: torch.dtype = None
-    device: torch.device = None
+
     def save_to_folder(self, directory: Union[str, os.PathLike]):
         """
         Saves the config to the folder. The dtype and
@@ -113,30 +113,27 @@ class CoreConfig:
         """
         with open(os.path.join(directory, "decoder_config.json"), "w") as f:
             config = asdict(self)
-            config.pop("device")
-            config.pop("dtype")
+            config['device'] = str(config['device'])
+            config['dtype'] = str(config['dtype'])
             json.dump(config, f, indent=4)
+
     @classmethod
     def load_from_folder(cls,
                          directory: Union[str, os.PathLike],
-                         dtype: torch.dtype,
-                         device: torch.device
-                         )->'CoreConfig':
+                         ) -> 'CoreConfig':
         """
         Loads the model from the folder. The dtype and device
         have to provided, since they are not saved.
 
         :param directory: Directory to load from
-        :param dtype: The dtype it is
-        :param device: The device it is.
         :return: The config.
         """
         with open(os.path.join(directory, "decoder_config.json"), "r") as f:
             config = json.load(f)
-            config["device"] = device
-            config["dtype"] = dtype
+            config["dtype"] = torch.get_autocast_dtype(config['dtype'])
             config = cls(**config)
         return config
+
 
 class CausalLMCore(nn.Module):
     """
@@ -167,7 +164,8 @@ class CausalLMCore(nn.Module):
         config = copy.deepcopy(config)
 
         # Load the causal lm head
-        vocabulary = vocabulary.to(dtype=config.dtype, device=config.device)
+        device = torch.device("cpu")
+        vocabulary = vocabulary.to(dtype=config.dtype, device=device)
         d_model = vocabulary.d_model
 
         # Standardize defaults
@@ -181,8 +179,6 @@ class CausalLMCore(nn.Module):
             config.d_hidden = config.d_core * 4
         if config.dtype is None:
             config.dtype = torch.float32
-        if config.device is None:
-            config.device = torch.device("cpu")
         if config.numeric_write_factor is None:
             config.numeric_write_factor = 0.999
 
@@ -202,7 +198,7 @@ class CausalLMCore(nn.Module):
             config.sublayers_dropout_rate,
             config.numeric_write_factor,
             dtype=config.dtype,
-            device=config.device
+            device=device
         )
 
         # Return instance
@@ -238,26 +234,14 @@ class CausalLMCore(nn.Module):
     @classmethod
     def load_from_folder(cls,
                          directory: Union[str, os.PathLike],
-                         device: Optional[torch.device] = None,
-                         dtype: Optional[torch.dtype]=None,
                          ) -> 'CausalLMCore':
         """
         Loads the saved causal lm core file from the given directory.
         :param directory: The directory to load from
-        :param device: The device we loaded on
-        :param dtype: The dtype we loaded on
-        :returns: The loaded causal lm core model
+        :return: A setup CausalLMCore
         """
-        if device is None:
-            device = torch.device("cpu")
-        if dtype is None:
-            dtype = torch.float32
-
         decoder = torch.load(os.path.join(directory, "decoder.pt"))
         vocabulary = Vocabulary.load_pretrained_vocabulary(directory)
-
-        decoder = decoder.to(dtype=dtype, device=device)
-        vocabulary = vocabulary.to(dtype=dtype, device=device)
         config = CoreConfig.load_from_folder(directory, dtype, device)
 
         return cls(vocabulary, decoder, config)
@@ -292,6 +276,8 @@ class CausalLMCore(nn.Module):
 #
 ##
 
+class AdapterCore
+
 
 class AbstractTrainerCore(nn.Module, ABC):
     """
@@ -299,6 +285,45 @@ class AbstractTrainerCore(nn.Module, ABC):
     trainer can work. Sometimes, compiling might be required,
     hence this mechanism.
     """
+    __trainer_cores: Dict[str, Type['AbstractTrainerCore']]
+
+    def __init_subclass__(cls, **kwargs):
+        cls.__trainer_cores[cls.__name__] = cls
+        super().__init_subclass__(**kwargs)
+
+    def __init__(self, core: CausalLMCore, **init_kwargs):
+        super().__init__()
+        self.core = core
+        self.init_kwargs = init_kwargs
+
+    def save_to_folder(self, directory: Union[str, os.PathLike]):
+        """
+        Saves the trainer core to a directory, allowing resumption
+        of later training
+
+        :param directory: The directory to save to
+        """
+        if os.path.isdir(directory):
+            shutil.rmtree(directory)
+        os.makedirs(directory, exist_ok=True)
+
+        with open(os.path.join(directory, "trainer_core_config.txt"), "w") as f:
+            config = {"core_name" : self.__name__,
+                      "init_kwargs" : self.init_kwargs
+                      }
+            json.dump(config, f)
+        self.core.save_to_folder(directory)
+    @classmethod
+    def load_from_folder(cls,
+                         directory: Union[str, os.PathLike],
+                         device: torch.device,
+                         ) -> 'AbstractTrainerCore':
+        with open(os.path.join(directory, "trainer_core_config.txt"), "r") as f:
+            config = json.load(f)
+        core = CausalLMCore.load_from_folder(directory)
+        core = core.to(device=device)
+        subclass = cls.__trainer_cores[config["core_name"]]
+        return subclass(core, **config["init_kwargs"])
 
     @abstractmethod
     def embed(self, token: torch.Tensor) -> torch.Tensor:
@@ -377,9 +402,8 @@ class StandardTrainerCore(AbstractTrainerCore):
     The normal trainer core
     """
 
-    def __init__(self, core: CausalLMCore):
-        super().__init__()
-        self.core = core
+    def __init__(self, core: CausalLMCore, **unused_kwargs):
+        super().__init__(core, **unused_kwargs)
 
     def embed(self, token: torch.Tensor) -> torch.Tensor:
         """
@@ -707,6 +731,13 @@ class CausalLMTrainer(nn.Module):
         self.save_cached_to_cpu = save_cached_to_cpu
         self.mse_error = nn.MSELoss(reduction='mean')
         self.verbose = verbose
+
+    def get_model_core(self) -> CausalLMCore:
+        """
+        Returns the model core in it's current state.
+        :return: nn.Module
+        """
+        return self.core.core
 
     @staticmethod
     def save_to_cpu(tensor: torch.Tensor):

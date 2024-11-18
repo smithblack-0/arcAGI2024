@@ -29,7 +29,7 @@ class TestCreatePretokenizedDataset(unittest.TestCase):
         # Test pretokenization without caching
         start_time = time.time()
         pretokenized_dataset = create_pretokenized_datasets(
-            self.dataset_origin, self.tokenizer, use_cache=False
+            self.dataset_origin, self.tokenizer, "text" , use_cache=False
         )
         no_cache_time = time.time() - start_time
 
@@ -45,7 +45,7 @@ class TestCreatePretokenizedDataset(unittest.TestCase):
             raise RuntimeError("Should not tokenize")
 
         pretokenized_cached = create_pretokenized_datasets(
-            self.dataset_origin, self.tokenizer, use_cache=True
+            self.dataset_origin, self.tokenizer,"text", use_cache=True
         )
         cached_time = time.time() - start_time
 
@@ -139,3 +139,4 @@ class TestBatchCollator(unittest.TestCase):
             # Content tokens should have mask 1, padding tokens should have mask 0
             self.assertTrue(all(m == 1 for m in mask_list[:padding_start]))
             self.assertTrue(all(m == 0 for m in mask_list[padding_start:]))
+
