@@ -56,15 +56,15 @@ class TrainingConfig:
         Directory where model checkpoints will be saved.
     checkpoint_batch_frequency: int
         Frequency (in batches) at which checkpoints are saved.
-    num_workers: int
-        Number of workers used for data loading.
     num_epochs: int
         Total number of epochs for the training run.
     epoch_position: Optional[int]
         Current epoch position in the training process. Useful for resuming
         from checkpoints. Defaults to None if starting from the beginning.
     """
-
+    @property
+    def num_workers(self)->int:
+        return len(self.devices)
     # devices
     devices: List[torch.device]
 
@@ -79,12 +79,9 @@ class TrainingConfig:
 
     # Important features
     num_epochs: int
-    num_workers: int
     epoch_position: Optional[int] = None
 
-    @property
-    def num_workers(self)->int:
-        return len(self.devices)
+
 
 
 class LoggingContext:
