@@ -9,6 +9,7 @@ from torch.utils import data
 from typing import Dict, List, Tuple, Callable, Union, Optional, Any
 from .base import make_buffered_pipeline, LoaderConfig, register_loader_factory, ProcessLoaderBinder
 
+
 @dataclass
 class PretrainingLoaderConfig(LoaderConfig):
     """
@@ -45,7 +46,8 @@ class PretrainingLoaderConfig(LoaderConfig):
     num_batches_in_buffer: int = 20
     num_prefetch_threads: int = 4
     prefetch_factor: int = 4
-    huggingface_loader_kwargs: Dict[str, Any] = field(default_factory= lambda : {})
+    huggingface_loader_kwargs: Dict[str, Any] = field(default_factory=lambda: {})
+
 
 def create_pretokenized_datasets(datasets: DatasetDict,
                                  tokenizer: PreTrainedTokenizer,
@@ -195,5 +197,6 @@ def create_dataloader_factory(total_workers: int,
                              padding_id=tokenizer.pad_token_id,
                              datasets=pretokenized_dataset
                              )
+
 
 register_loader_factory(LoaderConfig, create_dataloader_factory)

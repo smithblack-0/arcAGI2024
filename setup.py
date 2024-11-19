@@ -12,6 +12,7 @@ setup(
         'torch',
         'tokenizers', # add other dependencies here
         'transformers',
+        'datasets',
         'typeguard',
         'tqdm',
         'numpy',

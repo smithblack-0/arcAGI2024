@@ -2,10 +2,10 @@ import copy
 import unittest
 import torch
 from typing import Any, Tuple
-from src.main.arcAGI2024.base import SavableState, TensorTree, parallel_pytree_map, GradientSubstitutionEndpoint
+from src.main.arcAGI2024.base import PytreeState, TensorTree, parallel_pytree_map, GradientSubstitutionEndpoint
 
 
-class MySavableState(SavableState):
+class MySavableState(PytreeState):
     """
     A concrete implementation of SavableState for testing.
     This class holds a tensor and demonstrates how to save and load state.

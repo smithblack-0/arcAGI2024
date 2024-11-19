@@ -1,7 +1,10 @@
+import os
+import shutil
+import json
 from typing import Union, List, Tuple, Dict, Any, Optional, Callable
 from abc import ABC, abstractmethod
 from tokenizers import Tokenizer
-
+from dataclasses import dataclass, asdict
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
@@ -17,39 +20,6 @@ TensorTree = Union[
     Tuple['TensorTree', ...],  # Recursion for tuples
     Dict[str, 'TensorTree']  # Recursion for dictionaries
 ]
-
-
-
-# Core layers
-class StatefulCore(nn.Module, ABC):
-    """
-    Any class which is going to involve managing
-    state in this project is basically going to
-    need to implement this.
-    """
-    @abstractmethod
-    def setup_state(self, tensor: torch.Tensor)->TensorTree:
-        """
-        Sets up state based on the provided tensor of embeddings. Note that
-        if you do not use state, just return an empty dict.
-
-        :param tensor: The tensor of embeddings
-        :return: Whatever state we need. Can be none.
-        """
-    @abstractmethod
-    def forward(self,
-                embedding: torch.Tensor,
-                states: TensorTree,
-                *parameters: Any)->Tuple[torch.Tensor, TensorTree]:
-        """
-        Performs the forward pass. Tensor is a tensor of embeddings, while states is any
-        state information that needs to be tracked.
-        :param tensor: The embedding we are processing
-        :param states: The states, if any, associated with the embedding
-        :param parameters: Any additional parameters we might need
-        :return:
-        """
-        pass
 
 def get_rng_state(device: torch.device):
     if device.type == "cpu":
@@ -194,7 +164,7 @@ class DeviceDtypeWatch(nn.Module):
 
 
 
-class SavableState(ABC):
+class PytreeState(ABC):
     """
     A abstract state that implemented two methods,
     designed to turn the state into something
@@ -223,7 +193,7 @@ class SavableState(ABC):
         """
 
     @abstractmethod
-    def load_state(self, pytree: TensorTree, bypass: Any) -> 'SavableState':
+    def load_state(self, pytree: TensorTree, bypass: Any) -> 'PytreeState':
         """
         The reverse of the above. Loads the state from
         a given pytree.
@@ -232,6 +202,48 @@ class SavableState(ABC):
         :return: A setup instance.
         """
 
+@dataclass
+class SavableConfig(ABC):
+    """
+    A savable config is a dataclass feature which
+    is so named because it can be saved to a folder
+    """
+
+    # class name. Usually a shared class feature.
+    file_name: str
+
+    # Concrete details.
+    #
+    # These are some good defaults, but can
+    # be overwritten later if needed.
+
+    def _save_to_folder(self, directory: Union[str, os.PathLike]):
+        file = os.path.join(directory, self.file_name)
+        with open(file, 'w') as f:
+            config = asdict(self)
+            json.dump(config, f)
+
+    def _load_from_folder(cls, directory: Union[str, os.PathLike]) -> 'AbstractMemoryConfig':
+        file = os.path.join(directory, cls.file_name)
+        with open(file, 'r') as f:
+            config = json.load(f)
+        return cls(**config)
+
+    # Actual save/load interface
+    def save_to_folder(self, directory: Union[str, os.PathLike]):
+        os.makedirs(directory, exist_ok=True)
+        self._save_to_folder(directory)
+
+    def load_from_folder(self, directory: Union[str, os.PathLike])->'SavableConfig':
+        return self._load_from_folder(directory)
+
+
+class SavableLayer(nn.Module, ABC):
+    """
+    A savable layer is a layer that implements
+    two methods designed to allow saving and loading
+    from folders.
+    """
 
 
 def parallel_pytree_map(func: Callable[..., Any], *pytrees: Any) -> Any:
@@ -265,7 +277,7 @@ def parallel_pytree_map(func: Callable[..., Any], *pytrees: Any) -> Any:
         result = {key: parallel_pytree_map(func, *(pytree[key] for pytree in pytrees))
                   for key in pytrees[0]}
         return result
-    elif all(isinstance(pytree, SavableState) for pytree in pytrees):
+    elif all(isinstance(pytree, PytreeState) for pytree in pytrees):
         # Convert to pytrees, and update state
         template = pytrees[0]
         _, bypass = template.save_state()

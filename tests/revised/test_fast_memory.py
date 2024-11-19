@@ -1,7 +1,7 @@
 import unittest
 import torch
-from src.main.arcAGI2024.memory.fast_memory import (CreateState, LinearAttention,
-                                                    ReadMemory, WriteMemory, FastLinearMemory)
+from src.main.arcAGI2024.memory.attn_bank_memories import (CreateState, LinearAttention,
+                                                           ReadMemory, WriteMemory, FastLinearMemory)
 from src.main.arcAGI2024.base import set_rng_state, get_rng_state
 class TestCreateState(unittest.TestCase):
 

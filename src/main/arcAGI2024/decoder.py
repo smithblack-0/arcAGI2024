@@ -4,7 +4,7 @@ import torch
 from torch import nn
 
 from .memory.deep_memory import DeepMemoryState, DeepLinearMemory
-from .memory.fast_memory import FastLinearMemory, FastMemoryState
+from .memory.attn_bank_memories import FastLinearMemory, MemoryState
 from .base import DeviceDtypeWatch
 
 
@@ -233,7 +233,7 @@ class FastDecoderLayer(nn.Module):
         # Define the dropout layer
         self.dropout = nn.Dropout(dropout)
 
-    def create_state(self, batch_shape: torch.Size) -> FastMemoryState:
+    def create_state(self, batch_shape: torch.Size) -> MemoryState:
         """
         Creates a blank memory state associated with the
         given batch size.
@@ -246,7 +246,7 @@ class FastDecoderLayer(nn.Module):
                 tensor: torch.Tensor,
                 batch_mask: torch.Tensor,
                 next_memory: DeepMemoryState
-                ) -> Tuple[Tuple[torch.Tensor, FastMemoryState], FastMemoryState]:
+                ) -> Tuple[Tuple[torch.Tensor, MemoryState], MemoryState]:
         """
         The reverse mechanism. Able to perform the same computation,
         but with the notable complication of also returning the

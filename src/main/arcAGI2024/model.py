@@ -275,7 +275,6 @@ class CausalLMCore(nn.Module):
 #
 ##
 
-class AdapterCore
 
 
 class AbstractTrainerCore(nn.Module, ABC):
@@ -284,10 +283,11 @@ class AbstractTrainerCore(nn.Module, ABC):
     trainer can work. Sometimes, compiling might be required,
     hence this mechanism.
     """
-    __trainer_cores: Dict[str, Type['AbstractTrainerCore']]
+    __trainer_cores: Dict[str, Type['AbstractTrainerCore']] = {}
 
     def __init_subclass__(cls, **kwargs):
-        cls.__trainer_cores[cls.__name__] = cls
+        if issubclass(cls, AbstractTrainerCore):
+            cls.__trainer_cores[cls.__name__] = cls
         super().__init_subclass__(**kwargs)
 
     def __init__(self, core: CausalLMCore, **init_kwargs):

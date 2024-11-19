@@ -6,11 +6,11 @@ from dataclasses import dataclass
 from torch import nn
 from torch.nn import functional as F
 from torch.autograd.function import Function, FunctionCtx
-from ..base import TensorTree, DeviceDtypeWatch, SavableState, DropoutLogits, parallel_pytree_map
+from ..base import TensorTree, DeviceDtypeWatch, PytreeState, DropoutLogits, parallel_pytree_map
 
 
 # Define the memory state
-class DeepMemoryState(SavableState):
+class DeepMemoryState(PytreeState):
     """
     The memory state. Contains within it
     the linear kernel attention matrix
@@ -64,7 +64,7 @@ class DeepMemoryState(SavableState):
     def save_state(self) -> Tuple[TensorTree, Optional[Any]]:
         return (self.matrix, self.normalizer, self.write_probability_mass), None
     @classmethod
-    def load_state(cls, pytree: TensorTree, bypass: Any) -> 'SavableState':
+    def load_state(cls, pytree: TensorTree, bypass: Any) -> 'PytreeState':
         return cls(*pytree)
 ##
 # State creation mechanism

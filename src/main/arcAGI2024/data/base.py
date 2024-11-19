@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from transformers import PreTrainedTokenizerFast, PreTrainedTokenizer
 
 TokenizerAlias = Union[PreTrainedTokenizerFast, PreTrainedTokenizer]
-@dataclass
 class LoaderConfig:
     """
     Base class for loader configs
