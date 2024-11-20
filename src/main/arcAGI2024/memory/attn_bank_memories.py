@@ -99,13 +99,14 @@ class CreateState(AbstractCreateState):
 
     def __init__(self, device: torch.device, dtype: torch.dtype, config: BankMemoryConfig):
         super().__init__(dtype, device)
-        self.config = config
+        self.num_memories = config.num_memories
+        self.d_memory = config.d_memory
         self.addresses = nn.Parameter(torch.randn([config.num_memories, config.d_memory],
                                                   dtype=dtype, device=device),
 
                                       requires_grad=True)
 
-    def forward(self, batch_shape: torch.Size) -> MemoryState:
+    def forward(self, batch_shape: List[int]) -> MemoryState:
         """
         Sets up the state.
         :param batch_shape: The batch shape that is correlated with the memories
@@ -117,14 +118,19 @@ class CreateState(AbstractCreateState):
 
         # Setup the memories as blank tensors. This is the only
         # needed interpolation state.
-        memories = torch.zeros([*batch_shape, self.config.num_memories, self.config.d_memory],
-                               dtype=self.dtype, device=self.device, requires_grad=True)
+        memories = torch.zeros(batch_shape + [self.num_memories, self.d_memory],
+                               dtype=self.dtype, device=self.device)
+        memories.requires_grad_(True)
+
         interpolation_state["memories"] = memories
 
         # Setup the persistent state. We need two of them.
 
-        persistent_state["cum_write_factors"] = torch.zeros([*batch_shape, self.num_memories],
-                                                            dtype=self.dtype, device=self.device, requires_grad=True)
+        persistent_state["cum_write_factors"] = torch.zeros(batch_shape + [self.num_memories],
+                                                            dtype=self.dtype, device=self.device,
+                                                            )
+        persistent_state["cum_write_factors"].requires_grad_(True)
+
         persistent_state["attn_addresses"] = self.addresses
 
         return MemoryState(persistent_state, interpolation_state)
@@ -237,7 +243,8 @@ class ReadMemory(AbstractReadMemory):
         """
         super().__init__(dtype, device)
 
-        self.config = config
+        self.num_read_heads = config.num_memories
+        self.d_memory = config.d_memory
         self.linear_attn = LinearAttention(config.linear_kernel_activation)
         self.query_projector = nn.Linear(d_model, config.d_memory * config.num_read_heads,
                                          dtype=dtype, device=device)
@@ -270,7 +277,7 @@ class ReadMemory(AbstractReadMemory):
 
         # Perform the read process on each head.
         mem_key = memory_bank + addresses  # (..., num_memories, d_memory)
-        attn_results = self.linear_attn(query, mem_key, memory)  # (..., num_heads, d_memory)
+        attn_results = self.linear_attn(query, mem_key, memory_bank)  # (..., num_heads, d_memory)
 
         # Collapse the heads, and return the result
         return self.merge_head_projector(attn_results.flatten(-2, -1))
@@ -395,4 +402,4 @@ class AttnBankMemory(AbstractMemoryUnit):
 
 register_concrete_implementation(BankMemoryConfig, AttnBankMemory)
 
-random_test = BankMemoryConfig()
+print("passed")

@@ -4,9 +4,9 @@ import torch
 from torch import nn
 
 from .memory.deep_memory import DeepMemoryState, DeepLinearMemory
-from .memory.attn_bank_memories import FastLinearMemory, MemoryState
+from .memory import make_memory_unit, BankMemoryConfig
 from .base import DeviceDtypeWatch
-
+'''
 
 class Feedforward(nn.Module):
     """
@@ -571,4 +571,4 @@ def build_decoder(
         raise NotImplementedError(decoder_flavor)
 
     # Create and return the model
-    return RecurrentDecoder(d_model, dropout_rate, layers, dtype=dtype, device=device)
+    return RecurrentDecoder(d_model, dropout_rate, layers, dtype=dtype, device=device)'''

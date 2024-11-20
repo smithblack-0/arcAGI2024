@@ -131,9 +131,7 @@ class MemoryState(PytreeState):
         assert feature_name in self.persistent_state
         new_persistent = self.persistent_state.copy()
         new_persistent[feature_name] = update
-        constructor_kwargs = self.interpolation_state.copy()
-        constructor_kwargs.update(new_persistent)
-        return self.__class__(**constructor_kwargs)
+        return MemoryState(new_persistent, self.interpolation_state)
 
     def save_state(self) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         return self.get_interpolation_states(), self.get_persistent_state()
@@ -144,7 +142,7 @@ class MemoryState(PytreeState):
                    bypass: Dict[str, torch.Tensor]) -> 'MemoryState':
         constructor_kwargs = pytree.copy()
         constructor_kwargs.update(bypass)
-        return cls(**constructor_kwargs)
+        return cls(pytree, bypass)
 
 
 
@@ -164,16 +162,18 @@ class AbstractCreateState(nn.Module, ABC):
     """
 
     @property
+    @torch.jit.export
     def device(self) -> torch.device:
-        return self.__metainfo.device
+        return self._metainfo.device
 
     @property
+    @torch.jit.export
     def dtype(self) -> torch.dtype:
-        return self.__metainfo.dtype
+        return self._metainfo.dtype
 
     def __init__(self, dtype: torch.dtype, device: torch.device):
         super().__init__()
-        self.__metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
+        self._metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
 
     @abstractmethod
     def forward(self, batch_shape: torch.Size) -> MemoryState:
@@ -193,11 +193,11 @@ class AbstractReadMemory(nn.Module, ABC):
 
     @property
     def device(self) -> torch.device:
-        return self.__metainfo.device
+        return self._metainfo.device
 
     @property
     def dtype(self) -> torch.dtype:
-        return self.__metainfo.dtype
+        return self._metainfo.dtype
 
     def __init__(self,
                  dtype: torch.dtype,
@@ -208,7 +208,7 @@ class AbstractReadMemory(nn.Module, ABC):
         :param device: The device
         """
         super().__init__()
-        self.__metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
+        self._metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
 
     @abstractmethod
     def forward(self,
@@ -330,11 +330,11 @@ class AbstractWriteMemory(nn.Module, ABC):
 
     @property
     def device(self) -> torch.device:
-        return self.__metainfo.device
+        return self._metainfo.device
 
     @property
     def dtype(self) -> torch.dtype:
-        return self.__metainfo.dtype
+        return self._metainfo.dtype
 
     ##
     # Performance zone
@@ -459,13 +459,13 @@ class AbstractWriteMemory(nn.Module, ABC):
         """
 
         super().__init__()
-        self.__max_interpolation_rate = config.max_interpolation_factory
-        self.__metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
+        self._max_interpolation_rate = config.max_interpolation_factor
+        self._metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
 
         interpolation_logits = self._initialize_rate_logits(config.interpolation_factor_shapes,
                                                             config.min_write_half_life_init,
                                                             config.max_write_half_life_init)
-        self.__interpolation_logits = nn.Parameter(interpolation_logits)
+        self._interpolation_logits = nn.Parameter(interpolation_logits)
 
     @abstractmethod
     def _compute_common(self,
@@ -513,8 +513,8 @@ class AbstractWriteMemory(nn.Module, ABC):
             persistent_state = memory.get_persistent_state()
             with profiler.record_function("Computing write parameters: Implementation"):
                 update_state, write_probability = self._compute_common(query, persistent_state)
-            interpolation_rates = self._compute_interpolation_factors(self.__interpolation_logits)
-            interpolation_rates = self.__max_interpolation_rate * interpolation_rates
+            interpolation_rates = self._compute_interpolation_factors(self._interpolation_logits)
+            interpolation_rates = self._max_interpolation_rate * interpolation_rates
             write_factor = interpolation_rates * write_probability
         return update_state, write_factor
 
@@ -590,7 +590,7 @@ class AbstractMemoryUnit(nn.Module, ABC):
         self.state_creator = create_state_unit
         self.memory_reader = read_unit
         self.memory_writer = write_unit
-
+    @torch.jit.export
     def create_state(self,
                      batch_shape: torch.Size
                      ) -> MemoryState:
@@ -600,7 +600,7 @@ class AbstractMemoryUnit(nn.Module, ABC):
         :return: The concrete memory state.
         """
         return self.state_creator(batch_shape)
-
+    @torch.jit.export
     def reverse(self,
                 tensor: torch.Tensor,
                 batch_mask: torch.Tensor,
@@ -647,6 +647,7 @@ class AbstractMemoryUnit(nn.Module, ABC):
             read = self.memory_reader(tensor, next_memory)
         return (read, next_memory), original_memory
 
+    @torch.jit.export
     def forward(self,
                 tensor: torch.Tensor,
                 batch_mask: torch.Tensor,
@@ -755,7 +756,6 @@ def register_concrete_implementation(config: Type[AbstractMemoryConfig],
 
 
 def make_memory_unit(d_model: int,
-                     dropout: float,
                      dtype: torch.dtype,
                      device: torch.device,
                      config: AbstractMemoryConfig
@@ -774,4 +774,4 @@ def make_memory_unit(d_model: int,
     :return: The setup memory layer
     """
     cls = concrete_classes_registry[config.__class__]
-    return cls(d_model, dropout, dtype, device, config)
+    return cls(d_model, dtype, device, config)
