@@ -19,7 +19,7 @@ from torch.autograd import profiler
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
 
-from .decoder import RecurrentDecoder, DeepMemoryState, build_decoder
+from .decoder import RecurrentDecoder
 from .vocabulary import Vocabulary, AdditionalSpecialTokens
 from .base import (get_rng_state, set_rng_state, parallel_pytree_map,
                    DeviceDtypeWatch, GradientSubstitutionEndpoint, TensorTree)

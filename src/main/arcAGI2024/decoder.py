@@ -20,16 +20,12 @@ class FeedforwardConfig(SavableConfig):
     feedforward_dropout: dropout probability IN the hidden space.
                          Quite useful, but needs to be conservative,
                          as these layers are how the model makes decisions.
-    activation_module: Activation function to use. Should reference something in torch.nn.
-                       Custom activations are not supported at the moment due to issues with
-                       saving. Default is ReLU
-    activation_kwargs: Any kwargs to hand into the activation module when initializing.
+    activation_function: An activation function to use with the module. A nn.Module.
     """
     d_hidden: int
     num_internal_layers: int
     feedforward_dropout: float
-    activation_module: str = "ReLU"
-    activation_kwargs: Optional[Dict[str, Any]] = None
+    activation_function: nn.Module
 
 @dataclass
 class RecurrentDecoderLayerConfig(SavableConfig):
@@ -73,19 +69,6 @@ class RecurrentDecoderConfig(SavableConfig):
     main_dropout_rate: float
     layer_config: Optional[RecurrentDecoderLayerConfig] = None
     layer_configs: Optional[List[RecurrentDecoderLayerConfig]] = None
-
-    # We have to jump through a few additional hoops
-    # to ensure we can serialize and deserialize
-    # the lists, since support is not native at the moment.
-    def _serialize_data(self, item: Any) -> Any:
-        if isinstance(item, list):
-            item = [config.serialize() for config in item]
-        return item
-
-    def _deserialize_data(self, item: Any) -> Any:
-        if isinstance(item, list):
-            item = [self.deserialize(config) for config in item]
-        return item
 
 
 class FeedForward(nn.Module):

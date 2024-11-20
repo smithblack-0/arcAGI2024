@@ -1,8 +1,11 @@
 """
 A memory varient, uses a form of linear attention directly in order
-to gather, track, and resolve memory usage.
+to directly track, gather, and return information on the attention
+block.
 """
-
+import torch
+from torch import nn
+from typing import Callable, Tuple, Dict
 
 
 

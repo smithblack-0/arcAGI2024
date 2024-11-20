@@ -7,9 +7,11 @@ from typing import Iterable, List, Callable, Any, Union, Dict, Protocol, Type
 from collections.abc import Sized
 from dataclasses import dataclass
 from transformers import PreTrainedTokenizerFast, PreTrainedTokenizer
+from ..base import SavableConfig
 
 TokenizerAlias = Union[PreTrainedTokenizerFast, PreTrainedTokenizer]
-class LoaderConfig:
+
+class LoaderConfig(SavableConfig):
     """
     Base class for loader configs
     """

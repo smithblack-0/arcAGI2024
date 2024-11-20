@@ -1,13 +1,17 @@
 import os
 import shutil
 import json
+import base64
+import pickle
+import io
 from typing import Union, List, Tuple, Dict, Any, Optional, Callable, Type
 from abc import ABC, abstractmethod
 from tokenizers import Tokenizer
-from dataclasses import dataclass, asdict, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
+
 try:
     import torch_xla
 except:
@@ -20,6 +24,7 @@ TensorTree = Union[
     Tuple['TensorTree', ...],  # Recursion for tuples
     Dict[str, 'TensorTree']  # Recursion for dictionaries
 ]
+
 
 def get_rng_state(device: torch.device):
     if device.type == "cpu":
@@ -49,6 +54,7 @@ def set_rng_state(state, device: torch.device):
     else:
         raise ValueError("Unsupported device type. Must be 'cpu' or 'cuda'.")
 
+
 def load_activation_from_torch(name: str, kwargs: Optional[Dict[str, Any]] = None) -> nn.Module:
     """
     Dynamically fetch a torch activation layer
@@ -61,9 +67,11 @@ def load_activation_from_torch(name: str, kwargs: Optional[Dict[str, Any]] = Non
         return activation_class()
     else:
         return activation_class(**kwargs)
+
+
 def middle_quantiles_mask(tensor: torch.Tensor,
-                     dim: int,
-                     )->torch.Tensor:
+                          dim: int,
+                          ) -> torch.Tensor:
     """
     Gets a mask that is inclusive only of the middle two quantiles,
     that matches tensor.
@@ -77,14 +85,15 @@ def middle_quantiles_mask(tensor: torch.Tensor,
     bottom_half = tensor < mean
 
     # Take the mean of the top half, and the bottom half
-    first_quartile = (tensor*bottom_half).sum(dim=dim, keepdim=True) / (1e-9 + bottom_half.sum(dim=dim, keepdim=True))
-    third_quartile = (tensor*top_half).sum(dim=dim, keepdim=True) / (1e-9 + top_half.sum(dim=dim, keepdim=True))
+    first_quartile = (tensor * bottom_half).sum(dim=dim, keepdim=True) / (1e-9 + bottom_half.sum(dim=dim, keepdim=True))
+    third_quartile = (tensor * top_half).sum(dim=dim, keepdim=True) / (1e-9 + top_half.sum(dim=dim, keepdim=True))
 
     # Get everything that is between the first and third quantiles
     output = (tensor >= first_quartile) & (tensor < third_quartile)
     return output
 
-def middle_quantiles_mean(tensor: torch.Tensor, dim: int, keepdims: bool=False)->torch.Tensor:
+
+def middle_quantiles_mean(tensor: torch.Tensor, dim: int, keepdims: bool = False) -> torch.Tensor:
     """
     Performs a mean with only the middle two quantiles.
     Quite fast. Only about 5x slower than mean itself
@@ -94,9 +103,10 @@ def middle_quantiles_mean(tensor: torch.Tensor, dim: int, keepdims: bool=False)-
     :return: The mean, using only the middle two quantiles
     """
     selection_mask = middle_quantiles_mask(tensor, dim=dim)
-    sum = torch.sum(selection_mask*tensor, dim=dim, keepdim=keepdims)
+    sum = torch.sum(selection_mask * tensor, dim=dim, keepdim=keepdims)
     normalizer = torch.sum(selection_mask, dim=dim, keepdim=keepdims)
     return sum / normalizer
+
 
 class DropoutLogits(nn.Module):
     """
@@ -129,6 +139,7 @@ class DropoutLogits(nn.Module):
 
         return logits
 
+
 class DeviceDtypeWatch(nn.Module):
     """
     Initialized with, and subsequently watches,
@@ -138,12 +149,13 @@ class DeviceDtypeWatch(nn.Module):
     Should be used to store and lookup
     device and dtype information.
     """
+
     @property
-    def device(self)->torch.device:
+    def device(self) -> torch.device:
         return self.watch.device
 
     @property
-    def dtype(self)->torch.dtype:
+    def dtype(self) -> torch.dtype:
         return self.watch.dtype
 
     @device.setter
@@ -159,7 +171,6 @@ class DeviceDtypeWatch(nn.Module):
                  dtype: Optional[torch.dtype] = None,
                  ):
 
-
         # Standardize
         if device is None:
             device = torch.device('cpu')
@@ -172,8 +183,6 @@ class DeviceDtypeWatch(nn.Module):
         # when .to is used
         watch = torch.empty([0], dtype=dtype, device=device)
         self.register_buffer("watch", watch)
-
-
 
 
 class PytreeState(ABC):
@@ -217,18 +226,17 @@ class PytreeState(ABC):
 class SavableConfig(ABC):
     """
     A savable config is a dataclass feature which
-    is so named because it can be saved to a folder
+    is so named because it can be saved to a file
+    but may still contain some very advanced
+    logic or setup.
 
     ----- contract----
 
     The contract that must be sustained is that whatever
-    1) whatever parameters you define in dataclasses must be json savable
+
+    1) whatever parameters you define in dataclasses must be savable by json, pickle, or torch.save
     2) You must have instanced this into a dataclass.
     3) Do not try to make multiple config classes with the same name in different locations.
-
-    Note that if 1 is not true, you may consider overwriting
-    _save_to_folder and _load_from_folder to see to it things
-    work in the future
 
     ---- abstract logic ----
 
@@ -236,126 +244,181 @@ class SavableConfig(ABC):
     configs, and can use that when saving and loading. When saving,
     simple things like ints and strs are dumped to json directly.
 
-    Meanwhile, if we see a nested config - that is a savable
-    config inside a savable config - some custom logic creates
-    a save stub for that that indicates what version to use when
-    loading.
+    We have separate paths to handle saving configs, saving layers,
+    saving json, and saving pickle. Binary information is embedded
+    using base64
     """
+
     _config_types: Dict[str, Type['SavableConfig']] = {}
+
     def __init_subclass__(cls, **kwargs):
         if issubclass(cls, SavableConfig):
-            assert cls.__name__ not in cls._config_types
+            assert cls.__name__ not in cls._config_types, f"Duplicate class name: {cls.__name__}"
             cls._config_types[cls.__name__] = cls
-        return super().__init_subclass__(**kwargs)
+        super().__init_subclass__(**kwargs)
 
-    def _serialize_data(self, item: Any) -> Any:
+    def _serialize_data(self, item: Any) -> Dict[str, Any]:
         """
-        Can be overridden to handle edge cases when serializing
-        :param item: The item provided.
-        :return: The savable return
+        Serializes the data feature, and store it
         """
-        return item
+        # Pytree processing. We walk down to the bottom recursively processing along the way
+        if isinstance(item, dict):
+            serialized = {name : self._serialize_data(case) for name, case in item.items()}
+            return {"type" : "dict", "data" : serialized}
+        if isinstance(item, list):
+            serialized = [self._serialize_data(case) for case in item]
+            return {"type" : "list", "data" : serialized}
+        if isinstance(item, tuple):
+            serialized = tuple(self._serialize_data(case) for case in item)
+            return {"type" : "tuple", "data" : serialized}
+
+        # Leaf processing. We actually process this immediately.
+        if isinstance(item, SavableConfig):
+            # Savable configs are recursively compiled, then returned.
+            return item.serialize()
+        elif isinstance(item, nn.Module):
+            # We save layers to a buffer. We then convert it text
+            with io.BytesIO() as buffer:
+                torch.save(item, buffer)
+                buffer.seek(0)
+                layers_data = base64.b64encode(buffer.read()).decode('utf-8')
+            return {"type": "layer", "data": layers_data}
+
+        try:
+            # Try to json encode it.
+            json.dumps(item)
+            return {"type": "simple", "data": item}
+
+        except (TypeError, ValueError):
+            # Failure. Fallback to pickle\
+            pickle_data = pickle.dumps(item)
+            pickle_data = base64.b64encode(pickle_data).decode('utf-8')
+            return {"type": "pickle", "data": pickle_data}
 
     @classmethod
-    def _deserialize_data(cls, item: Any) -> Any:
+    def _deserialize_data(cls,
+                          layer_buffer: Dict[str, Any],
+                          pickle_buffer: Dict[str, Any],
+                          item: Dict[str, Any]) -> Any:
         """
-        Can be overridden to handle edge cases when deserializing
-        :param item: The serialized item
-        :return: The deserialized item
+        Deserializes data based on the method used during serialization.
+        Note we buffer and match identical pickles or layers in order
+        to ensure parameters end up shared properly.
         """
-        return item
+        assert isinstance(item, dict)
+        assert "type" in item
 
-    def serialize(self)->Dict[str, Any]:
-        """
-        Performs a serialization process, turning the savable
-        config into a string of json savable material. Hopefully.
-        """
+        # Pytree procesing. Support dict, list, tuple
+        if item['type'] == "dict":
+            return {name : cls._deserialize_data(layer_buffer, pickle_buffer,value)
+                    for name, value in item['data'].items()}
+        if item['type'] == "list":
+            return [cls._deserialize_data(layer_buffer, pickle_buffer, case) for case in item['data']]
+        if item['type'] == "tuple":
+            return tuple(cls._deserialize_data(layer_buffer, pickle_buffer, case) for case in item['data'])
 
-        # Fetch my personal data
-        if is_dataclass(self):
-            my_config = asdict(self)
+        # Leaf/Data deserializing.
+        if item["type"] == "config":
+            return cls.deserialize(item, layer_buffer, pickle_buffer)
+        elif item["type"] == "layer":
+            # Get the data to load
+            data = item["data"]
+
+            if data not in layer_buffer:
+                # If the data is not in the buffer, it now will be
+                with io.BytesIO(base64.b64decode(data)) as buffer:
+                    layer = torch.load(buffer)
+                layer_buffer[data] = layer
+
+            # Return the layer
+            return layer_buffer[data]
+
+        elif item["type"] == "pickle":
+            # Pickle is buffered
+            data = item["data"]
+
+            if data not in pickle_buffer:
+                with io.BytesIO(base64.b64decode(data)) as buffer:
+                    item = pickle.load(buffer)
+                pickle_buffer[data] = item
+            return pickle_buffer[data]
+        elif item['type'] == 'simple':
+            return item["data"]
         else:
-            raise TypeError("Should have converted to config to dataclass before calling save")
+            raise RuntimeError("Corrupted config detected..")
 
-        # Serialize my data, and the data
-        # of any attached savable configs
+    def serialize(self) ->  Dict[str, Any]:
+        """
+        Serializes the SavableConfig instance.
+        """
+        if is_dataclass(self):
+            my_config = {field.name: getattr(self, field.name) for field in fields(self)}
+        else:
+            raise TypeError("SavableConfig instances must be dataclasses.")
+
         serialized_state = {}
         for key, item in my_config.items():
-            if isinstance(item, SavableConfig):
-                # Serialize any nodes that are also savable configs.
-                stub = {"type" : 'config',
-                        'name' : item.__class__.__name__,
-                        'data' : item.serialize()
-                        }
-            else:
-                # Stamp data as such.
-                stub = {"type" : 'data', 'data' : self._serialize_data(item)}
-            serialized_state[key] = stub
+            serialized_state[key] = self._serialize_data(item)
 
-        # Finish up.
-        serialized_state = {"type" : 'config',
-                            'name' : self.__class__.__name__,
-                            'data' : serialized_state}
-        return serialized_state
+        # Include type information for deserialization
+        return {
+            "type": "config",
+            "name": self.__class__.__name__,
+            "data": serialized_state
+        }
 
     @classmethod
-    def deserialize(cls, data: Dict[str, Any]) -> 'SavableConfig':
+    def deserialize(cls,
+                    data: Dict[str, Any],
+                    _layer_buffer: Optional[Dict[str, nn.Module]] = None,
+                    _pickle_buffer: Optional[Dict[str, Any]] = None,
+                    ) -> 'SavableConfig':
         """
-        Recursively deserialize the config back into the original
-        config.
-        :param data: The root data.
-        :return: The savable config instance
+        Deserializes the SavableConfig instance from the serialized data.
         """
-        assert 'type' in data
-        assert 'name' in data
-        assert 'data' in data
-        assert data['type'] == 'config'
-
+        assert data['type'] == 'config', "Invalid data type for deserialization."
         cls_name = data['name']
         cls_type = cls._config_types[cls_name]
         cls_data = data['data']
 
+        # Standardize buffers
+        if _pickle_buffer is None:
+            _pickle_buffer = {}
+        if _layer_buffer is None:
+            _layer_buffer = {}
+
+        # Figure out what to initialize myself with.
+
         init_parameters = {}
         for name, item in cls_data.items():
-            if item['type'] == 'config':
-                item = cls.deserialize(item)
-            else:
-                item = cls._deserialize_data(item['data'])
-            init_parameters[name] = item
+            init_parameters[name] = cls._deserialize_data(_layer_buffer, _pickle_buffer, item)
         return cls_type(**init_parameters)
 
     def save_to_file(self, file: str):
-        # Setup location to save in
+        """
+        Saves the serialized SavableConfig instance to a file.
+        """
+        # Ensure the directory exists
         dir_name = os.path.dirname(file)
         if dir_name and not os.path.exists(dir_name):
             os.makedirs(dir_name)
-        # Save
+        # Serialize and save to file
         with open(file, 'w') as f:
             serialized_state = self.serialize()
             json.dump(serialized_state, f)
 
     @classmethod
-    def load_from_file(cls, file: str)->'SavableConfig':
-
+    def load_from_file(cls, file: str) -> 'SavableConfig':
+        """
+        Loads a SavableConfig instance from a file.
+        """
         with open(file, 'r') as f:
             serialized_state = json.load(f)
             instance = cls.deserialize(serialized_state)
         return instance
 
-
-
-
-
-
-class SavableLayer(nn.Module, ABC):
-    """
-    A savable layer is a layer that implements
-    two methods designed to allow saving and loading
-    from folders.
-    """
-
-
-def parallel_pytree_map(func: Callable[..., Any], *pytrees: Any) -> Any:
+def parallel_pytree_map(func: Callable[..., Any], *pytrees: Any,
+                        predicate: Optional[Callable[[Any, ...], bool]] = None) -> Any:
     """
     Recursively applies a function to corresponding leaves of multiple pytrees with the same structure.
 
@@ -370,11 +433,16 @@ def parallel_pytree_map(func: Callable[..., Any], *pytrees: Any) -> Any:
     Args:
         func (Callable[..., Any]): A function to apply to corresponding leaves of the pytrees.
         *pytrees (NestedTensor): Multiple pytrees with the same structure.
-
+        predicate: Kwarg only. Specifies a predicate to detect and process leaves with. Keep in mind
+                   it must accept the entire pytree collection
     Returns:
         NestedTensor: A new pytree with the function applied to corresponding leaves,
                       excluding those where the function returns None.
     """
+    # If predicate exists and is satisfied, leaf
+    if predicate is not None and predicate(*pytrees):
+        return func(*pytrees)
+
     # Check if all pytrees are lists, tuples, or dicts
     if all(isinstance(pytree, list) for pytree in pytrees):
         result = [parallel_pytree_map(func, *elems) for elems in zip(*pytrees)]

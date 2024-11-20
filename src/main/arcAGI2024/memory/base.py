@@ -54,17 +54,6 @@ class AbstractMemoryConfig(SavableConfig):
     max_interpolation_factor: float
     min_write_half_life_init: float
     max_write_half_life_init: float
-    file_name: str = "memory_config.json"
-
-    def __init__(self,
-                 max_interpolation_factor: float = 0.999,
-                 min_write_half_life_init: float = 0.1,
-                 max_write_half_life_init: float = 1000,
-                 ):
-        super().__init__()
-        self.max_interpolation_factor = max_interpolation_factor
-        self.min_write_half_life_init = min_write_half_life_init
-        self.max_write_half_life_init = max_write_half_life_init
 
 MemoryData =  Dict[str, torch.Tensor]
 class MemoryState(PytreeState):
@@ -552,7 +541,7 @@ class AbstractWriteMemory(nn.Module, ABC):
 
         # Update the cumulative write factors
         persistent_state = memory.get_persistent_state()
-        persistent_state["cum_write_factors"] -= write_factor
+        persistent_state["cum_write_factors"] -= write_factor.flatten(2, -1).mean(-1)
 
         # Return the new memory instance
         return MemoryState(persistent_state, final_interpolatable_state)
@@ -580,7 +569,7 @@ class AbstractWriteMemory(nn.Module, ABC):
 
         # Update the cumulative write factors
         persistent_state = memory.get_persistent_state()
-        persistent_state["cum_write_factors"] += write_factor
+        persistent_state["cum_write_factors"] += write_factor.flatten(2, -1).mean(-1)
 
         # Return the new memory instance
         return MemoryState(persistent_state, final_interpolatable_state)

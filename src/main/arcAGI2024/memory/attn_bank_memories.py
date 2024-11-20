@@ -8,7 +8,7 @@ from ..base import (TensorTree,
                     PytreeState,
                     DropoutLogits,
                     parallel_pytree_map,
-                    load_activation_from_torch)
+                    )
 from .base import (AbstractMemoryUnit,
                    MemoryState,
                    AbstractMemoryConfig,
@@ -21,7 +21,7 @@ from .base import (AbstractMemoryUnit,
 ##
 # Config requirements
 ##
-@dataclass(init=False)
+@dataclass
 class BankMemoryConfig(AbstractMemoryConfig):
     """
     Specifies the memory configuration for
@@ -43,10 +43,7 @@ class BankMemoryConfig(AbstractMemoryConfig):
                      We then bind the memories onto it.
     write_dropout_factor: A specialized dropout piece. It drops out attempts to write to some
                           memory location. Default is 0.1
-    linear_kernel_activation_name: The name of the layer in torch.nn to use when performing linear
-                                   kernel attention. Default is relu.
-    linear_kernel_activation_kwargs: Any kwargs to pass in when initializing the activation. Default
-                                     is None
+    linear_kernel_activation_fn: The layer to use to activate the linear kernel. Default is nn.ReLU
 
     ** Abstract config ***
     These generally have pretty good defaults, but can be modified if needed.
@@ -78,26 +75,10 @@ class BankMemoryConfig(AbstractMemoryConfig):
     num_read_heads: int
     num_write_heads: int
     write_dropout_factor: float
-    linear_kernel_activation_name: str = "ReLU"
-    linear_kernel_activation_kwargs: Optional[Dict[str, Any]] = None
-
-    def __init__(self,
-                 d_memory: int,
-                 num_memories: int,
-                 num_read_heads: int,
-                 num_write_heads: int,
-                 write_dropout_factor: float = 0.1,
-                 linear_kernel_activation: Callable[[torch.Tensor], torch.Tensor] = torch.relu,
-                 **optional_kwargs: Dict[str, Any]
-                 ):
-        self.d_memory = d_memory
-        self.num_memories = num_memories
-        self.num_read_heads = num_read_heads
-        self.num_write_heads = num_write_heads
-        self.write_dropout_factor = write_dropout_factor
-        self.linear_kernel_activation_name = linear_kernel_activation
-        super().__init__(**optional_kwargs)
-
+    linear_kernel_activation_fn: nn.Module = nn.ReLU()
+    max_interpolation_factor: float = 0.999,
+    min_write_half_life_init: float = 0.1,
+    max_write_half_life_init: float = 1000,
 
 ##
 # State creation mechanism
@@ -160,8 +141,7 @@ class LinearAttention(nn.Module):
 
     def __init__(self, config: BankMemoryConfig):
         super().__init__()
-        self.activation = load_activation_from_torch(config.linear_kernel_activation_name,
-                                                     config.linear_kernel_activation_kwargs)
+        self.activation = config.linear_kernel_activation_fn
 
     def read_from_kernel(self,
                          query: torch.Tensor,
@@ -417,4 +397,3 @@ class AttnBankMemory(AbstractMemoryUnit):
 
 register_concrete_implementation(BankMemoryConfig, AttnBankMemory)
 
-print("passed")
