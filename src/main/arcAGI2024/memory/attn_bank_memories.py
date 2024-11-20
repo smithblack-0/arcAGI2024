@@ -3,9 +3,19 @@ from typing import Optional, Tuple, List, Callable, Any, Dict
 import torch
 from dataclasses import dataclass
 from torch import nn
-from ..base import TensorTree, DeviceDtypeWatch, PytreeState, DropoutLogits, parallel_pytree_map
-from .base import (AbstractMemoryUnit, MemoryState, AbstractMemoryConfig, register_concrete_implementation,
-                   AbstractReadMemory, AbstractWriteMemory, AbstractCreateState)
+from ..base import (TensorTree,
+                    DeviceDtypeWatch,
+                    PytreeState,
+                    DropoutLogits,
+                    parallel_pytree_map,
+                    load_activation_from_torch)
+from .base import (AbstractMemoryUnit,
+                   MemoryState,
+                   AbstractMemoryConfig,
+                   register_concrete_implementation,
+                   AbstractReadMemory,
+                   AbstractWriteMemory,
+                   AbstractCreateState)
 
 
 ##
@@ -33,9 +43,10 @@ class BankMemoryConfig(AbstractMemoryConfig):
                      We then bind the memories onto it.
     write_dropout_factor: A specialized dropout piece. It drops out attempts to write to some
                           memory location. Default is 0.1
-    linear_kernel_activation: The kernel activation function for the linear attention mechanism
-                              Attention uses linear kernel attention, which requires an activation.
-
+    linear_kernel_activation_name: The name of the layer in torch.nn to use when performing linear
+                                   kernel attention. Default is relu.
+    linear_kernel_activation_kwargs: Any kwargs to pass in when initializing the activation. Default
+                                     is None
 
     ** Abstract config ***
     These generally have pretty good defaults, but can be modified if needed.
@@ -67,7 +78,8 @@ class BankMemoryConfig(AbstractMemoryConfig):
     num_read_heads: int
     num_write_heads: int
     write_dropout_factor: float
-    linear_kernel_activation: Callable[[torch.Tensor], torch.Tensor]
+    linear_kernel_activation_name: str = "ReLU"
+    linear_kernel_activation_kwargs: Optional[Dict[str, Any]] = None
 
     def __init__(self,
                  d_memory: int,
@@ -83,7 +95,7 @@ class BankMemoryConfig(AbstractMemoryConfig):
         self.num_read_heads = num_read_heads
         self.num_write_heads = num_write_heads
         self.write_dropout_factor = write_dropout_factor
-        self.linear_kernel_activation = linear_kernel_activation
+        self.linear_kernel_activation_name = linear_kernel_activation
         super().__init__(**optional_kwargs)
 
 
@@ -146,11 +158,10 @@ class LinearAttention(nn.Module):
     we will later see.
     """
 
-    def __init__(self,
-                 activation: Callable[[torch.Tensor], torch.Tensor],
-                 ):
+    def __init__(self, config: BankMemoryConfig):
         super().__init__()
-        self.activation = activation
+        self.activation = load_activation_from_torch(config.linear_kernel_activation_name,
+                                                     config.linear_kernel_activation_kwargs)
 
     def read_from_kernel(self,
                          query: torch.Tensor,
@@ -245,7 +256,7 @@ class ReadMemory(AbstractReadMemory):
 
         self.num_read_heads = config.num_memories
         self.d_memory = config.d_memory
-        self.linear_attn = LinearAttention(config.linear_kernel_activation)
+        self.linear_attn = LinearAttention(config)
         self.query_projector = nn.Linear(d_model, config.d_memory * config.num_read_heads,
                                          dtype=dtype, device=device)
         self.merge_head_projector = nn.Linear(config.d_memory * config.num_read_heads, d_model,
@@ -311,11 +322,12 @@ class WriteMemory(AbstractWriteMemory):
 
         super().__init__(dtype, device, config)
         self.d_model = d_model
-        self.config = config
+        self.num_write_heads = config.num_write_heads
+        self.d_memory = config.d_memory
 
         # Create the linear attn mechanism.
 
-        self.linear_attn = LinearAttention(config.linear_kernel_activation)
+        self.linear_attn = LinearAttention(config)
 
         # Create the addresses projection mechanisms. Also, create
         # the attention addresses. Note the value projector is
@@ -374,8 +386,11 @@ class WriteMemory(AbstractWriteMemory):
         write_logits = self.dropout_logits(write_logits)
         write_probability = torch.sigmoid(write_logits)
 
+        # Output
+        output = {"memories" : update}
+
         # Return common
-        return update, write_probability
+        return output, write_probability
 
 
 class AttnBankMemory(AbstractMemoryUnit):

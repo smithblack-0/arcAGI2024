@@ -10,7 +10,7 @@ import torch
 import json
 from torch import nn
 from torch.autograd import profiler
-from typing import Tuple, Dict, Union, Protocol, Type, Any, Optional
+from typing import Tuple, Dict, Union, Protocol, Type, Any, Optional, List
 from dataclasses import dataclass, asdict
 from ..base import PytreeState, SavableConfig, DeviceDtypeWatch, TensorTree, parallel_pytree_map
 from abc import ABC, abstractmethod
@@ -54,17 +54,17 @@ class AbstractMemoryConfig(SavableConfig):
     max_interpolation_factor: float
     min_write_half_life_init: float
     max_write_half_life_init: float
+    file_name: str = "memory_config.json"
+
     def __init__(self,
                  max_interpolation_factor: float = 0.999,
                  min_write_half_life_init: float = 0.1,
                  max_write_half_life_init: float = 1000,
-                 file_name: str = "memory_config.json"
                  ):
-        super().__init__(file_name)
+        super().__init__()
         self.max_interpolation_factor = max_interpolation_factor
         self.min_write_half_life_init = min_write_half_life_init
         self.max_write_half_life_init = max_write_half_life_init
-        self.file_name = file_name
 
 MemoryData =  Dict[str, torch.Tensor]
 class MemoryState(PytreeState):
@@ -141,6 +141,8 @@ class MemoryState(PytreeState):
         Turns the stored tensors into leafs which accumulate gradients
         """
         for tensor in self.get_interpolation_states().values():
+            tensor.detach_()
+            tensor.requires_grad_(True)
 
     @classmethod
     def load_state(cls,
@@ -149,8 +151,6 @@ class MemoryState(PytreeState):
         constructor_kwargs = pytree.copy()
         constructor_kwargs.update(bypass)
         return cls(pytree, bypass)
-
-        "
 
 
 
@@ -414,7 +414,7 @@ class AbstractWriteMemory(nn.Module, ABC):
                         update_tensors: Dict[str, torch.Tensor],
                         write_factor: torch.Tensor,
                         batch_mask: torch.Tensor,
-                        ):
+                        )->Dict[str, torch.Tensor]:
         """
         Advances the memory by interpolating between the memory
         and update tensors.
@@ -530,7 +530,7 @@ class AbstractWriteMemory(nn.Module, ABC):
         return update_state, write_factor
 
     def reverse_memory(self,
-                       update: TensorTree,
+                       update: MemoryData,
                        write_factor: torch.Tensor,
                        batch_mask: torch.Tensor,
                        memory: MemoryState,
@@ -558,7 +558,7 @@ class AbstractWriteMemory(nn.Module, ABC):
         return MemoryState(persistent_state, final_interpolatable_state)
 
     def advance_memory(self,
-                       update: TensorTree,
+                       update: MemoryData,
                        write_factor: torch.Tensor,
                        batch_mask: torch.Tensor,
                        memory: MemoryState,
@@ -603,7 +603,7 @@ class AbstractMemoryUnit(nn.Module, ABC):
         self.memory_writer = write_unit
     @torch.jit.export
     def create_state(self,
-                     batch_shape: torch.Size
+                     batch_shape: List[int]
                      ) -> MemoryState:
         """
         Creates and returns the blank memory state
@@ -642,18 +642,7 @@ class AbstractMemoryUnit(nn.Module, ABC):
             with torch.no_grad():
                 original_memory = self.memory_writer.reverse_memory(update, write_factor,
                                                                     batch_mask, next_memory)
-                original_memory = original_memory.detach()
-
-        # Setup the original memory to accumulate gradients.
-        with profiler.record_function("setting up gradient accumulator"):
-            interpolative_state, memory_state = original_memory.save_state()
-
-            def setup_grads(tensor: torch.Tensor) -> torch.Tensor:
-                tensor = nn.Parameter(tensor, requires_grad=True)
-                tensor.retain_grad()
-                return tensor
-
-            original_memory = parallel_pytree_map(setup_grads, original_memory)
+            original_memory.setup_for_gradients_()
 
         # Manually complete the read
         with profiler.record_function("forward pass"):

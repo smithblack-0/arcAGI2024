@@ -1,10 +1,10 @@
 import os
 import shutil
 import json
-from typing import Union, List, Tuple, Dict, Any, Optional, Callable
+from typing import Union, List, Tuple, Dict, Any, Optional, Callable, Type
 from abc import ABC, abstractmethod
 from tokenizers import Tokenizer
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, is_dataclass
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
@@ -49,6 +49,18 @@ def set_rng_state(state, device: torch.device):
     else:
         raise ValueError("Unsupported device type. Must be 'cpu' or 'cuda'.")
 
+def load_activation_from_torch(name: str, kwargs: Optional[Dict[str, Any]] = None) -> nn.Module:
+    """
+    Dynamically fetch a torch activation layer
+    :param name: The name of the activation layer. Like ReLU. Match case
+    :param kwargs: Any kwargs to use
+    :return: The initialized layer
+    """
+    activation_class = getattr(nn, name)
+    if kwargs is None:
+        return activation_class()
+    else:
+        return activation_class(**kwargs)
 def middle_quantiles_mask(tensor: torch.Tensor,
                      dim: int,
                      )->torch.Tensor:
@@ -206,36 +218,133 @@ class SavableConfig(ABC):
     """
     A savable config is a dataclass feature which
     is so named because it can be saved to a folder
+
+    ----- contract----
+
+    The contract that must be sustained is that whatever
+    1) whatever parameters you define in dataclasses must be json savable
+    2) You must have instanced this into a dataclass.
+    3) Do not try to make multiple config classes with the same name in different locations.
+
+    Note that if 1 is not true, you may consider overwriting
+    _save_to_folder and _load_from_folder to see to it things
+    work in the future
+
+    ---- abstract logic ----
+
+    On the backend, we keep track of all the different savable
+    configs, and can use that when saving and loading. When saving,
+    simple things like ints and strs are dumped to json directly.
+
+    Meanwhile, if we see a nested config - that is a savable
+    config inside a savable config - some custom logic creates
+    a save stub for that that indicates what version to use when
+    loading.
     """
+    _config_types: Dict[str, Type['SavableConfig']] = {}
+    def __init_subclass__(cls, **kwargs):
+        if issubclass(cls, SavableConfig):
+            assert cls.__name__ not in cls._config_types
+            cls._config_types[cls.__name__] = cls
+        return super().__init_subclass__(**kwargs)
 
-    # class name. Usually a shared class feature.
-    file_name: str
-    def __init__(self, file_name: str):
-        self.file_name = file_name
-    # Concrete details.
-    #
-    # These are some good defaults, but can
-    # be overwritten later if needed.
+    def _serialize_data(self, item: Any) -> Any:
+        """
+        Can be overridden to handle edge cases when serializing
+        :param item: The item provided.
+        :return: The savable return
+        """
+        return item
 
-    def _save_to_folder(self, directory: Union[str, os.PathLike]):
-        file = os.path.join(directory, self.file_name)
+    @classmethod
+    def _deserialize_data(cls, item: Any) -> Any:
+        """
+        Can be overridden to handle edge cases when deserializing
+        :param item: The serialized item
+        :return: The deserialized item
+        """
+        return item
+
+    def serialize(self)->Dict[str, Any]:
+        """
+        Performs a serialization process, turning the savable
+        config into a string of json savable material. Hopefully.
+        """
+
+        # Fetch my personal data
+        if is_dataclass(self):
+            my_config = asdict(self)
+        else:
+            raise TypeError("Should have converted to config to dataclass before calling save")
+
+        # Serialize my data, and the data
+        # of any attached savable configs
+        serialized_state = {}
+        for key, item in my_config.items():
+            if isinstance(item, SavableConfig):
+                # Serialize any nodes that are also savable configs.
+                stub = {"type" : 'config',
+                        'name' : item.__class__.__name__,
+                        'data' : item.serialize()
+                        }
+            else:
+                # Stamp data as such.
+                stub = {"type" : 'data', 'data' : self._serialize_data(item)}
+            serialized_state[key] = stub
+
+        # Finish up.
+        serialized_state = {"type" : 'config',
+                            'name' : self.__class__.__name__,
+                            'data' : serialized_state}
+        return serialized_state
+
+    @classmethod
+    def deserialize(cls, data: Dict[str, Any]) -> 'SavableConfig':
+        """
+        Recursively deserialize the config back into the original
+        config.
+        :param data: The root data.
+        :return: The savable config instance
+        """
+        assert 'type' in data
+        assert 'name' in data
+        assert 'data' in data
+        assert data['type'] == 'config'
+
+        cls_name = data['name']
+        cls_type = cls._config_types[cls_name]
+        cls_data = data['data']
+
+        init_parameters = {}
+        for name, item in cls_data.items():
+            if item['type'] == 'config':
+                item = cls.deserialize(item)
+            else:
+                item = cls._deserialize_data(item['data'])
+            init_parameters[name] = item
+        return cls_type(**init_parameters)
+
+    def save_to_file(self, file: str):
+        # Setup location to save in
+        dir_name = os.path.dirname(file)
+        if dir_name and not os.path.exists(dir_name):
+            os.makedirs(dir_name)
+        # Save
         with open(file, 'w') as f:
-            config = asdict(self)
-            json.dump(config, f)
+            serialized_state = self.serialize()
+            json.dump(serialized_state, f)
 
-    def _load_from_folder(cls, directory: Union[str, os.PathLike]) -> 'AbstractMemoryConfig':
-        file = os.path.join(directory, cls.file_name)
+    @classmethod
+    def load_from_file(cls, file: str)->'SavableConfig':
+
         with open(file, 'r') as f:
-            config = json.load(f)
-        return cls(**config)
+            serialized_state = json.load(f)
+            instance = cls.deserialize(serialized_state)
+        return instance
 
-    # Actual save/load interface
-    def save_to_folder(self, directory: Union[str, os.PathLike]):
-        os.makedirs(directory, exist_ok=True)
-        self._save_to_folder(directory)
 
-    def load_from_folder(self, directory: Union[str, os.PathLike])->'SavableConfig':
-        return self._load_from_folder(directory)
+
+
 
 
 class SavableLayer(nn.Module, ABC):
