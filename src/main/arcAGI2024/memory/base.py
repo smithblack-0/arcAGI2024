@@ -66,7 +66,7 @@ class AbstractMemoryConfig(SavableConfig):
         self.max_write_half_life_init = max_write_half_life_init
         self.file_name = file_name
 
-
+MemoryData =  Dict[str, torch.Tensor]
 class MemoryState(PytreeState):
     """
     A common memory state.
@@ -80,13 +80,14 @@ class MemoryState(PytreeState):
     """
 
     def __init__(self,
-                 persistent_state: Dict[str, torch.Tensor],
-                 interpolation_state: Dict[str, torch.Tensor],
+                 persistent_state: MemoryData,
+                 interpolation_state: MemoryData,
                  ):
+
         self.persistent_state = persistent_state
         self.interpolation_state = interpolation_state
 
-    def get_interpolation_states(self) -> Dict[str, torch.Tensor]:
+    def get_interpolation_states(self) -> MemoryData:
         """
         Gets a relevant memory implementation in the appropriate order
         involving the features that can be interpolated. These will
@@ -94,7 +95,7 @@ class MemoryState(PytreeState):
         """
         return self.interpolation_state
 
-    def get_persistent_state(self) -> Dict[str, torch.Tensor]:
+    def get_persistent_state(self) -> MemoryData:
         """
         Gets relevant parameter state in the appropriate order,
         and involving the indicated names. These features must
@@ -103,7 +104,7 @@ class MemoryState(PytreeState):
         return self.persistent_state
 
     def replace_interpolation(self,
-                              interpolation_state: Dict[str, torch.Tensor]
+                              interpolation_state: MemoryData
                               ) -> 'MemoryState':
         """
         Replaces the relevant features of the interpolation state in a single go
@@ -133,16 +134,25 @@ class MemoryState(PytreeState):
         new_persistent[feature_name] = update
         return MemoryState(new_persistent, self.interpolation_state)
 
-    def save_state(self) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    def save_state(self) -> Tuple[MemoryData, MemoryData]:
         return self.get_interpolation_states(), self.get_persistent_state()
+    def setup_for_gradients(self):
+        """
+        Turns the stored tensors into leafs which accumulate gradients
+        """
 
     @classmethod
     def load_state(cls,
-                   pytree: Dict[str, torch.Tensor],
-                   bypass: Dict[str, torch.Tensor]) -> 'MemoryState':
+                   pytree: MemoryData,
+                   bypass: MemoryData) -> 'MemoryState':
         constructor_kwargs = pytree.copy()
         constructor_kwargs.update(bypass)
         return cls(pytree, bypass)
+
+        "
+
+
+
 
 
 
@@ -498,7 +508,7 @@ class AbstractWriteMemory(nn.Module, ABC):
     def compute_common(self,
                        query: torch.Tensor,
                        memory: MemoryState,
-                       ) -> Tuple[TensorTree, torch.Tensor]:
+                       ) -> Tuple[MemoryData, torch.Tensor]:
         """
         Internal helper with the additional logic needed
         to get the write factor ready to go based on the write
@@ -631,9 +641,12 @@ class AbstractMemoryUnit(nn.Module, ABC):
             with torch.no_grad():
                 original_memory = self.memory_writer.reverse_memory(update, write_factor,
                                                                     batch_mask, next_memory)
+                original_memory = original_memory.detach()
 
         # Setup the original memory to accumulate gradients.
         with profiler.record_function("setting up gradient accumulator"):
+            interpolative_state, memory_state = original_memory.save_state()
+
             def setup_grads(tensor: torch.Tensor) -> torch.Tensor:
                 tensor = nn.Parameter(tensor, requires_grad=True)
                 tensor.retain_grad()
