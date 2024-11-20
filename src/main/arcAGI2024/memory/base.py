@@ -136,10 +136,11 @@ class MemoryState(PytreeState):
 
     def save_state(self) -> Tuple[MemoryData, MemoryData]:
         return self.get_interpolation_states(), self.get_persistent_state()
-    def setup_for_gradients(self):
+    def setup_for_gradients_(self):
         """
         Turns the stored tensors into leafs which accumulate gradients
         """
+        for tensor in self.get_interpolation_states().values():
 
     @classmethod
     def load_state(cls,
