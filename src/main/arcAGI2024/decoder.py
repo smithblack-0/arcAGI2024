@@ -75,7 +75,8 @@ class RecurrentDecoderConfig(SavableConfig):
     layer_configs: Optional[List[RecurrentDecoderLayerConfig]] = None
 
     # We have to jump through a few additional hoops
-    # to ensure we can serialize and deserialize.
+    # to ensure we can serialize and deserialize
+    # the lists, since support is not native at the moment.
     def _serialize_data(self, item: Any) -> Any:
         if isinstance(item, list):
             item = [config.serialize() for config in item]
@@ -105,8 +106,6 @@ class FeedForward(nn.Module):
         self.d_model = d_model
 
         self.activation = load_activation_from_torch(config.activation_module, config.activation_kwargs)
-            else activation_layer(**config.activation_kwargs)
-
         self.ff_intake = nn.Linear(d_model, config.d_hidden, device=device, dtype=dtype)
         self.ff_output = nn.Linear(config.d_hidden, d_model, device=device, dtype=dtype)
         self.ff_internal = nn.ModuleList(nn.Linear(config.d_hidden, config.d_hidden, device=device, dtype=dtype)
