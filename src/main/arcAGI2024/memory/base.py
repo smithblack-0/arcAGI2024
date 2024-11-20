@@ -16,13 +16,32 @@ from ..base import PytreeState, SavableConfig, DeviceDtypeWatch, TensorTree, par
 from abc import ABC, abstractmethod
 
 
-@dataclass
 class AbstractMemoryConfig(SavableConfig):
     """
     The abstract specification for the memory
     config contains a few decent defaults.
     It can be implemented to produce configs more
     specific to a particular memory flavor.
+
+    ** Interpolation factor config ***
+
+    The write factor used to commit updates into memories has a lot
+    of math associated with it. They do the the following.
+
+    max_interpolation_factor: The maximum probabilty that can be written in a single step.
+                              This is needed in order to prevent division by zero. Set to
+                              0.999 as default, but lower might help with numeric stability
+
+    The following two control how the write interpolation rates are initialized. Those factors
+    are initialized uniformly between these, and can then be trained. These are basically
+    decay factors between 0 and 1, that control how fast the running interpolation decays away
+    when the model chooses to write to the memory in every step.
+
+    min_write_half_life_init: Controls the minimum half life that the write interpolation rates
+                              can be set on initialization. Must be >= 0.
+    max_write_half_life_init: Controls the maximum half life that the write interpolation rates
+                              can be set on initialization. Must be > min_write_half_life_init.
+
     """
 
     @property
@@ -32,13 +51,21 @@ class AbstractMemoryConfig(SavableConfig):
         # probabilities.
         raise NotImplementedError("Need to implement interpolation shapes.")
 
-    # Some good defaults
-    max_interpolation_factory: float = 0.999
-    min_write_half_life_init: float = 0.1
-    max_write_half_life_init: float = 10000.0
+    max_interpolation_factor: float
+    min_write_half_life_init: float
+    max_write_half_life_init: float
+    def __init__(self,
+                 max_interpolation_factor: float = 0.999,
+                 min_write_half_life_init: float = 0.1,
+                 max_write_half_life_init: float = 1000,
+                 file_name: str = "memory_config.json"
+                 ):
+        super().__init__(file_name)
+        self.max_interpolation_factor = max_interpolation_factor
+        self.min_write_half_life_init = min_write_half_life_init
+        self.max_write_half_life_init = max_write_half_life_init
+        self.file_name = file_name
 
-    # The file name that the config will save as
-    file_name = "memory_config.json"
 
 class MemoryState(PytreeState):
     """
@@ -654,7 +681,6 @@ class ConcreteMemoryUnitProtocol(Protocol):
 
     def __init__(self,
                  d_model: int,
-                 dropout: float,
                  dtype: torch.dtype,
                  device: torch.device,
                  config: AbstractMemoryConfig

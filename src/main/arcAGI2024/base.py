@@ -202,7 +202,6 @@ class PytreeState(ABC):
         :return: A setup instance.
         """
 
-@dataclass
 class SavableConfig(ABC):
     """
     A savable config is a dataclass feature which
@@ -211,7 +210,8 @@ class SavableConfig(ABC):
 
     # class name. Usually a shared class feature.
     file_name: str
-
+    def __init__(self, file_name: str):
+        self.file_name = file_name
     # Concrete details.
     #
     # These are some good defaults, but can
