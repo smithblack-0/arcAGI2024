@@ -55,7 +55,10 @@ class AbstractMemoryConfig(SavableConfig):
     min_write_half_life_init: float
     max_write_half_life_init: float
 
-MemoryData =  Dict[str, torch.Tensor]
+
+MemoryData = Dict[str, torch.Tensor]
+
+
 class MemoryState(PytreeState):
     """
     A common memory state.
@@ -68,11 +71,57 @@ class MemoryState(PytreeState):
     changed once set.
     """
 
+    @property
+    def cum_write_mass(self) -> torch.Tensor:
+        """
+        The cumulative write mass contains the sum of all
+        the write factors.
+        """
+        return self.persistent_state["cum_write_mass"]
+
+    @cum_write_mass.setter
+    def cum_write_mass(self, value: torch.Tensor):
+        assert value.shape == self.cum_write_mass.shape
+        self.persistent_state["cum_write_mass"] = value
+
+    @property
+    def timestep(self) -> torch.Tensor:
+        """
+        The timestep we are currently on, when accounting
+        for batch padding masking.
+        """
+        return self.persistent_state["timestep"]
+
+    @timestep.setter
+    def timestep(self, value: torch.Tensor):
+        assert value.shape == self.timestep.shape
+        self.persistent_state["timestep"] = value
+
+    @property
+    def running_distance(self) -> torch.Tensor:
+        """
+        The unnormalized distance, indicating from the start of the sequence
+        where each memory unit will, on average, be reading from.
+        """
+        return self.persistent_state["running_distance"]
+
+    @property
+    def normalized_timestep_distance(self) -> torch.Tensor:
+        """
+        The normalized timestep distance. Measure the current timestep as
+        0, and all the way back at the beginning as one. Indicates how
+        far into the past each memory slot is looking
+        """
+        timestep = self.timestep
+        running_distance = self.running_distance
+        while timestep.dim() < running_distance.dim():
+            running_distance = running_distance.unsqueeze(-1)
+        return (timestep - running_distance) / (timestep + 1e-6)
+
     def __init__(self,
                  persistent_state: MemoryData,
                  interpolation_state: MemoryData,
                  ):
-
         self.persistent_state = persistent_state
         self.interpolation_state = interpolation_state
 
@@ -125,6 +174,7 @@ class MemoryState(PytreeState):
 
     def save_state(self) -> Tuple[MemoryData, MemoryData]:
         return self.get_interpolation_states(), self.get_persistent_state()
+
     def setup_for_gradients_(self):
         """
         Turns the stored tensors into leafs which accumulate gradients
@@ -142,11 +192,6 @@ class MemoryState(PytreeState):
         return cls(pytree, bypass)
 
 
-
-
-
-
-
 class AbstractCreateState(nn.Module, ABC):
     """
     Creates a blank memory state based on the
@@ -154,7 +199,7 @@ class AbstractCreateState(nn.Module, ABC):
     be defined.
 
     One special note is the user must remember
-    to include a "cum_write_factors" term in the
+    to include a "cum_write_mass" term in the
     persistent memory or they will face an error.
 
     This should be a zeros array shaped like your
@@ -176,13 +221,23 @@ class AbstractCreateState(nn.Module, ABC):
         self._metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
 
     @abstractmethod
-    def forward(self, batch_shape: torch.Size) -> MemoryState:
+    def setup_state(self, batch_shape: List[int]) -> MemoryState:
         """
         When implemented, returns a memory object when seeing a batch shape
         :param batch_shape: The batch shape to consider
         :return: The memory state. Remember to include
                  cumulative_write_factors in persistant.
         """
+
+    def forward(self, batch_shape: List[int]) -> MemoryState:
+        state = self.setup_state(batch_shape)
+        if "cum_write_mass" not in state.persistent_state:
+            raise ValueError("Did not provide a cum_write_mass in the persistant state")
+        if "timestep" not in state.persistent_state:
+            raise ValueError("Did not provide a timestep feature in the persistent state")
+        if "running_distance" not in state.interpolation_state:
+            raise ValueError("Did not provide running_distance in the interpolation state")
+        return state
 
 
 class AbstractReadMemory(nn.Module, ABC):
@@ -222,6 +277,7 @@ class AbstractReadMemory(nn.Module, ABC):
         :return: The memory read. Shape (..., d_model)
         """
 
+
 @torch.jit.script
 def _advance_memory_case(memory_tensor: torch.Tensor,
                          update_tensor: torch.Tensor,
@@ -251,6 +307,7 @@ def _advance_memory_case(memory_tensor: torch.Tensor,
     memory_update = memory_tensor * (1 - write_factor) + update_tensor * write_factor
     memory_tensor = torch.where(batch_mask, memory_tensor, memory_update)
     return memory_tensor
+
 
 @torch.jit.script
 def _retard_memory_case(memory_tensor: torch.Tensor,
@@ -283,11 +340,12 @@ def _retard_memory_case(memory_tensor: torch.Tensor,
     while batch_mask.dim() < memory_tensor.dim():
         batch_mask = batch_mask.unsqueeze(-1)
 
-    log_memory = torch.log(update_tensor * write_factor - memory_tensor)
-    log_memory -= torch.log(1 - write_factor)  # divides
+    log_memory = torch.log(update_tensor * write_factor - memory_tensor + 1e-9)
+    log_memory -= torch.log(1 - write_factor + 1e-9)  # divides
     memory_update = torch.exp(log_memory)
     memory_tensor = torch.where(batch_mask, memory_tensor, memory_update)
     return memory_tensor
+
 
 class AbstractWriteMemory(nn.Module, ABC):
     """
@@ -354,12 +412,21 @@ class AbstractWriteMemory(nn.Module, ABC):
                                 high_half_life: float
                                 ) -> torch.Tensor:
         """
-        Initialize interpolation factors. We spread our factors out
-        over the given half life.
-        :param shape: The shape to initialize
-        :param low_half_life: The lowest half life to initialize as
-        :param high_half_life: The highest half life to initialize as
-        :return: An initialized logits that will activate to the indicated half lives.
+        Initialize interpolation logits based on specified half-life ranges.
+
+        The process involves:
+        1. Sampling half-life values uniformly between low and high thresholds.
+        2. Computing decay factors corresponding to each half-life.
+        3. Transforming decay factors into logits using inverse sigmoid.
+        4. Applying a squared transformation to logits to ensure stability across a wide range of half-lives.
+
+        This method ensures that the interpolation rates remain numerically stable, especially when handling very
+        long half-lives.
+
+        :param shape: The shape to initialize.
+        :param low_half_life: The minimum half-life for initialization.
+        :param high_half_life: The maximum half-life for initialization.
+        :return: Initialized logits for interpolation factors.
         """
 
         # Setup a tensor uniformly filled with these half lives.
@@ -379,12 +446,17 @@ class AbstractWriteMemory(nn.Module, ABC):
     @torch.jit.script
     def _compute_interpolation_factors(interpolation_logits: torch.Tensor) -> torch.Tensor:
         """
-        Highly optimized compute interpolation factor.
-        We smooth the logits out near the extremes to
-        make training a little easier.
+        Computes interpolation factors from logits with stability considerations.
 
-        :param interpolation_logits: The raw interpolation parameters
-        :return: The activated logits, between 0 and 1
+        The transformation involves:
+        1. Taking the square root of the absolute logits to reduce the growth rate at extreme values.
+        2. Preserving the sign of the original logits.
+        3. Applying the sigmoid function to map transformed logits to the (0, 1) range.
+
+        This approach mitigates the risk of dead gradients by ensuring that logits do not grow too rapidly in magnitude.
+
+        :param interpolation_logits: The raw interpolation parameters.
+        :return: The activated interpolation factors, constrained between 0 and 1.
         """
 
         # These logits grow slower at more extreme values.
@@ -399,11 +471,11 @@ class AbstractWriteMemory(nn.Module, ABC):
     @staticmethod
     @torch.jit.script
     def _advance_memory(
-                        memory_tensors: Dict[str, torch.Tensor],
-                        update_tensors: Dict[str, torch.Tensor],
-                        write_factor: torch.Tensor,
-                        batch_mask: torch.Tensor,
-                        )->Dict[str, torch.Tensor]:
+            memory_tensors: Dict[str, torch.Tensor],
+            update_tensors: Dict[str, torch.Tensor],
+            write_factor: torch.Tensor,
+            batch_mask: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
         """
         Advances the memory by interpolating between the memory
         and update tensors.
@@ -425,11 +497,11 @@ class AbstractWriteMemory(nn.Module, ABC):
     @staticmethod
     @torch.jit.script
     def _retard_memory(
-                       memory_tensors: Dict[str, torch.Tensor],
-                       update_tensors: Dict[str, torch.Tensor],
-                       write_factor: torch.Tensor,
-                       batch_mask: torch.Tensor,
-                       )->Dict[str, torch.Tensor]:
+            memory_tensors: Dict[str, torch.Tensor],
+            update_tensors: Dict[str, torch.Tensor],
+            write_factor: torch.Tensor,
+            batch_mask: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
         """
         Retards the interpolatable portions of the
         memory by reversing the original operation
@@ -447,6 +519,7 @@ class AbstractWriteMemory(nn.Module, ABC):
             final_update = _retard_memory_case(memory_tensor, update_tensor, write_factor, batch_mask)
             output_tensors[name] = final_update
         return output_tensors
+
     def __init__(self,
                  dtype: torch.dtype,
                  device: torch.device,
@@ -513,9 +586,20 @@ class AbstractWriteMemory(nn.Module, ABC):
             persistent_state = memory.get_persistent_state()
             with profiler.record_function("Computing write parameters: Implementation"):
                 update_state, write_probability = self._compute_common(query, persistent_state)
+
+            # Compute write factor
             interpolation_rates = self._compute_interpolation_factors(self._interpolation_logits)
             interpolation_rates = self._max_interpolation_rate * interpolation_rates
             write_factor = interpolation_rates * write_probability
+
+            # We need to integrate the timestep into the running distance so interpolation will be performed
+            #
+            # But for that to work we need it needs to be as long as write factor
+            assert "running_distance" not in update_state
+            timestep = memory.timestep
+            while timestep.dim() < write_factor.dim():
+                timestep = timestep.unsqueeze(-1)
+            update_state["running_distance"] = timestep
         return update_state, write_factor
 
     def reverse_memory(self,
@@ -538,13 +622,14 @@ class AbstractWriteMemory(nn.Module, ABC):
         interpolatable_state = memory.get_interpolation_states()
         final_interpolatable_state = self._retard_memory(interpolatable_state, update,
                                                          write_factor, batch_mask)
+        memory = memory.replace_interpolation(final_interpolatable_state)
 
-        # Update the cumulative write factors
-        persistent_state = memory.get_persistent_state()
-        persistent_state["cum_write_factors"] -= write_factor.flatten(2, -1).mean(-1)
+        # Update the persistant factors
+        memory.cum_write_mass -= write_factor
+        memory.timestep -= batch_mask
 
         # Return the new memory instance
-        return MemoryState(persistent_state, final_interpolatable_state)
+        return memory
 
     def advance_memory(self,
                        update: MemoryData,
@@ -566,13 +651,16 @@ class AbstractWriteMemory(nn.Module, ABC):
         interpolatable_state = memory.get_interpolation_states()
         final_interpolatable_state = self._advance_memory(interpolatable_state, update,
                                                           write_factor, batch_mask)
+        memory = memory.replace_interpolation(final_interpolatable_state)
 
-        # Update the cumulative write factors
-        persistent_state = memory.get_persistent_state()
-        persistent_state["cum_write_factors"] += write_factor.flatten(2, -1).mean(-1)
+        # Update the persistent factors
+
+        memory.cum_write_mass += write_factor
+        memory.timestep += batch_mask
 
         # Return the new memory instance
-        return MemoryState(persistent_state, final_interpolatable_state)
+        return memory
+
 
 class AbstractMemoryUnit(nn.Module, ABC):
     """
@@ -590,6 +678,7 @@ class AbstractMemoryUnit(nn.Module, ABC):
         self.state_creator = create_state_unit
         self.memory_reader = read_unit
         self.memory_writer = write_unit
+
     @torch.jit.export
     def create_state(self,
                      batch_shape: List[int]
@@ -600,6 +689,7 @@ class AbstractMemoryUnit(nn.Module, ABC):
         :return: The concrete memory state.
         """
         return self.state_creator(batch_shape)
+
     @torch.jit.export
     def reverse(self,
                 tensor: torch.Tensor,
@@ -681,7 +771,6 @@ class ConcreteMemoryUnitProtocol(Protocol):
         """
         Config spec for the protocol
         :param d_model: The width of tensors going into the read and write mechanism
-        :param dropout: The dropout rate when training, if relevant
         :param dtype: The dtype to build the parameters as
         :param device: The device to build the parameters as.
         :param config: The memory config for the specific instance.
@@ -759,11 +848,12 @@ def make_memory_unit(d_model: int,
     concrete implementation.
 
     :param d_model: The width of tensors flowing into the model
-    :param dropout: The dropout rate while training
     :param dtype: The dtype to create under
     :param device: The device to create under
     :param config: The concrete config
     :return: The setup memory layer
     """
+    if config.__class__ not in concrete_classes_registry:
+        raise TypeError(f"config of name {config.__class__.__name__} was never registered")
     cls = concrete_classes_registry[config.__class__]
     return cls(d_model, dtype, device, config)

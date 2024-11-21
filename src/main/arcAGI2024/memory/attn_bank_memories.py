@@ -99,7 +99,7 @@ class CreateState(AbstractCreateState):
 
                                       requires_grad=True)
 
-    def forward(self, batch_shape: List[int]) -> MemoryState:
+    def setup_state(self, batch_shape: List[int]) -> MemoryState:
         """
         Sets up the state.
         :param batch_shape: The batch shape that is correlated with the memories
