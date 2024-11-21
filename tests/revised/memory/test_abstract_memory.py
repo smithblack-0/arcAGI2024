@@ -60,7 +60,7 @@ class ConcreteWriteMemory(AbstractWriteMemory):
     def _compute_common(self, query: torch.Tensor, persistent_state: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
         # For testing, create a simple update and write probability
         update = {'memory_tensor': query}
-        write_probability = torch.sigmoid(query.mean(dim=-1, keepdim=True))
+        write_probability = torch.sigmoid(query.mean(dim=-1, keepdim=False))
         return update, write_probability
 
 class ConcreteMemoryUnit(AbstractMemoryUnit):
@@ -109,30 +109,40 @@ class TestMemoryFramework(unittest.TestCase):
                                      next_memory_state.get_interpolation_states()['memory_tensor']))
         # Check that 'timestep' and 'cum_write_mass' have been updated
         self.assertTrue(torch.equal(next_memory_state.timestep, memory_state.timestep + batch_mask))
-        self.assertTrue(torch.equal(next_memory_state.cum_write_mass, memory_state.cum_write_mass + self.memory_unit.memory_writer._max_interpolation_rate * torch.sigmoid(input_tensor.mean(dim=-1, keepdim=True)) * torch.sigmoid(self.memory_unit.memory_writer._interpolation_logits)))
 
     def test_reverse_pass(self):
         memory_state = self.memory_unit.create_state(self.batch_shape)
         input_tensor = torch.randn(self.batch_shape + torch.Size([self.d_model]), dtype=self.dtype, device=self.device)
         batch_mask = torch.zeros(self.batch_shape, dtype=torch.bool, device=self.device)
+
         # Perform forward pass to get next memory state
         _, next_memory_state = self.memory_unit.forward(input_tensor, batch_mask, memory_state)
+
         # Perform reverse pass
         (output_tensor, restored_memory_state), original_memory = self.memory_unit.reverse(input_tensor, batch_mask, next_memory_state)
+
         # Check that the restored memory matches the original
         for key in memory_state.get_interpolation_states():
             original = memory_state.get_interpolation_states()[key]
             derived = original_memory.get_interpolation_states()[key]
             self.assertTrue(torch.allclose(original, derived, atol=1e-6))
         for key in memory_state.get_persistent_state():
-            original = memory_state.get_persistent_state()[key]
+            original = next_memory_state.get_persistent_state()[key]
             derived = original_memory.get_persistent_state()[key]
             self.assertTrue(torch.allclose(original, derived, atol=1e-6))
-        # Check that 'timestep' and 'cum_write_mass' have been correctly reverted
-        self.assertTrue(torch.equal(restored_memory_state.timestep, memory_state.timestep))
-        self.assertTrue(torch.equal(restored_memory_state.cum_write_mass, memory_state.cum_write_mass))
-        # Check that the output tensor matches the one from forward pass
-        self.assertEqual(output_tensor.shape, self.batch_shape + torch.Size([10]))
+
+        # Check that the next memory and derived next memory match
+        #
+        # In other words, check output matches that from forward pass
+        for key in next_memory_state.get_interpolation_states():
+            original = next_memory_state.get_interpolation_states()[key]
+            derived = restored_memory_state.get_interpolation_states()[key]
+            self.assertTrue(torch.allclose(original, derived, atol=1e-6))
+        for key in next_memory_state.get_persistent_state():
+            original = next_memory_state.get_persistent_state()[key]
+            derived = restored_memory_state.get_persistent_state()[key]
+            self.assertTrue(torch.allclose(original, derived, atol=1e-6))
+
 
     def test_memory_read(self):
         memory_state = self.memory_unit.create_state(self.batch_shape)

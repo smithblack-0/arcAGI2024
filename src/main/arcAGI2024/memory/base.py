@@ -150,11 +150,11 @@ class MemoryState(PytreeState):
         :return: The revised memory state
         """
         interpolation_state = {key: interpolation_state[key]
-        if key in interpolation_state
+                              if key in interpolation_state
         else self.interpolation_state[key]
                                for key in self.interpolation_state.keys()
                                }
-        return MemoryState(interpolation_state, self.persistent_state)
+        return MemoryState(self.persistent_state, interpolation_state)
 
     def update_persistent(self,
                           feature_name: str,
@@ -296,7 +296,7 @@ def _advance_memory_case(memory_tensor: torch.Tensor,
     :param batch_mask: Whether or not the batch is masked. True means do not update
     :return: The next memory tensor
     """
-    assert update_tensor.shape == memory_tensor.shape
+    assert update_tensor.shape == memory_tensor.shape, f"update had shape {update_tensor.shape}, memory {memory_tensor.shape}"
     assert write_factor.dim() <= memory_tensor.dim()
     assert batch_mask.dim() <= memory_tensor.dim()
     while write_factor.dim() < memory_tensor.dim():
@@ -626,7 +626,7 @@ class AbstractWriteMemory(nn.Module, ABC):
 
         # Update the persistant factors
         memory.cum_write_mass -= write_factor
-        memory.timestep -= batch_mask
+        memory.timestep -= batch_mask.to(write_factor.dtype)
 
         # Return the new memory instance
         return memory
@@ -656,7 +656,7 @@ class AbstractWriteMemory(nn.Module, ABC):
         # Update the persistent factors
 
         memory.cum_write_mass += write_factor
-        memory.timestep += batch_mask
+        memory.timestep += batch_mask.to(write_factor.dtype)
 
         # Return the new memory instance
         return memory
