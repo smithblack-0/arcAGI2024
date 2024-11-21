@@ -103,7 +103,7 @@ class MemoryState(PytreeState):
         The unnormalized distance, indicating from the start of the sequence
         where each memory unit will, on average, be reading from.
         """
-        return self.persistent_state["running_distance"]
+        return self.interpolation_state["running_distance"]
 
     @property
     def normalized_timestep_distance(self) -> torch.Tensor:

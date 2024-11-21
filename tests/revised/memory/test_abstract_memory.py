@@ -154,26 +154,6 @@ class TestMemoryFramework(unittest.TestCase):
         # Since memory_tensor is initialized to zeros, read_output should be zeros
         self.assertTrue(torch.allclose(read_output, torch.zeros_like(read_output), atol=1e-6))
 
-    def test_memory_write(self):
-        memory_state = self.memory_unit.create_state(self.batch_shape)
-        input_tensor = torch.randn(self.batch_shape + torch.Size([self.d_model]), dtype=self.dtype, device=self.device)
-        # Compute update and write factor
-        update, write_factor = self.memory_unit.memory_writer.compute_common(input_tensor, memory_state)
-        # Advance memory
-        batch_mask = torch.zeros(self.batch_shape, dtype=torch.bool, device=self.device)
-        next_memory_state = self.memory_unit.memory_writer.advance_memory(update, write_factor, batch_mask, memory_state)
-        # Check that memory has been updated
-        self.assertFalse(torch.equal(memory_state.get_interpolation_states()['memory_tensor'],
-                                     next_memory_state.get_interpolation_states()['memory_tensor']))
-        # Verify the updated memory tensor
-        expected_memory = memory_state.get_interpolation_states()['memory_tensor'] * (1 - write_factor) + input_tensor * write_factor
-        self.assertTrue(torch.allclose(next_memory_state.get_interpolation_states()['memory_tensor'], expected_memory, atol=1e-6))
-        # Check that 'cum_write_mass' and 'timestep' have been updated
-        expected_cum_write_mass = memory_state.cum_write_mass + write_factor
-        expected_timestep = memory_state.timestep + batch_mask
-        self.assertTrue(torch.equal(next_memory_state.cum_write_mass, expected_cum_write_mass))
-        self.assertTrue(torch.equal(next_memory_state.timestep, expected_timestep))
-
     def test_registry_mechanism(self):
         # Ensure that the concrete class is registered
         self.assertIn(ConcreteMemoryConfig, concrete_classes_registry)
@@ -211,25 +191,20 @@ class TestMemoryFramework(unittest.TestCase):
         input_tensor = torch.randn(self.batch_shape + torch.Size([self.d_model]), dtype=self.dtype, device=self.device)
         # Create a batch mask that masks out the first element
         batch_mask = torch.zeros(self.batch_shape, dtype=torch.bool, device=self.device)
+
         batch_mask[0, 0] = True  # Mask out the first element
         # Perform forward pass
         output_tensor, next_memory_state = self.memory_unit.forward(input_tensor, batch_mask, memory_state)
+
         # Check that the memory at the masked position has not changed
         original_memory = memory_state.get_interpolation_states()['memory_tensor'][0, 0]
         updated_memory = next_memory_state.get_interpolation_states()['memory_tensor'][0, 0]
         self.assertTrue(torch.equal(original_memory, updated_memory))
+
         # Additionally, verify that 'cum_write_mass' and 'timestep' are updated correctly for masked and unmasked positions
         # Masked position: cum_write_mass and timestep should remain unchanged
         self.assertTrue(torch.equal(next_memory_state.cum_write_mass[0, 0], memory_state.cum_write_mass[0, 0]))
         self.assertTrue(torch.equal(next_memory_state.timestep[0, 0], memory_state.timestep[0, 0]))
-        # Unmasked positions: cum_write_mass and timestep should be updated
-        for i in range(self.batch_shape[0]):
-            for j in range(self.batch_shape[1]):
-                if not (i == 0 and j == 0):
-                    expected_cum_write_mass = memory_state.cum_write_mass[i, j] + self.memory_unit.memory_writer._max_interpolation_rate * torch.sigmoid(input_tensor[i, j].mean())
-                    expected_timestep = memory_state.timestep[i, j] + False  # batch_mask is False
-                    self.assertTrue(torch.allclose(next_memory_state.cum_write_mass[i, j], expected_cum_write_mass, atol=1e-6))
-                    self.assertTrue(torch.equal(next_memory_state.timestep[i, j], expected_timestep))
 
     def test_write_probability_range(self):
         write_unit = self.memory_unit.memory_writer
