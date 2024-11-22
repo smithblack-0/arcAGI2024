@@ -287,6 +287,7 @@ class AbstractTrainerCore(nn.Module, ABC):
 
     def __init_subclass__(cls, **kwargs):
         if issubclass(cls, AbstractTrainerCore):
+
             cls.__trainer_cores[cls.__name__] = cls
         super().__init_subclass__(**kwargs)
 

@@ -99,7 +99,7 @@ class CreateState(AbstractCreateState):
 
                                       requires_grad=True)
 
-    def setup_state(self, batch_shape: List[int]) -> MemoryState:
+    def forward(self, batch_shape: List[int]) -> MemoryState:
         """
         Sets up the state.
         :param batch_shape: The batch shape that is correlated with the memories
@@ -254,8 +254,8 @@ class ReadMemory(AbstractReadMemory):
 
         # Unpack the memory
 
-        memory_bank = memory.interpolation_state["memories"]
-        addresses = memory.persistent_state["addresses"]
+        memory_bank = memory.memory_tensors["memories"]
+        addresses = memory.metric_tensors["addresses"]
 
         # Create the read heads. These will be used
         # to attend to the memory using a linear attention

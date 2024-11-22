@@ -37,7 +37,7 @@ class ConcreteMemoryConfig(AbstractMemoryConfig):
         return torch.Size([1])
 
 class ConcreteCreateState(AbstractCreateState):
-    def setup_state(self, batch_shape: List[int]) -> MemoryState:
+    def forward(self, batch_shape: List[int]) -> MemoryState:
         # Initialize persistent_state with 'cum_write_mass' and 'timestep'
         persistent_state = {
             'cum_write_mass': torch.zeros(batch_shape, device=self.device, dtype=self.dtype),
@@ -266,7 +266,7 @@ class TestMemoryFramework(unittest.TestCase):
         # Perform forward pass
         _, next_memory_state = self.memory_unit.forward(input_tensor, batch_mask, memory_state)
         # Check that 'running_distance' has been updated to current 'timestep'
-        self.assertTrue(torch.allclose(next_memory_state.running_distance, next_memory_state.timestep, atol=1e-6))
+        self.assertTrue(torch.allclose(next_memory_state.average_timestep_distance, next_memory_state.timestep, atol=1e-6))
 
     def test_normalized_timestep_distance(self):
         memory_state = self.memory_unit.create_state(self.batch_shape)
@@ -276,5 +276,5 @@ class TestMemoryFramework(unittest.TestCase):
         _, next_memory_state = self.memory_unit.forward(input_tensor, batch_mask, memory_state)
         # Check normalized_timestep_distance
         normalized_distance = next_memory_state.normalized_timestep_distance
-        expected = (next_memory_state.timestep - next_memory_state.running_distance) / (next_memory_state.timestep + 1e-6)
+        expected = (next_memory_state.timestep - next_memory_state.average_timestep_distance) / (next_memory_state.timestep + 1e-6)
         self.assertTrue(torch.allclose(normalized_distance, expected, atol=1e-6))

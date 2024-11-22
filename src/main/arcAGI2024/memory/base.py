@@ -28,7 +28,7 @@ class AbstractMemoryConfig(SavableConfig):
     The write factor used to commit updates into memories has a lot
     of math associated with it. They do the the following.
 
-    max_interpolation_factor: The maximum probabilty that can be written in a single step.
+    max_write_factor: The maximum probabilty that can be written in a single step.
                               This is needed in order to prevent division by zero. Set to
                               0.999 as default, but lower might help with numeric stability
 
@@ -51,7 +51,7 @@ class AbstractMemoryConfig(SavableConfig):
         # probabilities.
         raise NotImplementedError("Need to implement interpolation shapes.")
 
-    max_interpolation_factor: float
+    max_write_factor: float
     min_write_half_life_init: float
     max_write_half_life_init: float
 
@@ -59,16 +59,226 @@ class AbstractMemoryConfig(SavableConfig):
 MemoryData = Dict[str, torch.Tensor]
 
 
+@torch.jit.script
+def _advance_memory(memory_tensor: torch.Tensor,
+                    update_tensor: torch.Tensor,
+                    write_probability: torch.Tensor,
+                    erase_probability: torch.Tensor,
+                    batch_mask: torch.Tensor,
+                    ) -> torch.Tensor:
+    """
+    Performs the advance memory step. As it is highly
+    performant code, it has been scripted. It is scripted
+    separately from it's class due to performance reasons.
+
+    Implements:
+
+    s_{i+1} = (1 - p_w*p_e)*s_i + p_w*u_i
+
+
+    :param memory_tensor: The tensor currently existing in the memory
+    :param update_tensor: The proposed update in the memory
+    :param write_probability: The write factor to proceed under.
+    :param erase_probability: The erase factor to proceed under.
+    :param batch_mask: Whether or not the batch is masked. True means do not update
+    :return: The next memory tensor
+    """
+    if update_tensor.shape != memory_tensor.shape:
+        raise ValueError(
+            f"Update and memory tensor have different shapes: {update_tensor.shape}, {memory_tensor.shape}")
+    if write_probability.dim() > memory_tensor.dim():
+        raise ValueError(
+            f"WriteFactor tensor has too many dimensions: {write_probability.dim()} > {memory_tensor.dim()}")
+    if batch_mask.dim() > memory_tensor.dim():
+        raise ValueError(f"batch mask has too many dimensions: {batch_mask.dim()} > {memory_tensor.dim()}")
+    if erase_probability.dim() > memory_tensor.dim():
+        raise ValueError(f"erase factor has too many dims: {erase_probability.dim()} > {memory_tensor.dim()}")
+
+    while write_probability.dim() < memory_tensor.dim():
+        write_probability = write_probability.unsqueeze(-1)
+    while batch_mask.dim() < memory_tensor.dim():
+        batch_mask = batch_mask.unsqueeze(-1)
+    while erase_probability.dim() < memory_tensor.dim():
+        erase_probability = erase_probability.unsqueeze(-1)
+
+    memory_update = memory_tensor * (1 - write_probability * erase_probability) + update_tensor * write_probability
+    memory_tensor = torch.where(batch_mask, memory_tensor, memory_update)
+    return memory_tensor
+
+
+@torch.jit.script
+def _advance_metrics(metrics: Dict[str, torch.Tensor],
+                     write_probability: torch.Tensor,
+                     erase_probability: torch.Tensor,
+                     batch_mask: torch.Tensor
+                     ) -> Dict[str, torch.Tensor]:
+    """
+    Advances various important metrics that are needed. This includes
+    keeping track of the sum of the write factors as used for the write
+    and erase gates.
+
+    We also track, on average, what timestep we can reach before gradients
+    do not propogate any further due to erasure.
+
+    :param metrics: The list of metrics
+    :param write_probability: The write factor to proceed under.
+    :param erase_probability: The erase factor to proceed under.
+    :param batch_mask: Whether or not the batch is masked. True means do not update
+    :return: The dict of new metrics.
+    """
+
+    # Fairly tame metrics involving timesteps and probability masses.
+
+    final_metrics = {}
+    final_metrics['cum_write_mass'] = metrics['cum_write_mass'] + write_probability
+
+    while write_probability.dim() < erase_probability.dim():
+        write_probability = write_probability.unsqueeze(-1)
+    erase_factor = write_probability * erase_probability
+
+    final_metrics['cum_erase_mass'] = metrics['cum_erase_mass'] + erase_factor
+    final_metrics['timestep'] = metrics['timestep'] + batch_mask.to(write_probability.dtype)
+
+    # This is a running interpolation based on the timestep, that
+    # tells us basically when the last erase step was. Conceptually, if
+    # we erased everything, we would set this value to the timestep
+    # that happened in.
+
+    final_metrics['average_timestep_distance'] = (metrics["average_timestep_distance"] * (1 - erase_factor) +
+                                                  metrics['timestep'] * erase_factor)
+    return final_metrics
+
+
+@torch.jit.script
+def _retard_memory(memory_tensor: torch.Tensor,
+                   update_tensor: torch.Tensor,
+                   write_factor: torch.Tensor,
+                   erase_factor: torch.Tensor,
+                   batch_mask: torch.Tensor,
+                   ) -> torch.Tensor:
+    """
+    Retards the memory tensor. This means we go backwards in
+    time. As this is highly performant code, it has been scripted.
+    Additionally, logarithms are used for reasons of numeric stability
+
+    Implements:
+
+    s_{i} = (s_{i+1} - p_w*u_i)/(1 - p_w*p_e)
+
+    :param memory_tensor: The tensor currently existing in the memory
+    :param update_tensor: The proposed update in the memory
+    :param write_factor: The write factor to proceed under
+    :param batch_mask: Whether or not the batch is masked. True means do not update
+    :return: The previous memory tensor
+    """
+    if update_tensor.shape != memory_tensor.shape:
+        raise ValueError(
+            f"Update and memory tensor have different shapes: {update_tensor.shape}, {memory_tensor.shape}")
+    if write_factor.dim() > memory_tensor.dim():
+        raise ValueError(f"WriteFactor tensor has too many dimensions: {write_factor.dim()} > {memory_tensor.dim()}")
+    if batch_mask.dim() > memory_tensor.dim():
+        raise ValueError(f"batch mask has too many dimensions: {batch_mask.dim()} > {memory_tensor.dim()}")
+    if erase_factor.dim() > memory_tensor.dim():
+        raise ValueError(f"erase factor has too many dims: {erase_factor.dim()} > {memory_tensor.dim()}")
+
+    while write_factor.dim() < memory_tensor.dim():
+        write_factor = write_factor.unsqueeze(-1)
+    while batch_mask.dim() < memory_tensor.dim():
+        batch_mask = batch_mask.unsqueeze(-1)
+    while erase_factor.dim() < memory_tensor.dim():
+        erase_factor = erase_factor.unsqueeze(-1)
+
+    log_memory = torch.log(update_tensor * write_factor - memory_tensor + 1e-9)
+    log_memory -= torch.log(1 - write_factor * erase_factor + 1e-9)  # divides
+    memory_update = torch.exp(log_memory)
+    memory_tensor = torch.where(batch_mask, memory_tensor, memory_update)
+    return memory_tensor
+
+
+@torch.jit.script
+def _retard_metrics(metrics: Dict[str, torch.Tensor],
+                    write_probability: torch.Tensor,
+                    erase_probability: torch.Tensor,
+                    batch_mask: torch.Tensor
+                    ) -> Dict[str, torch.Tensor]:
+    """
+    Retards the various metrics we are tracking, figuring out what they
+    are by walking the memory backwards. =
+
+    :param metrics: The list of metrics
+    :param write_probability: The write factor to proceed under.
+    :param erase_probability: The erase factor to proceed under.
+    :param batch_mask: Whether or not the batch is masked. True means do not update
+    :return: The dict of new metrics.
+    """
+
+    # Fairly tame metrics involving timesteps and probability masses.
+
+    final_metrics = {}
+    final_metrics['cum_write_mass'] = metrics['cum_write_mass'] - write_probability
+
+    while write_probability.dim() < erase_probability.dim():
+        write_probability = write_probability.unsqueeze(-1)
+    erase_factor = write_probability * erase_probability
+
+    final_metrics['cum_erase_mass'] = metrics['cum_erase_mass'] - erase_factor
+    final_metrics['timestep'] = metrics['timestep'] - batch_mask.to(write_probability.dtype)
+
+    # This is a running interpolation based on the timestep, that
+    # tells us basically when the last erase step was. Conceptually, if
+    # we erased everything, we would set this value to the timestep
+    # that happened in.
+
+    log_metric = torch.log(metrics['average_timestep_distance'] - metrics['timestep'] * erase_factor + 1e-9)
+    log_metric -= torch.log(1 - erase_factor + 1e-9)
+    final_metrics['average_timestep_distance'] = torch.exp(log_metric)
+
+    return final_metrics
+
+
 class MemoryState(PytreeState):
     """
-    A common memory state.
-
     Memory state is internally divided into
-    interpolatable and non interpolatable pytrees.
-    Interpolatable pytrees will automatically be
-    updated using the write factor, but
-    noninterpolatable pytrees have to be manually
-    changed once set.
+    mutable and persistent dictionaries of tensors.
+
+    ---- memory write, reversable, forward ----
+
+    Memory is maintained in terms of a write-erase
+    action. In particular, given current state s_i, update u_i,
+    erase probability p_e, and write probability p_w, the updated state
+    is created out of the provided mutable tensor by a broadcasted
+    version of
+
+    s_{i+1} = (1 - p_w*p_e)*s_i + p_w*u_i
+
+    This can be reversed during the reverse pass. Getting the last state from
+    the current one proceeds as:
+
+    s_{i} = (s_{i+1} - p_w*u_i)/(1 - p_w*p_e)
+
+    The write probability and erase probability are
+    usually further constrained to be within a certain
+    rate on the actual gates.
+
+    ---- metrics  ----
+
+    The memory state is designed to support a particular,
+    long duration memory metric or series of memory
+    metrics as well.
+
+    cum_write_mass: The cumulative write mass of all write factors.
+    cum_erase_mass: The cumulative erase mass of all the erase factors.
+    timestep: The number of timesteps, per batch. Stops updating when padding is detected
+    average_timestep_distance: The "average" location the memory is peering into. Covers all write factor slots.
+                              - It is maintained by keeping a running average around that is updated
+                                based on the erase gate and the timestep.
+                              - When a strong erase operation is detected, we move towards the current timestep
+                                as an interpolation.
+    average_gradient_distance: The "average" distance in timesteps that gradients can propogate back by.
+    normalized_gradient_distance: Indicates what percentage into the past, measured over 0-1, gradients
+                                  can propogate through
+                                - 0 means that we are looking only into the immediate past
+                                - 1 would mean they can travel all the way back to the beginning
     """
 
     @property
@@ -77,12 +287,25 @@ class MemoryState(PytreeState):
         The cumulative write mass contains the sum of all
         the write factors.
         """
-        return self.persistent_state["cum_write_mass"]
+        return self.metric_tensors["cum_write_mass"]
+
+    @property
+    def cum_erase_mass(self) -> torch.Tensor:
+        """
+        The cumulative erase mass contains the sum of all
+        erase operations.
+        """
+        return self.metric_tensors["cum_erase_mass"]
 
     @cum_write_mass.setter
     def cum_write_mass(self, value: torch.Tensor):
         assert value.shape == self.cum_write_mass.shape
-        self.persistent_state["cum_write_mass"] = value
+        self.metric_tensors["cum_write_mass"] = value
+
+    @cum_erase_mass.setter
+    def cum_erase_mass(self, value: torch.Tensor):
+        assert value.shape == self.cum_erase_mass.shape
+        self.metric_tensors["cum_erase_mass"] = value
 
     @property
     def timestep(self) -> torch.Tensor:
@@ -90,106 +313,156 @@ class MemoryState(PytreeState):
         The timestep we are currently on, when accounting
         for batch padding masking.
         """
-        return self.persistent_state["timestep"]
+        return self.metric_tensors["timestep"]
 
     @timestep.setter
     def timestep(self, value: torch.Tensor):
         assert value.shape == self.timestep.shape
-        self.persistent_state["timestep"] = value
+        self.metric_tensors["timestep"] = value
 
     @property
-    def running_distance(self) -> torch.Tensor:
+    def average_timestep_distance(self) -> torch.Tensor:
         """
         The unnormalized distance, indicating from the start of the sequence
         where each memory unit will, on average, be reading from.
         """
-        return self.interpolation_state["running_distance"]
+        return self.memory_tensors["average_timestep_distance"]
 
     @property
-    def normalized_timestep_distance(self) -> torch.Tensor:
+    def average_gradient_distance(self) -> torch.Tensor:
+        """
+        The unnormalized distance in terms of timesteps that we can expect,
+        on average, gradients to propogate through.
+        """
+        timestep = self.timestep
+        while timestep.dim() < self.average_timestep_distance.dim():
+            timestep = timestep.unsqueeze(-1)
+        return timestep - self.average_timestep_distance
+
+    @property
+    def normalized_gradient_distance(self) -> torch.Tensor:
         """
         The normalized timestep distance. Measure the current timestep as
         0, and all the way back at the beginning as one. Indicates how
         far into the past each memory slot is looking
         """
         timestep = self.timestep
-        running_distance = self.running_distance
+        running_distance = self.average_timestep_distance
         while timestep.dim() < running_distance.dim():
-            running_distance = running_distance.unsqueeze(-1)
+            timestep = timestep.unsqueeze(-1)
         return (timestep - running_distance) / (timestep + 1e-6)
 
     def __init__(self,
-                 persistent_state: MemoryData,
-                 interpolation_state: MemoryData,
+                 metric_tensors: MemoryData,
+                 memory_tensors: MemoryData,
+                 persistent: MemoryData
                  ):
-        self.persistent_state = persistent_state
-        self.interpolation_state = interpolation_state
+        if "cum_write_mass" not in metric_tensors:
+            raise KeyError("cum_write_mass was not found in persistent state. Did you forget to init it?")
+        if "cum_erase_mass" not in metric_tensors:
+            raise KeyError("cum_erase_mass was not found in persistent state. Did you forget to init it?")
+        if "timestep" not in metric_tensors:
+            raise KeyError("timestep was not found in persistent state. Did you forget to init it?")
+        if "average_timestep_distance" not in metric_tensors:
+            raise KeyError("average_timestep_distance not found.")
 
-    def get_interpolation_states(self) -> MemoryData:
-        """
-        Gets a relevant memory implementation in the appropriate order
-        involving the features that can be interpolated. These will
-        later be processed to update in parallel pytree map
-        """
-        return self.interpolation_state
+        self.metric_tensors = metric_tensors
+        self.memory_tensors = memory_tensors
+        self.persistent_tensors = persistent
 
-    def get_persistent_state(self) -> MemoryData:
+    def step_memory_forward(self,
+                            update: MemoryData,
+                            write_probability: torch.Tensor,
+                            erase_probability: torch.Tensor,
+                            batch_mask: torch.Tensor,
+                            ):
         """
-        Gets relevant parameter state in the appropriate order,
-        and involving the indicated names. These features must
-        be manually updated if they are updated at all.
-        """
-        return self.persistent_state
+        Steps the memory forward by one unit. This consists
+        of performing the write/erase action.
 
-    def replace_interpolation(self,
-                              interpolation_state: MemoryData
-                              ) -> 'MemoryState':
+        :param batch_mask: The batch mask for the step
+        :param write_probability: The write factor for the step
+        :param erase_probability: The erase factor for the step
+        :param update: The memory update for the step
+        :return: The new memory state
         """
-        Replaces the relevant features of the interpolation state in a single go
-        :param interpolation_state: The relevant interpolation state
-        :return: The revised memory state
-        """
-        interpolation_state = {key: interpolation_state[key]
-                              if key in interpolation_state
-        else self.interpolation_state[key]
-                               for key in self.interpolation_state.keys()
-                               }
-        return MemoryState(self.persistent_state, interpolation_state)
 
-    def update_persistent(self,
-                          feature_name: str,
-                          update: torch.Tensor,
-                          ) -> 'MemoryState':
-        """
-       Integrates a persistent update into the
-       memory state
-       :param feature_name: Name of the state to update
-       :param update: The update to integrate
-       :return: The new memory state
-       """
-        assert feature_name in self.persistent_state
-        new_persistent = self.persistent_state.copy()
-        new_persistent[feature_name] = update
-        return MemoryState(new_persistent, self.interpolation_state)
+        # Update the substate memories.
+        memories = {}
+        for name in self.memory_tensors.keys():
+            memory_tensor = self.memory_tensors[name]
+            update_tensor = update[name]
+            memories[name] = _advance_memory(memory_tensor,
+                                             update_tensor,
+                                             write_probability,
+                                             erase_probability,
+                                             batch_mask)
+        metrics = _advance_metrics(self.metric_tensors,
+                                   write_probability,
+                                   erase_probability,
+                                   batch_mask)
+        return MemoryState(metrics, memories, self.persistent_tensors)
 
-    def save_state(self) -> Tuple[MemoryData, MemoryData]:
-        return self.get_interpolation_states(), self.get_persistent_state()
+    def step_memory_reverse(self,
+                            update: MemoryData,
+                            write_probability: torch.Tensor,
+                            erase_probability: torch.Tensor,
+                            batch_mask: torch.Tensor,
+                            ) -> 'MemoryState':
+        """
+        Steps the memory reverse by one unit. This consists
+        of taking the inverse of the write/erase action.
+
+        :param batch_mask: The batch mask for the step
+        :param write_probability: The write factor for the step
+        :param erase_probability: The erase factor for the step
+        :param update: The memory update for the step
+        :return: The new memory state
+        """
+
+        memories = {}
+        for name in self.memory_tensors.keys():
+            memory_tensor = self.memory_tensors[name]
+            update_tensor = update[name]
+            memories[name] = _retard_memory(memory_tensor,
+                                            update_tensor,
+                                            write_probability,
+                                            erase_probability,
+                                            batch_mask)
+
+        metrics = _retard_metrics(self.metric_tensors,
+                                  write_probability,
+                                  erase_probability,
+                                  batch_mask
+                                  )
+        return MemoryState(metrics, memories, self.persistent_tensors)
+
+    def get_memories(self) -> MemoryData:
+        return self.memory_tensors
+
+    def get_persistent(self) -> MemoryData:
+        return self.persistent_tensors
+
+    def save_state(self) -> Tuple[Tuple[MemoryData, MemoryData, MemoryData], None]:
+        return (self.metric_tensors, self.memory_tensors, self.persistent_tensors), None
+
+    @classmethod
+    def load_state(cls,
+                   pytree: Tuple[MemoryData, MemoryData],
+                   bypass: None) -> 'MemoryState':
+        metric_tensors, memory_tensors, persistent_tensors = pytree
+        return cls(metric_tensors, memory_tensors, persistent_tensors)
 
     def setup_for_gradients_(self):
         """
         Turns the stored tensors into leafs which accumulate gradients
         """
-        for tensor in self.get_interpolation_states().values():
+        for tensor in self.memory_tensors.values():
             tensor.detach_()
             tensor.requires_grad_(True)
-
-    @classmethod
-    def load_state(cls,
-                   pytree: MemoryData,
-                   bypass: MemoryData) -> 'MemoryState':
-        constructor_kwargs = pytree.copy()
-        constructor_kwargs.update(bypass)
-        return cls(pytree, bypass)
+        for tensor in self.metric_tensors.values():
+            tensor.detach_()
+            tensor.requires_grad_(True)
 
 
 class AbstractCreateState(nn.Module, ABC):
@@ -221,23 +494,13 @@ class AbstractCreateState(nn.Module, ABC):
         self._metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
 
     @abstractmethod
-    def setup_state(self, batch_shape: List[int]) -> MemoryState:
+    def forward(self, batch_shape: List[int]) -> MemoryState:
         """
         When implemented, returns a memory object when seeing a batch shape
         :param batch_shape: The batch shape to consider
         :return: The memory state. Remember to include
                  cumulative_write_factors in persistant.
         """
-
-    def forward(self, batch_shape: List[int]) -> MemoryState:
-        state = self.setup_state(batch_shape)
-        if "cum_write_mass" not in state.persistent_state:
-            raise ValueError("Did not provide a cum_write_mass in the persistant state")
-        if "timestep" not in state.persistent_state:
-            raise ValueError("Did not provide a timestep feature in the persistent state")
-        if "running_distance" not in state.interpolation_state:
-            raise ValueError("Did not provide running_distance in the interpolation state")
-        return state
 
 
 class AbstractReadMemory(nn.Module, ABC):
@@ -266,125 +529,43 @@ class AbstractReadMemory(nn.Module, ABC):
         self._metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
 
     @abstractmethod
+    def read_memory(self,
+                    query: torch.Tensor,
+                    memories: MemoryData,
+                    persistent: MemoryData
+                    ) -> torch.Tensor:
+        """
+        Abstract specification of a memory
+        read action. What the user needs to implement
+
+        :param query: The query to read with. Shape (..., d_model). Recurrent, so no items dim
+        :param memories: The memory tensors. Same as in create.
+        :param persistent: The persistent tensors. These never change across timesteps. Generally parameters
+        :return: The result of reading. Shape (..., d_model)
+        """
+
     def forward(self,
                 query: torch.Tensor,
-                memory: MemoryState,
+                memories: MemoryState,
                 ) -> torch.Tensor:
         """
-        Abstract specification of a memory read action
+        Performs the memory read process
         :param query: The query to read with. Shape (..., d_model). Recurrent, so no items dim
-        :param memory: The memory state. Currently abstract
-        :return: The memory read. Shape (..., d_model)
+        :param memories: The memory state
+        :return:
         """
-
-
-@torch.jit.script
-def _advance_memory_case(memory_tensor: torch.Tensor,
-                         update_tensor: torch.Tensor,
-                         write_factor: torch.Tensor,
-                         batch_mask: torch.Tensor,
-                         ) -> torch.Tensor:
-    """
-    Performs the advance memory step. As it is highly
-    performant code, it has been scripted. Part of
-    AbstractWriteMemory. Must be scripted
-    separately from its class due to the way torchscript works
-
-    :param memory_tensor: The tensor currently existing in the memory
-    :param update_tensor: The proposed update in the memory
-    :param write_factor: The write factor to proceed under.
-    :param batch_mask: Whether or not the batch is masked. True means do not update
-    :return: The next memory tensor
-    """
-    assert update_tensor.shape == memory_tensor.shape, f"update had shape {update_tensor.shape}, memory {memory_tensor.shape}"
-    assert write_factor.dim() <= memory_tensor.dim()
-    assert batch_mask.dim() <= memory_tensor.dim()
-    while write_factor.dim() < memory_tensor.dim():
-        write_factor = write_factor.unsqueeze(-1)
-    while batch_mask.dim() < memory_tensor.dim():
-        batch_mask = batch_mask.unsqueeze(-1)
-
-    memory_update = memory_tensor * (1 - write_factor) + update_tensor * write_factor
-    memory_tensor = torch.where(batch_mask, memory_tensor, memory_update)
-    return memory_tensor
-
-
-@torch.jit.script
-def _retard_memory_case(memory_tensor: torch.Tensor,
-                        update_tensor: torch.Tensor,
-                        write_factor: torch.Tensor,
-                        batch_mask: torch.Tensor,
-                        ) -> torch.Tensor:
-    """
-    Retards the memory tensor. This means we go backwards in
-    time.
-
-    as this is highly
-    performant code, it has been scripted. Part of
-    AbstractWriteMemory. Must be scripted
-    separately from its class due to the way torchscript works
-
-    For reasons of numeric stability, we use a logarithm when
-    doing the division.
-    :param memory_tensor: The tensor currently existing in the memory
-    :param update_tensor: The proposed update in the memory
-    :param write_factor: The write factor to proceed under
-    :param batch_mask: Whether or not the batch is masked. True means do not update
-    :return: The previous memory tensor
-    """
-    assert update_tensor.shape == memory_tensor.shape
-    assert write_factor.dim() <= memory_tensor.dim()
-    assert batch_mask.dim() <= memory_tensor.dim()
-    while write_factor.dim() < memory_tensor.dim():
-        write_factor = write_factor.unsqueeze(-1)
-    while batch_mask.dim() < memory_tensor.dim():
-        batch_mask = batch_mask.unsqueeze(-1)
-
-    log_memory = torch.log(update_tensor * write_factor - memory_tensor + 1e-9)
-    log_memory -= torch.log(1 - write_factor + 1e-9)  # divides
-    memory_update = torch.exp(log_memory)
-    memory_tensor = torch.where(batch_mask, memory_tensor, memory_update)
-    return memory_tensor
+        persistent = memories.get_persistent()
+        memory = memories.get_memories()
+        return self.read_memory(query, memory, persistent)
 
 
 class AbstractWriteMemory(nn.Module, ABC):
     """
     An abstract implementation of the write
-    memory process.
-
-
-    ---- abstract over ----
-
-    The abstract class is responsible for advancing or retarding
-    the memory state, and for integrating decay rate information
-    into the write probabilities.
-
-    A reversable running interpolation is ued with a certain
-    write factor, such that in forward mode, and reverse mode,
-    respectively the logic behaves as
-
-    $$ s_{i+1} = s_i*(1-p_{write}) + s_{ut}*p_{write} $$
-    $$s_{i} = \frac{s_{ut}*p_{write} - s_{i+1}}{(1-p_{write})}$$
-
-    ---- Step process ----
-
-    A implementation-specific update along with a write probability is provided by the
-    user. The write probability is a gate intended to answer whether we want to write
-    or not, without accounting too much for strength.
-
-    From this write probability, the following occurs to advance or retard the memory.
-
-    - Multiply the write probability by the interpolation rates. These are based on a sigmoid
-      activation of rate logits, and are between 0 and 1. This governs the strength of the
-      update. Low interpolation rates are thus good at looking at long term averages.
-    - Multiply by the maximum write factor. This is set to something really high,
-      like a half life of 100,000, and makes sure we can never actually divide by zero.
-    - Interpolate using one of the two processes above to step forward in the memory,
-      or alternatively step backwards
-
-    It should be mentioned that for numeric reasons, the division is performed in
-    logarithm form during the reverse step.
-    """
+    memory process. Most of the actual
+    update logic is contained in earlier mechanism
+    such as the memory state.
+     """
 
     @property
     def device(self) -> torch.device:
@@ -468,58 +649,6 @@ class AbstractWriteMemory(nn.Module, ABC):
         # Activate and return
         return torch.sigmoid(smoothed_logits)
 
-    @staticmethod
-    @torch.jit.script
-    def _advance_memory(
-            memory_tensors: Dict[str, torch.Tensor],
-            update_tensors: Dict[str, torch.Tensor],
-            write_factor: torch.Tensor,
-            batch_mask: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Advances the memory by interpolating between the memory
-        and update tensors.
-        :param memory_tensors: A dictionary of the interpolatable memory tensors
-        :param update_tensors: A dictionary of the interpolatable update tensors
-        :param write_factor: The write factor to use
-        :param batch_mask: The batch mask to use
-        :return: The final tensors.
-        """
-        assert memory_tensors.keys() == update_tensors.keys()
-        output_tensors: Dict[str, torch.Tensor] = {}
-        for name in memory_tensors:
-            memory_tensor = memory_tensors[name]
-            update_tensor = update_tensors[name]
-            final_update = _advance_memory_case(memory_tensor, update_tensor, write_factor, batch_mask)
-            output_tensors[name] = final_update
-        return output_tensors
-
-    @staticmethod
-    @torch.jit.script
-    def _retard_memory(
-            memory_tensors: Dict[str, torch.Tensor],
-            update_tensors: Dict[str, torch.Tensor],
-            write_factor: torch.Tensor,
-            batch_mask: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Retards the interpolatable portions of the
-        memory by reversing the original operation
-        :param memory_tensors: The memory tensors in their next state
-        :param update_tensors: The update tensors used in the forward step
-        :param write_factor: The write factor
-        :param batch_mask: The batch mask
-        :return:
-        """
-        assert memory_tensors.keys() == update_tensors.keys()
-        output_tensors: Dict[str, torch.Tensor] = {}
-        for name in memory_tensors:
-            memory_tensor = memory_tensors[name]
-            update_tensor = update_tensors[name]
-            final_update = _retard_memory_case(memory_tensor, update_tensor, write_factor, batch_mask)
-            output_tensors[name] = final_update
-        return output_tensors
-
     def __init__(self,
                  dtype: torch.dtype,
                  device: torch.device,
@@ -543,8 +672,11 @@ class AbstractWriteMemory(nn.Module, ABC):
     @abstractmethod
     def _compute_common(self,
                         query: torch.Tensor,
-                        persistent_state: Dict[str, torch.Tensor],
-                        ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
+                        persistent: Dict[str, torch.Tensor],
+                        ) -> Tuple[Dict[str, torch.Tensor],
+    torch.Tensor,
+    torch.Tensor,
+    ]:
         """
         The main user specified component.
 
@@ -555,12 +687,15 @@ class AbstractWriteMemory(nn.Module, ABC):
         that are initialized ONCE.
 
         :param query: The query tensor. Shape (..., d_model), presumably
-        :param persistent_state: The persistent state of the memory.
+        :param persistent: Anything that was declared from setup, but that does not change
+                           between timesteps.
         :return:
         - update: An implementation-specific update, consisting of a dict of
                   tensortrees corrolating with the interpolation memory content.
         - write_probability: A write probability that tells us how strongly to write to the memory slots.
             - Must cleanly multiply the interpolation factor shape.
+        - erase_probability: A erase probability that tells us how strongly to forget what we
+                             have seen before.
         """
 
     ## External interface
@@ -571,7 +706,7 @@ class AbstractWriteMemory(nn.Module, ABC):
     def compute_common(self,
                        query: torch.Tensor,
                        memory: MemoryState,
-                       ) -> Tuple[MemoryData, torch.Tensor]:
+                       ) -> Tuple[MemoryData, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Internal helper with the additional logic needed
         to get the write factor ready to go based on the write
@@ -580,31 +715,24 @@ class AbstractWriteMemory(nn.Module, ABC):
         Calls into implementation detail compute_common
         :param query: The query to make the update and factor on
         :param memory: The memory state. The parameter state will be retrieved off it.
-        :return: The update state, and the write factor
+        :return: The update state, the write prob, the erase prob.
         """
         with profiler.record_function("Computing write parameters"):
-            persistent_state = memory.get_persistent_state()
+            persistent_tensors = memory.get_persistent()
             with profiler.record_function("Computing write parameters: Implementation"):
-                update_state, write_probability = self._compute_common(query, persistent_state)
+                update_state, write_probability, erase_probability = self._compute_common(query,
+                                                                                          persistent_tensors)
 
-            # Compute write factor
+            # Compute write probability
             interpolation_rates = self._compute_interpolation_factors(self._interpolation_logits)
             interpolation_rates = self._max_interpolation_rate * interpolation_rates
-            write_factor = interpolation_rates * write_probability
+            write_probability = interpolation_rates * write_probability
 
-            # We need to integrate the timestep into the running distance so interpolation will be performed
-            #
-            # But for that to work we need it needs to be as long as write factor
-            assert "running_distance" not in update_state
-            timestep = memory.timestep
-            while timestep.dim() < write_factor.dim():
-                timestep = timestep.unsqueeze(-1)
-            update_state["running_distance"] = timestep
-        return update_state, write_factor
+        return update_state, (write_probability, erase_probability)
 
     def reverse_memory(self,
                        update: MemoryData,
-                       write_factor: torch.Tensor,
+                       control_factors: Tuple[torch.Tensor, torch.Tensor],
                        batch_mask: torch.Tensor,
                        memory: MemoryState,
                        ) -> MemoryState:
@@ -612,28 +740,19 @@ class AbstractWriteMemory(nn.Module, ABC):
         Figures out the previous memory state from the
         current and the various update factors.
         :param update: The update state to integrate.
-        :param write_factor: The write factor
+        :param control_factors: The control probabilities
         :param batch_mask: Shape (...). Indicates whether memory can be updated. True means No.
         :param memory: The current memory state
         :return: The last memory state
         """
 
         # Perform the interpolation update.
-        interpolatable_state = memory.get_interpolation_states()
-        final_interpolatable_state = self._retard_memory(interpolatable_state, update,
-                                                         write_factor, batch_mask)
-        memory = memory.replace_interpolation(final_interpolatable_state)
-
-        # Update the persistant factors
-        memory.cum_write_mass -= write_factor
-        memory.timestep -= batch_mask.to(write_factor.dtype)
-
-        # Return the new memory instance
-        return memory
+        write_probability, erase_probability = control_factors
+        return memory.step_memory_reverse(update, write_probability, erase_probability, batch_mask)
 
     def advance_memory(self,
                        update: MemoryData,
-                       write_factor: torch.Tensor,
+                       control_factors: Tuple[torch.Tensor, torch.Tensor],
                        batch_mask: torch.Tensor,
                        memory: MemoryState,
                        ) -> MemoryState:
@@ -641,25 +760,14 @@ class AbstractWriteMemory(nn.Module, ABC):
         Commits the computed update into the long term memory.
         Commits using interpolation.
         :param update: The update to integrate
-        :param write_factor: The write factor to go with it
+        :param control_factors: The control probabilities
         :param batch_mask: Shape (...). Indicates whether memory can be updated. True means No.
         :param memory: The current memory
         :return: The updated memory
         """
 
-        # Perform the interpolation update
-        interpolatable_state = memory.get_interpolation_states()
-        final_interpolatable_state = self._advance_memory(interpolatable_state, update,
-                                                          write_factor, batch_mask)
-        memory = memory.replace_interpolation(final_interpolatable_state)
-
-        # Update the persistent factors
-
-        memory.cum_write_mass += write_factor
-        memory.timestep += batch_mask.to(write_factor.dtype)
-
-        # Return the new memory instance
-        return memory
+        write_probability, erase_probability = control_factors
+        return memory.step_memory_forward(update, write_probability, erase_probability, batch_mask)
 
 
 class AbstractMemoryUnit(nn.Module, ABC):
