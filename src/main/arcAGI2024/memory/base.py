@@ -59,7 +59,43 @@ class AbstractMemoryConfig(SavableConfig):
 MemoryData = Dict[str, torch.Tensor]
 
 
-@torch.jit.script
+def _numeric_safe_division(numerator: torch.Tensor,
+                           denominator: torch.Tensor,
+                           epsilon: float = 1e-9) -> torch.Tensor:
+    """
+    Attempts to perform a numerically safe division using logarithms.
+    It can handle positive and negative inputs, and numerators of or close to
+    zero.
+
+    It cannot handle denomators that are zero. But neither can normal division.
+    It is much more stable for very small denominators, however.
+
+    :param numerator: The numerator to consider when performing the division
+    :param denominator: The denominator
+    :param epsilon: When needed, the epsilon for logarithm duty
+    :return: The result of performing the division.
+    """
+
+    # Split the numerator and denominator up
+    # into a signed component and a magnitude component.
+
+    sign = torch.sign(numerator)
+    sign = sign*torch.sign(denominator)
+
+    numerator_magnitude = torch.abs(numerator)
+    denominator_magnitude = torch.abs(denominator)
+
+    # Bias the numerator magnitude, and the denominator magnitude.
+    #
+    # By adding a small positive term to the numerator we can ensure that
+    # we never feed in a zero. This portion is reversable, and dynamically
+    # scaled based on the magnitudes.
+    #
+    # The denominator undergoes a similar process. However, that bias is
+    # only partially reversable. In particular, we use a first order taylor
+    # expansion to understand that ax/(1+epsilon/x) ~= ax - epsilon*x
+
+
 def _advance_memory(memory_tensor: torch.Tensor,
                     update_tensor: torch.Tensor,
                     write_probability: torch.Tensor,
@@ -139,17 +175,35 @@ def _advance_metrics(metrics: Dict[str, torch.Tensor],
     final_metrics['cum_erase_mass'] = metrics['cum_erase_mass'] + erase_factor
     final_metrics['timestep'] = metrics['timestep'] + batch_mask.to(write_probability.dtype)
 
-    # This is a running interpolation based on the timestep, that
-    # tells us basically when the last erase step was. Conceptually, if
-    # we erased everything, we would set this value to the timestep
-    # that happened in.
+    # This is a set of running interpolations. One
+    # tells us, basically, how far into the past we could actually
+    # propogate gradients. The other tells us since the last
+    # erase how much write mass has been committed.
+
+    final_metrics["effective_write_mass"] = (metrics["effective_write_mass"] * (1 - erase_factor) +
+                                             write_probability
+                                             )
 
     final_metrics['average_timestep_distance'] = (metrics["average_timestep_distance"] * (1 - erase_factor) +
                                                   metrics['timestep'] * erase_factor)
+
+    # Account for batch masking. Metrics do not update where the batch was masked
+    for name in final_metrics.keys():
+        # Get the two cases
+        initial_metric = metrics[name]
+        final_metric = final_metrics[name]
+
+        # Unsqueeze to match
+        mask_case = batch_mask
+        while mask_case.dim() < final_metric.dim():
+            mask_case = mask_case.unsqueeze(-1)
+
+        # Update
+        final_metrics[name] = torch.where(mask_case, initial_metric, final_metric)
+
     return final_metrics
 
 
-@torch.jit.script
 def _retard_memory(memory_tensor: torch.Tensor,
                    update_tensor: torch.Tensor,
                    write_factor: torch.Tensor,
@@ -188,11 +242,45 @@ def _retard_memory(memory_tensor: torch.Tensor,
     while erase_factor.dim() < memory_tensor.dim():
         erase_factor = erase_factor.unsqueeze(-1)
 
-    log_memory = torch.log(update_tensor * write_factor - memory_tensor + 1e-9)
+    # Split the memory into a magnitude and a sign in preparation
+    # for logarithm division. The magnitude will go through the
+    # logarithm division, while the sign will be added back on
+    # afterwords.
+
+    raw_memory = memory_tensor - update_tensor*write_factor
+    memory_sign = torch.sign(raw_memory)
+    abs_memory = raw_memory.abs()
+
+    # Integrate the numeric bias onto the numerators of
+    # the division. We bias by +1 in terms of the absolute
+    # memory. This bias can be removed, as (x+1)/y = x/y + 1/y
+    #
+    # Note that the denominator is constrained elsewhere not
+    # to be zero.
+
+    logarithm_bias = 0.1*abs_memory.mean() + 1e-9
+    abs_memory = abs_memory + logarithm_bias
+    bias_removal_term = logarithm_bias/(1 - write_factor * erase_factor + 1e-9)
+
+    # Perform logarithm based division of the memory unit
+
+    log_memory = torch.log(abs_memory)
     log_memory -= torch.log(1 - write_factor * erase_factor + 1e-9)  # divides
-    memory_update = torch.exp(log_memory)
-    memory_tensor = torch.where(batch_mask, memory_tensor, memory_update)
-    return memory_tensor
+    memory = torch.exp(log_memory)
+
+    # Remove the bias.
+    #
+    # Since (x + epsilon)/y = x/y + epsilon/y, we subtract off epsilon/y
+    # This only tends to matter when abs is very close to zero
+
+    memory = memory - bias_removal_term
+
+    # Restore the signs. Since we are dividing, original and final
+    # signs should be the same
+
+    memory = memory_sign*memory
+
+    return memory
 
 
 @torch.jit.script
@@ -224,14 +312,38 @@ def _retard_metrics(metrics: Dict[str, torch.Tensor],
     final_metrics['cum_erase_mass'] = metrics['cum_erase_mass'] - erase_factor
     final_metrics['timestep'] = metrics['timestep'] - batch_mask.to(write_probability.dtype)
 
-    # This is a running interpolation based on the timestep, that
-    # tells us basically when the last erase step was. Conceptually, if
-    # we erased everything, we would set this value to the timestep
-    # that happened in.
+    # This is a set of running interpolations. One
+    # tells us, basically, how far into the past we could actually
+    # propogate gradients. The other tells us since the last
+    # erase how much write mass has been committed.
+
+    metric = metrics['effective_write_mass'] - write_probability
+    sign = torch.sign(metric)
+    magnitude = metric.abs()
+
+    log_metric = torch.log(magnitude + 1e-9)
+    log_metric -= torch.log(1 - erase_factor + 1e-9)
+    final_metrics["effective_write_mass"] = sign*torch.exp(log_metric)
+
+
 
     log_metric = torch.log(metrics['average_timestep_distance'] - metrics['timestep'] * erase_factor + 1e-9)
     log_metric -= torch.log(1 - erase_factor + 1e-9)
     final_metrics['average_timestep_distance'] = torch.exp(log_metric)
+
+    # Account for batch masking. Metrics do not update where the batch was masked
+    for name in final_metrics.keys():
+        # Get the two cases
+        initial_metric = metrics[name]
+        final_metric = final_metrics[name]
+
+        # Unsqueeze to match
+        mask_case = batch_mask
+        while mask_case.dim() < final_metric.dim():
+            mask_case = mask_case.unsqueeze(-1)
+
+        # Update
+        final_metrics[name] = torch.where(mask_case, initial_metric, final_metric)
 
     return final_metrics
 
@@ -241,7 +353,7 @@ class MemoryState(PytreeState):
     Memory state is internally divided into
     mutable and persistent dictionaries of tensors.
 
-    ---- memory write, reversable, forward ----
+    ---- memory write, reversible, forward ----
 
     Memory is maintained in terms of a write-erase
     action. In particular, given current state s_i, update u_i,
@@ -268,17 +380,15 @@ class MemoryState(PytreeState):
 
     cum_write_mass: The cumulative write mass of all write factors.
     cum_erase_mass: The cumulative erase mass of all the erase factors.
-    timestep: The number of timesteps, per batch. Stops updating when padding is detected
+    timestep: The number of timesteps, per batch. Stops updating when padding is detected.
     average_timestep_distance: The "average" location the memory is peering into. Covers all write factor slots.
-                              - It is maintained by keeping a running average around that is updated
+                              - It is maintained by keeping a running average that is updated
                                 based on the erase gate and the timestep.
                               - When a strong erase operation is detected, we move towards the current timestep
                                 as an interpolation.
-    average_gradient_distance: The "average" distance in timesteps that gradients can propogate back by.
-    normalized_gradient_distance: Indicates what percentage into the past, measured over 0-1, gradients
-                                  can propogate through
-                                - 0 means that we are looking only into the immediate past
-                                - 1 would mean they can travel all the way back to the beginning
+    normalized_timestep_distance: The average timestep distance normalized by the current timestep.
+                                    Indicates the relative position in time that the memory is referencing,
+                                    scaled between 1 (current timestep) and 0 (beginning of the sequence).
     """
 
     @property
@@ -297,15 +407,24 @@ class MemoryState(PytreeState):
         """
         return self.metric_tensors["cum_erase_mass"]
 
-    @cum_write_mass.setter
-    def cum_write_mass(self, value: torch.Tensor):
-        assert value.shape == self.cum_write_mass.shape
-        self.metric_tensors["cum_write_mass"] = value
+    @property
+    def effective_write_mass(self) -> torch.Tensor:
+        """
+        The write mass that has been committed since
+        the last erase, basically.
+        """
+        return self.metric_tensors["effective_write_mass"]
 
-    @cum_erase_mass.setter
-    def cum_erase_mass(self, value: torch.Tensor):
-        assert value.shape == self.cum_erase_mass.shape
-        self.metric_tensors["cum_erase_mass"] = value
+    @property
+    def normalized_effective_write_mass(self) -> torch.Tensor:
+        """
+        The effective write mass, but normalized over
+        the number of timesteps.
+        """
+        timestep = self.timestep
+        while timestep.dim() < self.effective_write_mass.dim():
+            timestep = timestep.unsqueeze(-1)
+        return self.effective_write_mass / (timestep + 1e-9)
 
     @property
     def timestep(self) -> torch.Tensor:
@@ -315,42 +434,34 @@ class MemoryState(PytreeState):
         """
         return self.metric_tensors["timestep"]
 
-    @timestep.setter
-    def timestep(self, value: torch.Tensor):
-        assert value.shape == self.timestep.shape
-        self.metric_tensors["timestep"] = value
-
     @property
     def average_timestep_distance(self) -> torch.Tensor:
         """
         The unnormalized distance, indicating from the start of the sequence
         where each memory unit will, on average, be reading from.
         """
-        return self.memory_tensors["average_timestep_distance"]
+        return self.metric_tensors["average_timestep_distance"]
 
     @property
-    def average_gradient_distance(self) -> torch.Tensor:
+    def normalized_timestep_distance(self) -> torch.Tensor:
         """
-        The unnormalized distance in terms of timesteps that we can expect,
-        on average, gradients to propogate through.
+        The normalized average timestep distance.
+
+        This metric represents the average relative position in time that the memory is referencing,
+        scaled between 1 (current timestep) and 0 (beginning of the sequence).
+
+        It is computed as:
+            normalized_timestep_distance = average_timestep_distance / (timestep + epsilon)
+
+        where:
+        - `average_timestep_distance` is the exponentially weighted average timestep, updated based on the erase factor.
+        - `timestep` is the current timestep, adjusted for batch masking.
+        - `epsilon` is a small constant to prevent division by zero.
         """
         timestep = self.timestep
         while timestep.dim() < self.average_timestep_distance.dim():
             timestep = timestep.unsqueeze(-1)
-        return timestep - self.average_timestep_distance
-
-    @property
-    def normalized_gradient_distance(self) -> torch.Tensor:
-        """
-        The normalized timestep distance. Measure the current timestep as
-        0, and all the way back at the beginning as one. Indicates how
-        far into the past each memory slot is looking
-        """
-        timestep = self.timestep
-        running_distance = self.average_timestep_distance
-        while timestep.dim() < running_distance.dim():
-            timestep = timestep.unsqueeze(-1)
-        return (timestep - running_distance) / (timestep + 1e-6)
+        return self.average_timestep_distance / (timestep + 1e-9)
 
     def __init__(self,
                  metric_tensors: MemoryData,
@@ -361,6 +472,8 @@ class MemoryState(PytreeState):
             raise KeyError("cum_write_mass was not found in persistent state. Did you forget to init it?")
         if "cum_erase_mass" not in metric_tensors:
             raise KeyError("cum_erase_mass was not found in persistent state. Did you forget to init it?")
+        if "effective_write_mass" not in metric_tensors:
+            raise KeyError("effective_write_mass was not found in persistent state. Did you forget to init it?")
         if "timestep" not in metric_tensors:
             raise KeyError("timestep was not found in persistent state. Did you forget to init it?")
         if "average_timestep_distance" not in metric_tensors:
@@ -397,10 +510,14 @@ class MemoryState(PytreeState):
                                              write_probability,
                                              erase_probability,
                                              batch_mask)
+
+        # Update the metrics
         metrics = _advance_metrics(self.metric_tensors,
                                    write_probability,
                                    erase_probability,
                                    batch_mask)
+
+        # Return the new state
         return MemoryState(metrics, memories, self.persistent_tensors)
 
     def step_memory_reverse(self,
@@ -421,6 +538,7 @@ class MemoryState(PytreeState):
         """
 
         memories = {}
+        # Update the memories
         for name in self.memory_tensors.keys():
             memory_tensor = self.memory_tensors[name]
             update_tensor = update[name]
@@ -430,11 +548,14 @@ class MemoryState(PytreeState):
                                             erase_probability,
                                             batch_mask)
 
+        # Update the metrics
         metrics = _retard_metrics(self.metric_tensors,
                                   write_probability,
                                   erase_probability,
                                   batch_mask
                                   )
+
+        # Return the last memory state.
         return MemoryState(metrics, memories, self.persistent_tensors)
 
     def get_memories(self) -> MemoryData:
@@ -448,7 +569,7 @@ class MemoryState(PytreeState):
 
     @classmethod
     def load_state(cls,
-                   pytree: Tuple[MemoryData, MemoryData],
+                   pytree: Tuple[MemoryData, MemoryData, MemoryData],
                    bypass: None) -> 'MemoryState':
         metric_tensors, memory_tensors, persistent_tensors = pytree
         return cls(metric_tensors, memory_tensors, persistent_tensors)
@@ -661,7 +782,7 @@ class AbstractWriteMemory(nn.Module, ABC):
         """
 
         super().__init__()
-        self._max_interpolation_rate = config.max_interpolation_factor
+        self._max_interpolation_rate = config.max_write_factor
         self._metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
 
         interpolation_logits = self._initialize_rate_logits(config.interpolation_factor_shapes,
@@ -819,7 +940,7 @@ class AbstractMemoryUnit(nn.Module, ABC):
         """
         with profiler.record_function("reversing the memories"):
             # Compute the write components.
-            update, write_factor = self.memory_writer.compute_common(tensor, next_memory)
+            update, control_factors = self.memory_writer.compute_common(tensor, next_memory)
 
             # Get the original memory state.
             #
@@ -827,13 +948,13 @@ class AbstractMemoryUnit(nn.Module, ABC):
             # our gradients off it later for the next
             # backwards pass.
             with torch.no_grad():
-                original_memory = self.memory_writer.reverse_memory(update, write_factor,
+                original_memory = self.memory_writer.reverse_memory(update, control_factors,
                                                                     batch_mask, next_memory)
             original_memory.setup_for_gradients_()
 
         # Manually complete the read
         with profiler.record_function("forward pass"):
-            next_memory = self.memory_writer.advance_memory(update, write_factor, batch_mask, original_memory)
+            next_memory = self.memory_writer.advance_memory(update, control_factors, batch_mask, original_memory)
             read = self.memory_reader(tensor, next_memory)
         return (read, next_memory), original_memory
 
@@ -853,8 +974,8 @@ class AbstractMemoryUnit(nn.Module, ABC):
         - The new memory state
         """
         with profiler.record_function("forward pass"):
-            update, write_factor = self.memory_writer.compute_common(tensor, memory)
-            next_memory = self.memory_writer.advance_memory(update, write_factor, batch_mask, memory)
+            update, control_factors = self.memory_writer.compute_common(tensor, memory)
+            next_memory = self.memory_writer.advance_memory(update, control_factors, batch_mask, memory)
             read = self.memory_reader(tensor, next_memory)
         return read, next_memory
 
@@ -965,3 +1086,121 @@ def make_memory_unit(d_model: int,
         raise TypeError(f"config of name {config.__class__.__name__} was never registered")
     cls = concrete_classes_registry[config.__class__]
     return cls(d_model, dtype, device, config)
+
+
+def compute_mem_lattice_loss(memory: MemoryState,
+                             max_percent_deviation_low: float,
+                             max_percent_deviation_high: float,
+                             loss_weight: float = 1000.0
+                             ) -> torch.Tensor:
+    """
+    We compute the memory lattice loss here. This is performed by
+    examining the lattice density of the normalized timestep distances,
+    then comparing it to a uniform distribution with the same number of
+    points.
+
+    We then compute the percent error between the distribution. When
+    we are within certain thresholds, no loss is generated. However,
+    outside of that, a strong, constraint-motivated loss is applied
+    to encourage the model to bring itself within the thresholds.
+
+    The net effect of this is that the model is encouraged to keep
+    connections to various points in the past that gradients can propogate
+    through, since we are explicitly performing loss using a metric that
+    quantifies how many timesteps into the past gradients could travel.
+
+    :param memory: The memory state to compute the loss with
+    :param max_percent_deviation_low: How low the memory must deviate before the loss kicks in. Betweeon 0 and 1.
+    :param max_percent_deviation_high: How high the memory must deviate before the loss kicks in. Between 0 and 1.
+    :param loss_weight: The weight of the loss when the loss is active.
+    :return: The loss for the memory.
+    """
+    assert 0.0 <= max_percent_deviation_low <= 1.0
+    assert 0.0 <= max_percent_deviation_high <= 1.0
+
+    # Get the normalized average timestep distance. Flatten it
+    # into something that depends only on the batch size and the elements
+
+    normalized_timestep_distance = memory.normalized_timestep_distance
+    normalized_timestep_distance = normalized_timestep_distance.flatten(1, -1)
+
+    # Compute the lattice density for an equivalent uniform distribution.
+    #
+    # This assumes we have a uniform distribution over the possible normalized
+    # spacing distances
+
+    num_elements = normalized_timestep_distance.shape[-1]
+    target_lattice_density = float((1 - 0) / num_elements)
+
+    # Compute the lattice density of the actual distribution. To do this, we compute
+    # the minimum difference between nonadjacent memory elements
+
+    raw_lattice_distances = normalized_timestep_distance.unsqueeze(-1) - normalized_timestep_distance.unsqueeze(-2)
+    raw_lattice_distances = raw_lattice_distances.abs()
+    raw_lattice_distances += torch.inf * torch.eye(num_elements,  # Prevents selecting self, which would have distance 0
+                                                   dtype=raw_lattice_distances.dtype,
+                                                   device=raw_lattice_distances.device)
+    minimum_lattice_distances, _ = raw_lattice_distances.min(dim=-1)  # (batch, num_elements)
+    average_lattice_density: torch.Tensor = minimum_lattice_distances.mean(dim=-1)  # (batch)
+
+    # Compute the percent error between the target and actual deviation
+    percent_error = (target_lattice_density - average_lattice_density) / (target_lattice_density)
+
+    # Now, we must compute the loss. We only actually have any loss to consider if we end up
+    # outside our clamping threshold. When that happens, we scale that loss by the loss slope
+    # and return that loss.
+
+    loss_factor = percent_error - percent_error.clamp(1 - max_percent_deviation_low, 1 + max_percent_deviation_high)
+    loss = loss_factor ** 2
+    loss = loss_weight * loss.mean()
+    return loss
+
+
+def compute_mem_write_loss(memory: MemoryState,
+                           max_percent_deviation: float,
+                           loss_weight: float = 1000
+                           ):
+    """
+    It is entirely possible for the model to decide to
+    leave memory elements completely inactive - that is,
+    erase but never write - in order to satisfy the mem
+    lattice loss condition.
+
+    This is bad. It does not actually give gradient pathways
+    and does not encourage good learning. To handle that, we
+    introduce mem write loss.
+
+    We say that on "average" we would like all memory slots
+    to be used about equally, whether it be a few large updates
+    or many small updates. So we use the effective write mass
+    to form a loss with respect to it
+
+    :param memory: The memory unit to compute the loss with respect to.
+    :param max_percent_deviation: The maximum percent deviation
+                                  allowed before constraint losses kick in.
+    :param loss_weight: The slope of the loss function
+
+    :return: The write loss. Based on the cumulative write probability
+    """
+
+    # Extract the effective write mass, and represent it per
+    # batch separately
+
+    effective_write_mass = memory.normalized_effective_write_mass
+    effective_write_mass = effective_write_mass.flatten(1, -1)
+
+    # Compute the percent deviation of the effective write masses from the mean
+
+    mean_write_mass = effective_write_mass.mean(dim=-1, keepdim=True)
+    percent_error = (mean_write_mass - effective_write_mass) / (mean_write_mass + 1e-9)
+    mean_percent_error = percent_error.abs().mean(dim=-1)
+
+    # Perform the loss. A heavily weighted mean squared error works fine. Loss is only
+    # actually responsive when deviating outside the clamping region.
+
+    effective_percent_error = mean_percent_error - mean_percent_error.clamp(1 - max_percent_deviation,
+                                                                            1 + max_percent_deviation)
+    loss = loss_weight * effective_percent_error ** 2
+    loss = loss.mean()
+
+    return loss
