@@ -25,13 +25,6 @@ class AbstractMemoryConfig(SavableConfig):
 
     ** Interpolation factor config ***
 
-    The write factor used to commit updates into memories has a lot
-    of math associated with it. They do the the following.
-
-    max_write_factor: The maximum probabilty that can be written in a single step.
-                              This is needed in order to prevent division by zero. Set to
-                              0.999 as default, but lower might help with numeric stability
-
     The following two control how the write interpolation rates are initialized. Those factors
     are initialized uniformly between these, and can then be trained. These are basically
     decay factors between 0 and 1, that control how fast the running interpolation decays away
@@ -51,50 +44,15 @@ class AbstractMemoryConfig(SavableConfig):
         # probabilities.
         raise NotImplementedError("Need to implement interpolation shapes.")
 
-    max_write_factor: float
     min_write_half_life_init: float
     max_write_half_life_init: float
 
 
 MemoryData = Dict[str, torch.Tensor]
+EPSILON = 1e-8 # Half life of 7,000,000 tokens
 
-
-def _numeric_safe_division(numerator: torch.Tensor,
-                           denominator: torch.Tensor,
-                           epsilon: float = 1e-9) -> torch.Tensor:
-    """
-    Attempts to perform a numerically safe division using logarithms.
-    It can handle positive and negative inputs, and numerators of or close to
-    zero.
-
-    It cannot handle denomators that are zero. But neither can normal division.
-    It is much more stable for very small denominators, however.
-
-    :param numerator: The numerator to consider when performing the division
-    :param denominator: The denominator
-    :param epsilon: When needed, the epsilon for logarithm duty
-    :return: The result of performing the division.
-    """
-
-    # Split the numerator and denominator up
-    # into a signed component and a magnitude component.
-
-    sign = torch.sign(numerator)
-    sign = sign*torch.sign(denominator)
-
-    numerator_magnitude = torch.abs(numerator)
-    denominator_magnitude = torch.abs(denominator)
-
-    # Bias the numerator magnitude, and the denominator magnitude.
-    #
-    # By adding a small positive term to the numerator we can ensure that
-    # we never feed in a zero. This portion is reversable, and dynamically
-    # scaled based on the magnitudes.
-    #
-    # The denominator undergoes a similar process. However, that bias is
-    # only partially reversable. In particular, we use a first order taylor
-    # expansion to understand that ax/(1+epsilon/x) ~= ax - epsilon*x
-
+def _compute_erase_factor(write_probability: torch.Tensor, erase_probability: torch.Tensor)-> torch.Tensor:
+    return 1 - write_probability*erase_probability + EPSILON
 
 def _advance_memory(memory_tensor: torch.Tensor,
                     update_tensor: torch.Tensor,
@@ -137,7 +95,8 @@ def _advance_memory(memory_tensor: torch.Tensor,
     while erase_probability.dim() < memory_tensor.dim():
         erase_probability = erase_probability.unsqueeze(-1)
 
-    memory_update = memory_tensor * (1 - write_probability * erase_probability) + update_tensor * write_probability
+    erase_factor = _compute_erase_factor(write_probability, erase_probability)
+    memory_update = memory_tensor * erase_factor + update_tensor * write_probability
     memory_tensor = torch.where(batch_mask, memory_tensor, memory_update)
     return memory_tensor
 
@@ -170,7 +129,7 @@ def _advance_metrics(metrics: Dict[str, torch.Tensor],
 
     while write_probability.dim() < erase_probability.dim():
         write_probability = write_probability.unsqueeze(-1)
-    erase_factor = write_probability * erase_probability
+    erase_factor = _compute_erase_factor(write_probability, erase_probability)
 
     final_metrics['cum_erase_mass'] = metrics['cum_erase_mass'] + erase_factor
     final_metrics['timestep'] = metrics['timestep'] + batch_mask.to(write_probability.dtype)
@@ -180,12 +139,12 @@ def _advance_metrics(metrics: Dict[str, torch.Tensor],
     # propogate gradients. The other tells us since the last
     # erase how much write mass has been committed.
 
-    final_metrics["effective_write_mass"] = (metrics["effective_write_mass"] * (1 - erase_factor) +
+    final_metrics["effective_write_mass"] = (metrics["effective_write_mass"] * erase_factor +
                                              write_probability
                                              )
 
-    final_metrics['average_timestep_distance'] = (metrics["average_timestep_distance"] * (1 - erase_factor) +
-                                                  metrics['timestep'] * erase_factor)
+    final_metrics['average_timestep_distance'] = (metrics["average_timestep_distance"] * erase_factor +
+                                                  metrics['timestep'] * (1-erase_factor))
 
     # Account for batch masking. Metrics do not update where the batch was masked
     for name in final_metrics.keys():
@@ -206,14 +165,13 @@ def _advance_metrics(metrics: Dict[str, torch.Tensor],
 
 def _retard_memory(memory_tensor: torch.Tensor,
                    update_tensor: torch.Tensor,
-                   write_factor: torch.Tensor,
-                   erase_factor: torch.Tensor,
+                   write_probability: torch.Tensor,
+                   erase_probability: torch.Tensor,
                    batch_mask: torch.Tensor,
                    ) -> torch.Tensor:
     """
     Retards the memory tensor. This means we go backwards in
     time. As this is highly performant code, it has been scripted.
-    Additionally, logarithms are used for reasons of numeric stability
 
     Implements:
 
@@ -221,64 +179,31 @@ def _retard_memory(memory_tensor: torch.Tensor,
 
     :param memory_tensor: The tensor currently existing in the memory
     :param update_tensor: The proposed update in the memory
-    :param write_factor: The write factor to proceed under
+    :param write_probability: The write probabiliy  to proceed under
+    :param erase_probability: The erase probability.
     :param batch_mask: Whether or not the batch is masked. True means do not update
     :return: The previous memory tensor
     """
     if update_tensor.shape != memory_tensor.shape:
         raise ValueError(
             f"Update and memory tensor have different shapes: {update_tensor.shape}, {memory_tensor.shape}")
-    if write_factor.dim() > memory_tensor.dim():
-        raise ValueError(f"WriteFactor tensor has too many dimensions: {write_factor.dim()} > {memory_tensor.dim()}")
+    if write_probability.dim() > memory_tensor.dim():
+        raise ValueError(f"WriteFactor tensor has too many dimensions: {write_probability.dim()} > {memory_tensor.dim()}")
     if batch_mask.dim() > memory_tensor.dim():
         raise ValueError(f"batch mask has too many dimensions: {batch_mask.dim()} > {memory_tensor.dim()}")
-    if erase_factor.dim() > memory_tensor.dim():
-        raise ValueError(f"erase factor has too many dims: {erase_factor.dim()} > {memory_tensor.dim()}")
+    if erase_probability.dim() > memory_tensor.dim():
+        raise ValueError(f"erase factor has too many dims: {erase_probability.dim()} > {memory_tensor.dim()}")
 
-    while write_factor.dim() < memory_tensor.dim():
-        write_factor = write_factor.unsqueeze(-1)
+    while write_probability.dim() < memory_tensor.dim():
+        write_probability = write_probability.unsqueeze(-1)
     while batch_mask.dim() < memory_tensor.dim():
         batch_mask = batch_mask.unsqueeze(-1)
-    while erase_factor.dim() < memory_tensor.dim():
-        erase_factor = erase_factor.unsqueeze(-1)
+    while erase_probability.dim() < memory_tensor.dim():
+        erase_probability = erase_probability.unsqueeze(-1)
 
-    # Split the memory into a magnitude and a sign in preparation
-    # for logarithm division. The magnitude will go through the
-    # logarithm division, while the sign will be added back on
-    # afterwords.
-
-    raw_memory = memory_tensor - update_tensor*write_factor
-    memory_sign = torch.sign(raw_memory)
-    abs_memory = raw_memory.abs()
-
-    # Integrate the numeric bias onto the numerators of
-    # the division. We bias by +1 in terms of the absolute
-    # memory. This bias can be removed, as (x+1)/y = x/y + 1/y
-    #
-    # Note that the denominator is constrained elsewhere not
-    # to be zero.
-
-    logarithm_bias = 0.1*abs_memory.mean() + 1e-9
-    abs_memory = abs_memory + logarithm_bias
-    bias_removal_term = logarithm_bias/(1 - write_factor * erase_factor + 1e-9)
-
-    # Perform logarithm based division of the memory unit
-
-    log_memory = torch.log(abs_memory)
-    log_memory -= torch.log(1 - write_factor * erase_factor + 1e-9)  # divides
-    memory = torch.exp(log_memory)
-
-    # Remove the bias.
-    #
-    # Since (x + epsilon)/y = x/y + epsilon/y, we subtract off epsilon/y
-    # This only tends to matter when abs is very close to zero
-
-    memory = memory - bias_removal_term
-
-    # Restore the signs. Since we are dividing, original and final
-    # signs should be the same
-
-    memory = memory_sign*memory
+    erase_factor = _compute_erase_factor(write_probability, erase_probability)
+    memory_update = (memory_tensor - update_tensor*write_probability)/erase_factor
+    memory = torch.where(batch_mask, memory_tensor, memory_update)
 
     return memory
 
@@ -782,7 +707,7 @@ class AbstractWriteMemory(nn.Module, ABC):
         """
 
         super().__init__()
-        self._max_interpolation_rate = config.max_write_factor
+        self._max_interpolation_rate = config.max_erase_factor
         self._metainfo = DeviceDtypeWatch(device=device, dtype=dtype)
 
         interpolation_logits = self._initialize_rate_logits(config.interpolation_factor_shapes,
