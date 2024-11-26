@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from dataclasses import dataclass, Field
 from .memory import make_memory_unit, AbstractMemoryConfig, MemoryState
-from .base import DeviceDtypeWatch, SavableConfig, load_activation_from_torch
+from .base import DeviceDtypeWatch, SavableConfig
 
 MemoryCollection = List[MemoryState]
 @dataclass

@@ -5,16 +5,75 @@ mixing process.
 """
 import functools
 import os
-
+import math
 import torch
 import json
 from torch import nn
 from torch.autograd import profiler
+from torch.nn import functional as F
+from torch.distributions import normal
 from typing import Tuple, Dict, Union, Protocol, Type, Any, Optional, List
 from dataclasses import dataclass, asdict
-from ..base import PytreeState, SavableConfig, DeviceDtypeWatch, TensorTree, parallel_pytree_map
+from ..base import PytreeState, SavableConfig, DeviceDtypeWatch, can_broadcast
 from abc import ABC, abstractmethod
 
+class GradientTimeLossConfig(SavableConfig):
+    """
+    The  specification for defining how the gradient
+    time loss is computed and integrated.
+
+    The gradient time loss is utilized in order to ensure the
+    memory system remains capable of propogating gradients
+    over an extremely long time scale.
+
+    ----- overview ----
+
+    The gradient time loss proceeds as follows:
+
+    - There is a metric that represents how many timesteps into the past a gradient can
+      propogate along a particular memory element.
+    - We scale this to be from 0 to 1, where 0 is all the way to the beginning and 1 is the
+      current timestep.
+    - We compute the lattice density among these metrics for each point, getting an idea
+      of how closely clustered the various metrics are.
+    - We put these densities into bins based on distance into the past.
+      Then we normalize. We end up with a bin mass distribution.
+      from the proportion of the distribution that should be in that bin.
+    - This penalty propogates backwards through the lattice density and encourages
+      locations to get closer or spread farther apart.
+    - The penalty is generally quite steep when active.
+
+    Best practice will likely include scheduling this loss with something like
+    cosine annealing when training.
+
+    ---- computing lattice distances ----
+
+    The lattice distance computation is moderately complex, and must be in order
+    to produce successful gradients.
+
+    In particular, we compute the average lattice distance not using the nearest
+    neighbors, but the nearest N neighbors, in both directions.
+
+    This ensures that the loss has the ability to shuffle lattice points past
+    one another if needed.
+
+    ---- fields ----
+
+    num_neighbors: Number of neighbors to include when computing the loss. In both directions.
+                   something like 5 or 10 is typical.
+    num_bins: Number of histogram bins. We will be binning the lattice density. They will be spaced
+              evenly over 0..1.
+    bin_distribution: Expected mass distribution. A discrete histogram based distribution. Should sum up to 1.0
+    bin_loss_thresholds: How far away from the distribution we can deviate before loss starts kicking in.
+    loss_weight: The weight to use when loss kicks in. Loss will be computed using cross entropy. Should
+    usually be fairly strong to act as a constraint.
+    """
+
+    num_neighbors: int
+    num_bins: int
+    target_distribution: List[float]
+    bin_loss_thresholds: List[float]
+    loss_weight: float
 
 class AbstractMemoryConfig(SavableConfig):
     """
@@ -131,9 +190,9 @@ def _standardize_step_parameters(state_tensor: torch.Tensor,
     parameters.
     :return:
     """
-    if update_tensor.shape != state_tensor.shape:
+    if not can_broadcast(state_tensor.shape, update_tensor.shape):
         raise ValueError(
-            f"Update and state tensor have different shapes: {update_tensor.shape}, {state_tensor.shape}")
+            f"Update and state tensor have nonbroadcastable shapes: {update_tensor.shape}, {state_tensor.shape}")
     if write_gate.dim() > state_tensor.dim():
         raise ValueError(
             f"write gate tensor has too many dimensions: {write_gate.dim()} > {state_tensor.dim()}")
@@ -190,7 +249,6 @@ def _step_state_reverse(state_tensor,
     return (state_tensor - update_tensor * write_gate) / erase_gate
 
 
-@torch.jit.script
 def _advance_memory(memory_tensor: torch.Tensor,
                     update_tensor: torch.Tensor,
                     write_gate: torch.Tensor,
@@ -216,11 +274,10 @@ def _advance_memory(memory_tensor: torch.Tensor,
     :return: The next memory tensor
     """
     memory_update = _step_state_forward(memory_tensor, update_tensor, erase_gate, write_gate)
-    memory_tensor = _perform_batch_masking(batch_mask, memory_tensor, memory_update)
+    memory_tensor = _perform_batch_masking(batch_mask, memory_update, memory_tensor)
     return memory_tensor
 
 
-@torch.jit.script
 def _advance_metrics(metrics: Dict[str, torch.Tensor],
                      write_gate: torch.Tensor,
                      erase_gate: torch.Tensor,
@@ -261,8 +318,13 @@ def _advance_metrics(metrics: Dict[str, torch.Tensor],
                                                                 one
                                                                 )
 
+
+    timestep = metrics["timestep"]
+    while timestep.dim() < metrics["average_timestep_distance"].dim():
+        timestep = timestep.unsqueeze(-1)
+
     final_metrics["average_timestep_distance"] = _step_state_forward(metrics["average_timestep_distance"],
-                                                                     metrics['timestep'],
+                                                                     timestep,
                                                                      erase_gate,
                                                                      1 - erase_gate
                                                                      )
@@ -338,8 +400,13 @@ def _retard_metrics(metrics: Dict[str, torch.Tensor],
                                                                 one
                                                                 )
 
+
+    timestep = metrics["timestep"]
+    while timestep.dim() < metrics["average_timestep_distance"].dim():
+        timestep = timestep.unsqueeze(-1)
+
     final_metrics["average_timestep_distance"] = _step_state_reverse(metrics["average_timestep_distance"],
-                                                                     metrics['timestep'],
+                                                                     timestep,
                                                                      erase_gate,
                                                                      1 - erase_gate
                                                                      )
@@ -1096,6 +1163,183 @@ def make_memory_unit(d_model: int,
     cls = concrete_classes_registry[config.__class__]
     return cls(d_model, dtype, device, config)
 
+
+class GradientTimeLoss(nn.Module):
+    """
+    A loss mechanism based on the gradient time
+    loss. This will evaluate a histogram of how
+    far back in time gradients can propagate through
+    various memory slots.
+    """
+
+    def compute_lattice_spacing(self,
+                                timestep_distances: torch.Tensor
+                                )->torch.Tensor:
+        """
+        Compute the lattice spacings we expect to see based on the locations.
+
+        :param timestep_distances: The normalized timestep distances.
+        :return: The lattice spacing, given num step
+        """
+
+        # Compute the ordered representation
+
+        kernel_size = 2*self.config.num_neighbors + 1
+
+        locations, _ = torch.sort(timestep_distances, dim=-1) #(batch_size, num_elements)
+        weights = torch.ones_like(locations) # (batch_size, num_elements)
+
+        # Compute the distances.
+        #
+        # We compute a sliding kernel with padding, over the locations and the weights
+        # We then find the distance from the location, the number of nonpadded elements,
+        # and use this to construct the average.
+
+        padding_amount = self.config.num_neighbors
+        padded_locations = F.pad(locations, (padding_amount, padding_amount))
+        padded_weights = F.pad(weights,(padding_amount, padding_amount))
+
+        local_locations = padded_locations.unfold(dimension=-1, size=kernel_size, step=1)
+        local_weights = padded_weights.unfold(dimension=-1, size=kernel_size, step=1)
+
+        local_distances = (local_locations - locations.unsqueeze(-1)).abs() # Distance from location.
+        local_weights = local_weights - 1 # Remove myself. Only neighbors remain
+
+        lattice_spacings = local_distances.sum(dim=-1)/(local_weights.sum(dim=-1) + 1e-9)
+
+        return lattice_spacings
+
+    def compute_bin_distribution(self, timestep_distances: torch.Tensor)->torch.Tensor:
+        """
+        Computes the amount of lattice mass that is found within each bin, then normalize
+        by the amount of lattice mass, to get a distribution
+        :param timestep_distances: The timestep distances under consideration. Shape (batch_size, num_elements)
+        :return: A binned probability distribution (batch_size, num_bins).
+        """
+        # Compute the lattice spacing and bin boundaries
+        lattice_spacings = self.compute_lattice_spacing(timestep_distances) # (batch_size, num_elements)
+        bin_boundaries = torch.linspace(0, 1, self.config.num_bins,
+                                        device=timestep_distances.device,
+                                        dtype=timestep_distances.dtype)
+
+
+        # Compute the bin separation mask. This assigns
+        # each element to a bin. VERY rarely, the same
+        # element might be assigned twice.
+        start_boundaries = bin_boundaries[:-1]
+        end_boundaries = bin_boundaries[1:]
+        comparison_distance = timestep_distances.unsqueeze(-1)
+        bin_separation_mask = (comparison_distance >= start_boundaries) & (comparison_distance <= end_boundaries)
+            # Bin separation mask: (batch_size, num_element, bins)
+
+        # Assign all these elements to bins. Normalize by how many
+        # elements are in the bin, since what we really care about
+        # is the average density over the elements in the bin
+
+        bin_lattice_mass = torch.matmul(lattice_spacings.unsqueeze(-2),
+                                        bin_separation_mask).squeeze(-2) # (batch_size, num_bins)
+        bin_lattice_norm = bin_separation_mask.sum(dim=-2)
+        bin_lattice_distribution = bin_lattice_mass /( bin_lattice_norm + 1e-9)
+
+        # Normalize by the total bin density
+        bin_lattice_mass_distribution = (bin_lattice_distribution /
+                                         (bin_lattice_distribution.sum(dim=-1, keepdim=True) + 1e-9))
+
+        # Return the result.
+        return bin_lattice_mass_distribution
+    def __init__(self, config: GradientTimeLossConfig):
+        super().__init__()
+        if config.num_bins != len(config.target_distribution):
+            raise ValueError("number of bins must be equal to length of bin probability distribution")
+        if (sum(config.target_distribution) - 1)**2 > 1e-4:
+            raise ValueError("bin probability distribution must sum up to 1")
+        if config.num_bins != len(config.bin_loss_thresholds):
+            raise ValueError("number of bins must be equal to length of bin loss thresholds.")
+        self.config = config
+        self.cross_entropy = nn.CrossEntropyLoss(reduction='sum')
+
+    def forward(self, memory: MemoryState)->torch.Tensor:
+        """
+        Computes the gradient distance loss.
+        :param memory: The memory state to use
+        :return: A scalar of the gradient distance loss. Unscaled, as it
+                 is expected you will do it yourself.
+        """
+
+        # extract, normalize, flatten
+        timestep_distance = memory.normalized_timestep_distance
+        timestep_distance = timestep_distance.flatten(2, -1)
+
+        # Compute the bin distribution.
+        bin_distribution = self.compute_bin_distribution(timestep_distance)
+        target_distribution = self.config.target_distribution
+
+        threshold_tensor = torch.tensor(self.config.bin_loss_thresholds,
+                                        dtype=timestep_distance.dtype,
+                                        device=timestep_distance.device
+                                        )
+        high_target_distribution = target_distribution + threshold_tensor
+        low_target_distribution = target_distribution - threshold_tensor
+
+        # Compute the loss cases
+
+        high_loss = self.cross_entropy(bin_distribution, high_target_distribution)
+        low_loss = self.cross_entropy(bin_distribution, low_target_distribution)
+
+        # Compute the loss itself, based on what if any loss cases are applicable
+
+        loss = torch.where(bin_distribution > high_target_distribution, high_loss, 0.0)
+        loss = torch.where(bin_distribution < low_target_distribution, low_loss, loss)
+
+        # Return.
+        return loss*self.config.loss_weight
+
+
+def compute_lattice_spacing(locations: torch.Tensor,
+                            config: AbstracGradientTimeLossConfig
+                            )->torch.Tensor:
+    """
+    Compute the average lattice spacing between locations.
+
+    The lattice spacing is computed using the average of the
+    spacing of the next element, and the last element, relative
+    to the current element.
+
+    :param locations: The locations of each element. Spaced over 0..1
+    :return: The lattice spacing of each individual element
+    """
+
+    # Sort the lattice locations. We can then directly find our neighbors.
+
+    num_elements = locations.shape[-1]
+    locations, _ = torch.sort(locations, dim=-1)
+
+    # Handle intermediate bits
+    if num_elements > 2:
+        # Use slicing to find prior and next neighbors
+        prior = locations[..., :-2]  # All elements except the last two are prior points
+        current = locations[..., 1:-1]  # All elements except the first and last are current
+        next = locations[..., 2:]  # All elements except the first two are next points
+
+        # Compute spacings, then average
+        prior_spacing = current - prior
+        next_spacing = next - current
+        lattice_spacings = (prior_spacing + next_spacing) /2
+    else:
+        shape = list(locations.shape)
+        shape[-1] = 0
+        lattice_spacings = torch.empty(shape, device=locations.device, dtype=locations.dtype)
+
+    # Handle points on edge.
+
+    lower_edge_spacing = locations[..., 1] - locations[..., 0]
+    upper_edge_spacing = locations[..., -1] - locations[..., -2]
+    lattice_spacings = torch.concat([lower_edge_spacing, lattice_spacings, upper_edge_spacing], dim=-1)
+
+    # Return
+    return lattice_spacings
+
+def compute_lattice_loss()
 
 def compute_mem_lattice_loss(memory: MemoryState,
                              max_percent_deviation_low: float,

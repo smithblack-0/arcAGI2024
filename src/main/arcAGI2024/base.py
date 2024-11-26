@@ -54,19 +54,41 @@ def set_rng_state(state, device: torch.device):
     else:
         raise ValueError("Unsupported device type. Must be 'cpu' or 'cuda'.")
 
+def _element_can_broadcast(element_a: int, element_b: int)->bool:
+    """
+    Small helper function. Torchscript forbids embedding inside
+    the main function. Elements can broadcast if they are the
+    same, or if one of them is zero
+    :param element_a: First element to compare
+    :param element_b: Second element to compare
+    :return: Whether they are compatible.
+    """
+    if element_a == element_b:
+        return True
+    if element_a == 1:
+        return True
+    if element_b == 1:
+        return True
+    return False
+def can_broadcast(shapes_a: List[int], shapes_b: List[int]) -> bool:
+    """
+    Returns whether the two tensors are broadcastable.
+    :param shapes_a: The first shapes to check
+    :param shapes_b: The second shapes to check
+    :return: The answer
+    """
 
-def load_activation_from_torch(name: str, kwargs: Optional[Dict[str, Any]] = None) -> nn.Module:
-    """
-    Dynamically fetch a torch activation layer
-    :param name: The name of the activation layer. Like ReLU. Match case
-    :param kwargs: Any kwargs to use
-    :return: The initialized layer
-    """
-    activation_class = getattr(nn, name)
-    if kwargs is None:
-        return activation_class()
-    else:
-        return activation_class(**kwargs)
+    if len(shapes_a) > len(shapes_b):
+        excess = len(shapes_a) - len(shapes_b)
+        shapes_a = shapes_a[excess:]
+    elif len(shapes_b) > len(shapes_a):
+        excess = len(shapes_b) - len(shapes_a)
+        shapes_b = shapes_b[excess:]
+
+    for element_a, element_b in zip(shapes_a, shapes_b):
+        if not _element_can_broadcast(element_a, element_b):
+            return False
+    return True
 
 
 def middle_quantiles_mask(tensor: torch.Tensor,
