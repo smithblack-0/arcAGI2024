@@ -8,6 +8,7 @@ import os
 import math
 import torch
 import json
+import math
 from torch import nn
 from torch.autograd import profiler
 from torch.nn import functional as F
@@ -17,63 +18,90 @@ from dataclasses import dataclass, asdict
 from ..base import PytreeState, SavableConfig, DeviceDtypeWatch, can_broadcast
 from abc import ABC, abstractmethod
 
+@dataclass
 class GradientTimeLossConfig(SavableConfig):
     """
     The  specification for defining how the gradient
     time loss is computed and integrated.
 
-    The gradient time loss is utilized in order to ensure the
-    memory system remains capable of propogating gradients
-    over an extremely long time scale.
+    Basically, we analyze the timestep metrics which
+    tell us how far back in time gradients can travel
+    as a set of bins like a histogram, producing a discrete
+    probability distribution.
 
-    ----- overview ----
+    Then,
+    ---- fields ----
+.
+    num_bins:
+    - Number of histogram bins. They will be spaced
+      evenly over 0..1.
+    - Keeping in mind the idea of hard bins is useful for understanding the config.
+      However, the actual implementation uses gaussian soft bins for losses
+    deviation_factor:
+    - A factor we multiply the default std by if we want to change how wide the soft bins are
+    - By default, bins are setup so that the std deviation covers the width of a hard bin - that is,
+      it is equal to the distance from the middle to the edge of a bin.
+    - Adjust this away from 1.0 to, for example, 2.0 to spread over two of these deviations.
+    target_distribution:
+     - Expected probability distributions for the bins.
+     - Earlier bins go back in time to earlier values, with a bin of 0 going all the way back to the
+       first timestep.
+     - Must add up to close to 1.0
+    target_thresholds:
+     - How much, in absolute probability, a bin can deviate from its target before loss kicks in
+     - Loss kicks in aggressively as a constraint
+     - Symmetric.
+    loss_weight:
+    - The strength of the loss when it kicks in.
+    - Should usually be quite high, as this is a constraint that only activates when needed.
+    loss_type:
+    - The loss type that can kick in.
+    - Known at the moment are "quadratic_threshold" and "linear_threshold"
+    """
 
-    The gradient time loss proceeds as follows:
+    num_bins: int
+    deviation_factor: float
+    target_distribution: List[float]
+    target_thresholds: List[float]
+    loss_weight: float
+    loss_type: str
+    def __post_init__(self):
+        if self.num_bins < 1:
+            raise ValueError("num_bins must be greater than or equal to 1.")
+        if self.deviation_factor <= 0:
+            raise ValueError("deviation factor must be greater than zero")
+        distribution_sum = sum(self.target_distribution)
+        if abs(distribution_sum-1) > 1e-4:
+            raise ValueError("target distribution did not sum to 1.0")
+        for threshold, distribution_element in zip(self.target_thresholds, self.target_distribution):
+            if distribution_element + threshold > 1.0:
+                raise ValueError("Threshold takes probability over 1.0 for a bin")
+            if distribution_element - threshold < 0.0:
+                raise ValueError("Threshold takes probability below 0.0 for a bin")
+        if self.loss_weight < 0.0:
+            raise ValueError("loss_weight must be greater than or equal to 0.")
 
-    - There is a metric that represents how many timesteps into the past a gradient can
-      propogate along a particular memory element.
-    - We scale this to be from 0 to 1, where 0 is all the way to the beginning and 1 is the
-      current timestep.
-    - We compute the lattice density among these metrics for each point, getting an idea
-      of how closely clustered the various metrics are.
-    - We put these densities into bins based on distance into the past.
-      Then we normalize. We end up with a bin mass distribution.
-      from the proportion of the distribution that should be in that bin.
-    - This penalty propogates backwards through the lattice density and encourages
-      locations to get closer or spread farther apart.
-    - The penalty is generally quite steep when active.
-
-    Best practice will likely include scheduling this loss with something like
-    cosine annealing when training.
-
-    ---- computing lattice distances ----
-
-    The lattice distance computation is moderately complex, and must be in order
-    to produce successful gradients.
-
-    In particular, we compute the average lattice distance not using the nearest
-    neighbors, but the nearest N neighbors, in both directions.
-
-    This ensures that the loss has the ability to shuffle lattice points past
-    one another if needed.
+@dataclass
+class MemRegularizationLossConfig(SavableConfig):
+    """
+    The specification for the regularization loss for
+    the memory config. This generally does things like
+    discourages the memory from getting too large.
 
     ---- fields ----
 
-    num_neighbors: Number of neighbors to include when computing the loss. In both directions.
-                   something like 5 or 10 is typical.
-    num_bins: Number of histogram bins. We will be binning the lattice density. They will be spaced
-              evenly over 0..1.
-    bin_distribution: Expected mass distribution. A discrete histogram based distribution. Should sum up to 1.0
-    bin_loss_thresholds: How far away from the distribution we can deviate before loss starts kicking in.
-    loss_weight: The weight to use when loss kicks in. Loss will be computed using cross entropy. Should
-    usually be fairly strong to act as a constraint.
+    loss_type: type of regularization loss. 'l1' and 'l2' are common cases
+    loss_weight: How strong the loss should be. Generally fairly weak in comparison
+                 to the constraint loss.
     """
+    magnitude_loss_type: str
+    magnitude_loss_weight: float
+    def __post_init__(self):
+        if self.magnitude_loss_type not in {'l1', 'l2'}:
+            raise ValueError(f"Unsupported magnitude_loss_type '{self.magnitude_loss_type}'. Supported types are 'l1' and 'l2'.")
+        if self.magnitude_loss_weight < 0.0:
+            raise ValueError("magnitude_loss_weight must be non-negative.")
 
-    num_neighbors: int
-    num_bins: int
-    target_distribution: List[float]
-    bin_loss_thresholds: List[float]
-    loss_weight: float
 
 class AbstractMemoryConfig(SavableConfig):
     """
@@ -114,6 +142,16 @@ class AbstractMemoryConfig(SavableConfig):
     min_write_half_life_init: float
     max_write_half_life_init: float
     erase_epsilon_factor: float
+    gradient_loss: GradientTimeLossConfig
+    mem_regularization_loss: MemRegularizationLossConfig
+
+    def __post_init__(self):
+        if self.min_write_half_life_init < 0:
+            raise ValueError("min_write_half_life_init must be non-negative.")
+        if self.max_write_half_life_init <= self.min_write_half_life_init:
+            raise ValueError("max_write_half_life_init must be greater than min_write_half_life_init.")
+        if not (0.0 < self.erase_epsilon_factor < 1.0):
+            raise ValueError("erase_epsilon_factor must be between 0 and 1.")
 
 
 MemoryData = Dict[str, torch.Tensor]
@@ -533,6 +571,13 @@ class MemoryState(PytreeState):
         while timestep.dim() < self.average_timestep_distance.dim():
             timestep = timestep.unsqueeze(-1)
         return self.average_timestep_distance / (timestep + 1e-9)
+    @property
+    def device(self)->torch.device:
+        return self.cum_write_mass.device
+
+    @property
+    def dtype(self)->torch.dtype:
+        return self.cum_write_mass.dtype
 
     def __init__(self,
                  metric_tensors: MemoryData,
@@ -1164,296 +1209,137 @@ def make_memory_unit(d_model: int,
     return cls(d_model, dtype, device, config)
 
 
-class GradientTimeLoss(nn.Module):
+class GradientTimestepLoss(nn.Module):
     """
     A loss mechanism based on the gradient time
-    loss. This will evaluate a histogram of how
-    far back in time gradients can propagate through
-    various memory slots.
+    loss. This will assign the timestep metrics,
+    which let us know how far back in time gradients
+    could propagate, to soft bins that are then treated
+    as histograms.
+
+    We then specify how much mass we
+    allow in each bin between thresholds.
+    Going outside these thresholds will
+    kick on a strong constraint loss.
     """
-
-    def compute_lattice_spacing(self,
-                                timestep_distances: torch.Tensor
-                                )->torch.Tensor:
+    def compute_probability_masses(self, timestep_locations: torch.Tensor)->torch.Tensor:
         """
-        Compute the lattice spacings we expect to see based on the locations.
+        Computes the probability masses associated with each bin based on
+        a gaussian kernel at that location.
+        :param timestep_locations: The timestep locations. Shape (batch_size, num_elements).
+        :return: The bin probability masses. Soft. Shape (batch_size, num_bins).
+        """
+        # Basically, we compute the contribution of each location to each bin in terms of
+        # mixture kernels of gaussians.
 
-        :param timestep_distances: The normalized timestep distances.
-        :return: The lattice spacing, given num step
+        bin_distance = self.bin_centers - timestep_locations.unsqueeze(-1) # (batch_size, num_elements, num_bins)
+        gaussian_magnitudes = torch.exp(-bin_distance**2/(2*self.bin_deviation**2)) # (batch_size, num_elements, num_bins)
+        probability_mass = gaussian_magnitudes.sum(dim=-2)
+        return probability_mass
+
+    def compute_loss(self,
+                     predicted_distribution: torch.Tensor,
+                     )->torch.Tensor:
+        """
+        Computes the loss based on the histogram distributions.
+        :param predicted_distribution: Shape (batch_size, num_bins). Predicted distribution. Direct
+        :return: Some sort of loss. Details depend on config.
         """
 
-        # Compute the ordered representation
+        # Compute the hinge. This will only be active if a bin
+        # goes outside it's thresholds
 
-        kernel_size = 2*self.config.num_neighbors + 1
+        difference = predicted_distribution - self.target_distribution # (batch_size, num_bins)
+        hinge = torch.clamp_min(difference.abs() - self.target_thresholds, 0.0)  # (batch_size, num_bins)
 
-        locations, _ = torch.sort(timestep_distances, dim=-1) #(batch_size, num_elements)
-        weights = torch.ones_like(locations) # (batch_size, num_elements)
-
-        # Compute the distances.
-        #
-        # We compute a sliding kernel with padding, over the locations and the weights
-        # We then find the distance from the location, the number of nonpadded elements,
-        # and use this to construct the average.
-
-        padding_amount = self.config.num_neighbors
-        padded_locations = F.pad(locations, (padding_amount, padding_amount))
-        padded_weights = F.pad(weights,(padding_amount, padding_amount))
-
-        local_locations = padded_locations.unfold(dimension=-1, size=kernel_size, step=1)
-        local_weights = padded_weights.unfold(dimension=-1, size=kernel_size, step=1)
-
-        local_distances = (local_locations - locations.unsqueeze(-1)).abs() # Distance from location.
-        local_weights = local_weights - 1 # Remove myself. Only neighbors remain
-
-        lattice_spacings = local_distances.sum(dim=-1)/(local_weights.sum(dim=-1) + 1e-9)
-
-        return lattice_spacings
-
-    def compute_bin_distribution(self, timestep_distances: torch.Tensor)->torch.Tensor:
-        """
-        Computes the amount of lattice mass that is found within each bin, then normalize
-        by the amount of lattice mass, to get a distribution
-        :param timestep_distances: The timestep distances under consideration. Shape (batch_size, num_elements)
-        :return: A binned probability distribution (batch_size, num_bins).
-        """
-        # Compute the lattice spacing and bin boundaries
-        lattice_spacings = self.compute_lattice_spacing(timestep_distances) # (batch_size, num_elements)
-        bin_boundaries = torch.linspace(0, 1, self.config.num_bins,
-                                        device=timestep_distances.device,
-                                        dtype=timestep_distances.dtype)
-
-
-        # Compute the bin separation mask. This assigns
-        # each element to a bin. VERY rarely, the same
-        # element might be assigned twice.
-        start_boundaries = bin_boundaries[:-1]
-        end_boundaries = bin_boundaries[1:]
-        comparison_distance = timestep_distances.unsqueeze(-1)
-        bin_separation_mask = (comparison_distance >= start_boundaries) & (comparison_distance <= end_boundaries)
-            # Bin separation mask: (batch_size, num_element, bins)
-
-        # Assign all these elements to bins. Normalize by how many
-        # elements are in the bin, since what we really care about
-        # is the average density over the elements in the bin
-
-        bin_lattice_mass = torch.matmul(lattice_spacings.unsqueeze(-2),
-                                        bin_separation_mask).squeeze(-2) # (batch_size, num_bins)
-        bin_lattice_norm = bin_separation_mask.sum(dim=-2)
-        bin_lattice_distribution = bin_lattice_mass /( bin_lattice_norm + 1e-9)
-
-        # Normalize by the total bin density
-        bin_lattice_mass_distribution = (bin_lattice_distribution /
-                                         (bin_lattice_distribution.sum(dim=-1, keepdim=True) + 1e-9))
-
-        # Return the result.
-        return bin_lattice_mass_distribution
+        # Convert the hinge into an actual loss
+        if self.config.loss_type == "linear_threshold":
+            loss = hinge
+        elif self.config.loss_type == "quadratic_threshold":
+            loss = hinge ** 2
+        else:
+            raise ValueError(f"loss_type {self.config.loss_type} was never recognized")
+        loss = self.config.loss_weight*loss.sum()
+        return loss
     def __init__(self, config: GradientTimeLossConfig):
         super().__init__()
-        if config.num_bins != len(config.target_distribution):
-            raise ValueError("number of bins must be equal to length of bin probability distribution")
-        if (sum(config.target_distribution) - 1)**2 > 1e-4:
-            raise ValueError("bin probability distribution must sum up to 1")
-        if config.num_bins != len(config.bin_loss_thresholds):
-            raise ValueError("number of bins must be equal to length of bin loss thresholds.")
+
+        self.bin_edges = torch.linspace(0, 1.0, config.num_bins + 1)
+        self.bin_centers = (self.bin_edges[:-1] + self.bin_edges[1:]) / 2
+        self.bin_deviation = self.bin_centers[0] - self.bin_edges[0]
+        self.target_distribution = torch.tensor(config.target_distribution)
+        self.target_thresholds = torch.tensor(config.target_thresholds)
+
+
+        self.register_buffer('bin_centers',  self.bin_centers)
+        self.register_buffer('bin_deviation', self.bin_deviation)
+        self.register_buffer('target_distribution', self.target_distribution)
+        self.register_buffer('target_thresholds', self.target_thresholds)
+
         self.config = config
-        self.cross_entropy = nn.CrossEntropyLoss(reduction='sum')
-
-    def forward(self, memory: MemoryState)->torch.Tensor:
+        
+    def forward(self, memory: MemoryState)-> torch.Tensor:
         """
-        Computes the gradient distance loss.
-        :param memory: The memory state to use
-        :return: A scalar of the gradient distance loss. Unscaled, as it
-                 is expected you will do it yourself.
+        We compute the gradient timestep loss.
+        :param memory: The memory state to consider
+        :return: A scalar of the loss
         """
 
-        # extract, normalize, flatten
+        # Get the timestep distance, normalized, and
+        # flattened into something in terms of batch, elements
+
         timestep_distance = memory.normalized_timestep_distance
         timestep_distance = timestep_distance.flatten(2, -1)
 
-        # Compute the bin distribution.
-        bin_distribution = self.compute_bin_distribution(timestep_distance)
-        target_distribution = self.config.target_distribution
+        # Generate the target and predicted distributions
 
-        threshold_tensor = torch.tensor(self.config.bin_loss_thresholds,
-                                        dtype=timestep_distance.dtype,
-                                        device=timestep_distance.device
-                                        )
-        high_target_distribution = target_distribution + threshold_tensor
-        low_target_distribution = target_distribution - threshold_tensor
+        predicted_distribution = self.compute_probability_masses(timestep_distance)
+        predicted_distribution /= predicted_distribution.sum(dim=-1, keepdim=True) + 1e-12
 
-        # Compute the loss cases
-
-        high_loss = self.cross_entropy(bin_distribution, high_target_distribution)
-        low_loss = self.cross_entropy(bin_distribution, low_target_distribution)
-
-        # Compute the loss itself, based on what if any loss cases are applicable
-
-        loss = torch.where(bin_distribution > high_target_distribution, high_loss, 0.0)
-        loss = torch.where(bin_distribution < low_target_distribution, low_loss, loss)
-
-        # Return.
-        return loss*self.config.loss_weight
-
-
-def compute_lattice_spacing(locations: torch.Tensor,
-                            config: AbstracGradientTimeLossConfig
-                            )->torch.Tensor:
+        return self.compute_loss(predicted_distribution)
+class MemRegularizationLoss(nn.Module):
     """
-    Compute the average lattice spacing between locations.
+    One fairly straightforward way the memory system could
+    ultimately end up beating the gradient timestep loss
+    without actually seeing significant benefit from the
+    gradient effects is to simply not erase certain gates,
+    or erase them at decreasing rates as time goes by.
 
-    The lattice spacing is computed using the average of the
-    spacing of the next element, and the last element, relative
-    to the current element.
+    That is basically okay, as that extra capacity can then
+    later be used when training with longer sequence.
+    However, it can eventually result in a memory system in which
+    the magnitudes of the memory grow out of control if the erase gate is
+    never turned on again. Instead, the model should prioritize
+    writing a tiny bit each time.
 
-    :param locations: The locations of each element. Spaced over 0..1
-    :return: The lattice spacing of each individual element
+    This loss is a simple magnitude based penalty for when
+    the memory units start to get very large. It should
+    generally be fairly weak, but will eventually have
+    something to say if the memory does not behave nicely.
+
+    We do normalize over the number of memory slots, but NOT
+    the batches, as with most losses for this project.
     """
+    def __init__(self, config: MemRegularizationLossConfig):
+        super().__init__()
+        self.config = config
 
-    # Sort the lattice locations. We can then directly find our neighbors.
+    def forward(self, memory: MemoryState)-> torch.Tensor:
+        """
+        Computes the regularization loss. We normalize by the
+        number of elements, but not the number of batches.
 
-    num_elements = locations.shape[-1]
-    locations, _ = torch.sort(locations, dim=-1)
-
-    # Handle intermediate bits
-    if num_elements > 2:
-        # Use slicing to find prior and next neighbors
-        prior = locations[..., :-2]  # All elements except the last two are prior points
-        current = locations[..., 1:-1]  # All elements except the first and last are current
-        next = locations[..., 2:]  # All elements except the first two are next points
-
-        # Compute spacings, then average
-        prior_spacing = current - prior
-        next_spacing = next - current
-        lattice_spacings = (prior_spacing + next_spacing) /2
-    else:
-        shape = list(locations.shape)
-        shape[-1] = 0
-        lattice_spacings = torch.empty(shape, device=locations.device, dtype=locations.dtype)
-
-    # Handle points on edge.
-
-    lower_edge_spacing = locations[..., 1] - locations[..., 0]
-    upper_edge_spacing = locations[..., -1] - locations[..., -2]
-    lattice_spacings = torch.concat([lower_edge_spacing, lattice_spacings, upper_edge_spacing], dim=-1)
-
-    # Return
-    return lattice_spacings
-
-def compute_lattice_loss()
-
-def compute_mem_lattice_loss(memory: MemoryState,
-                             max_percent_deviation_low: float,
-                             max_percent_deviation_high: float,
-                             loss_weight: float = 1000.0
-                             ) -> torch.Tensor:
-    """
-    We compute the memory lattice loss here. This is performed by
-    examining the lattice density of the normalized timestep distances,
-    then comparing it to a uniform distribution with the same number of
-    points.
-
-    We then compute the percent error between the distribution. When
-    we are within certain thresholds, no loss is generated. However,
-    outside of that, a strong, constraint-motivated loss is applied
-    to encourage the model to bring itself within the thresholds.
-
-    The net effect of this is that the model is encouraged to keep
-    connections to various points in the past that gradients can propogate
-    through, since we are explicitly performing loss using a metric that
-    quantifies how many timesteps into the past gradients could travel.
-
-    :param memory: The memory state to compute the loss with
-    :param max_percent_deviation_low: How low the memory must deviate before the loss kicks in. Betweeon 0 and 1.
-    :param max_percent_deviation_high: How high the memory must deviate before the loss kicks in. Between 0 and 1.
-    :param loss_weight: The weight of the loss when the loss is active.
-    :return: The loss for the memory.
-    """
-    assert 0.0 <= max_percent_deviation_low <= 1.0
-    assert 0.0 <= max_percent_deviation_high <= 1.0
-
-    # Get the normalized average timestep distance. Flatten it
-    # into something that depends only on the batch size and the elements
-
-    normalized_timestep_distance = memory.normalized_timestep_distance
-    normalized_timestep_distance = normalized_timestep_distance.flatten(1, -1)
-
-    # Compute the lattice density for an equivalent uniform distribution.
-    #
-    # This assumes we have a uniform distribution over the possible normalized
-    # spacing distances
-
-    num_elements = normalized_timestep_distance.shape[-1]
-    target_lattice_density = float((1 - 0) / num_elements)
-
-    # Compute the lattice density of the actual distribution. To do this, we compute
-    # the minimum difference between nonadjacent memory elements
-
-    raw_lattice_distances = normalized_timestep_distance.unsqueeze(-1) - normalized_timestep_distance.unsqueeze(-2)
-    raw_lattice_distances = raw_lattice_distances.abs()
-    raw_lattice_distances += torch.inf * torch.eye(num_elements,  # Prevents selecting self, which would have distance 0
-                                                   dtype=raw_lattice_distances.dtype,
-                                                   device=raw_lattice_distances.device)
-    minimum_lattice_distances, _ = raw_lattice_distances.min(dim=-1)  # (batch, num_elements)
-    average_lattice_density: torch.Tensor = minimum_lattice_distances.mean(dim=-1)  # (batch)
-
-    # Compute the percent error between the target and actual deviation
-    percent_error = (target_lattice_density - average_lattice_density) / (target_lattice_density)
-
-    # Now, we must compute the loss. We only actually have any loss to consider if we end up
-    # outside our clamping threshold. When that happens, we scale that loss by the loss slope
-    # and return that loss.
-
-    loss_factor = percent_error - percent_error.clamp(1 - max_percent_deviation_low, 1 + max_percent_deviation_high)
-    loss = loss_factor ** 2
-    loss = loss_weight * loss.mean()
-    return loss
-
-
-def compute_mem_write_loss(memory: MemoryState,
-                           max_percent_deviation: float,
-                           loss_weight: float = 1000
-                           ):
-    """
-    It is entirely possible for the model to decide to
-    leave memory elements completely inactive - that is,
-    erase but never write - in order to satisfy the mem
-    lattice loss condition.
-
-    This is bad. It does not actually give gradient pathways
-    and does not encourage good learning. To handle that, we
-    introduce mem write loss.
-
-    We say that on "average" we would like all memory slots
-    to be used about equally, whether it be a few large updates
-    or many small updates. So we use the effective write mass
-    to form a loss with respect to it
-
-    :param memory: The memory unit to compute the loss with respect to.
-    :param max_percent_deviation: The maximum percent deviation
-                                  allowed before constraint losses kick in.
-    :param loss_weight: The slope of the loss function
-
-    :return: The write loss. Based on the cumulative write probability
-    """
-
-    # Extract the effective write mass, and represent it per
-    # batch separately
-
-    effective_write_mass = memory.normalized_effective_write_mass
-    effective_write_mass = effective_write_mass.flatten(1, -1)
-
-    # Compute the percent deviation of the effective write masses from the mean
-
-    mean_write_mass = effective_write_mass.mean(dim=-1, keepdim=True)
-    percent_error = (mean_write_mass - effective_write_mass) / (mean_write_mass + 1e-9)
-    mean_percent_error = percent_error.abs().mean(dim=-1)
-
-    # Perform the loss. A heavily weighted mean squared error works fine. Loss is only
-    # actually responsive when deviating outside the clamping region.
-
-    effective_percent_error = mean_percent_error - mean_percent_error.clamp(1 - max_percent_deviation,
-                                                                            1 + max_percent_deviation)
-    loss = loss_weight * effective_percent_error ** 2
-    loss = loss.mean()
-
-    return loss
+        :param memory: The memory state to consider
+        :return: The resulting loss.
+        """
+        all_memory = torch.cat([tensor.view(tensor.size(0), -1) for tensor in memory.memory_tensors.values()], dim=-1)
+        num_elements = all_memory.numel() - all_memory.size(0)  # Exclude batch dimension if applicable
+        if self.config.magnitude_loss_type == 'l1':
+            loss = all_memory.abs().sum()
+        elif self.config.magnitude_loss_type == 'l2':
+            loss = (all_memory ** 2).sum()
+        else:
+            raise ValueError(
+                f"Unsupported magnitude_loss_type '{self.config.magnitude_loss_type}'. Supported types are 'l1' and 'l2'.")
+        loss = loss / (num_elements + 1e-9)
+        return loss * self.config.magnitude_loss_weight
