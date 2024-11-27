@@ -286,7 +286,7 @@ def _step_state_reverse(state_tensor,
                                                                                        write_gate)
     return (state_tensor - update_tensor * write_gate) / erase_gate
 
-
+@torch.jit.script
 def _advance_memory(memory_tensor: torch.Tensor,
                     update_tensor: torch.Tensor,
                     write_gate: torch.Tensor,
@@ -1260,6 +1260,7 @@ class GradientTimestepLoss(nn.Module):
         else:
             raise ValueError(f"loss_type {self.config.loss_type} was never recognized")
         loss = self.config.loss_weight*loss.sum()
+        loss = loss/self.config.num_bins
         return loss
     def __init__(self, config: GradientTimeLossConfig):
         super().__init__()
