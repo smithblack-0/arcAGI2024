@@ -245,8 +245,7 @@ class TestMetricHelperFunctions(unittest.TestCase):
 
         # Compute expected average_timestep_distance
         # Assuming it updates as effective_write_mass / (timestep + epsilon)
-        expected_average_timestep_distance = expected_effective_write_mass / (
-                    initial_metrics["timestep"].unsqueeze(-1) + 1e-9)
+        expected_average_timestep_distance = torch.ones_like(initial_metrics["average_timestep_distance"])
 
         self.assertTrue(
             torch.allclose(advanced_metrics["average_timestep_distance"], expected_average_timestep_distance, atol=1e-5),

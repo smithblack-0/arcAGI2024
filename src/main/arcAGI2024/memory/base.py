@@ -18,6 +18,7 @@ from dataclasses import dataclass, asdict
 from ..base import PytreeState, SavableConfig, DeviceDtypeWatch, can_broadcast
 from abc import ABC, abstractmethod
 
+
 @dataclass
 class GradientTimeLossConfig(SavableConfig):
     """
@@ -65,13 +66,14 @@ class GradientTimeLossConfig(SavableConfig):
     target_thresholds: List[float]
     loss_weight: float
     loss_type: str
+
     def __post_init__(self):
         if self.num_bins < 1:
             raise ValueError("num_bins must be greater than or equal to 1.")
         if self.deviation_factor <= 0:
             raise ValueError("deviation factor must be greater than zero")
         distribution_sum = sum(self.target_distribution)
-        if abs(distribution_sum-1) > 1e-4:
+        if abs(distribution_sum - 1) > 1e-4:
             raise ValueError("target distribution did not sum to 1.0")
         for threshold, distribution_element in zip(self.target_thresholds, self.target_distribution):
             if distribution_element + threshold > 1.0:
@@ -80,6 +82,7 @@ class GradientTimeLossConfig(SavableConfig):
                 raise ValueError("Threshold takes probability below 0.0 for a bin")
         if self.loss_weight < 0.0:
             raise ValueError("loss_weight must be greater than or equal to 0.")
+
 
 @dataclass
 class MemRegularizationLossConfig(SavableConfig):
@@ -96,9 +99,11 @@ class MemRegularizationLossConfig(SavableConfig):
     """
     magnitude_loss_type: str
     magnitude_loss_weight: float
+
     def __post_init__(self):
         if self.magnitude_loss_type not in {'l1', 'l2'}:
-            raise ValueError(f"Unsupported magnitude_loss_type '{self.magnitude_loss_type}'. Supported types are 'l1' and 'l2'.")
+            raise ValueError(
+                f"Unsupported magnitude_loss_type '{self.magnitude_loss_type}'. Supported types are 'l1' and 'l2'.")
         if self.magnitude_loss_weight < 0.0:
             raise ValueError("magnitude_loss_weight must be non-negative.")
 
@@ -286,6 +291,7 @@ def _step_state_reverse(state_tensor,
                                                                                        write_gate)
     return (state_tensor - update_tensor * write_gate) / erase_gate
 
+
 @torch.jit.script
 def _advance_memory(memory_tensor: torch.Tensor,
                     update_tensor: torch.Tensor,
@@ -341,11 +347,11 @@ def _advance_metrics(metrics: Dict[str, torch.Tensor],
     final_metrics = {}
     final_metrics['cum_write_mass'] = metrics['cum_write_mass'] + write_gate
     final_metrics['cum_erase_mass'] = metrics['cum_erase_mass'] + erase_gate
-    final_metrics['timestep'] = metrics['timestep'] + batch_mask.to(write_gate.dtype)
+    final_metrics['timestep'] = metrics['timestep'] + (~batch_mask).to(write_gate.dtype)
 
     # This is a set of running interpolations. One
     # tells us, basically, how far into the past we could actually
-    # propogate gradients. The other tells us since the last
+    # propagate gradients. The other tells us since the last
     # erase how much write mass has been committed.
 
     one = torch.tensor(1.0, dtype=write_gate.dtype, device=write_gate.device)
@@ -356,8 +362,7 @@ def _advance_metrics(metrics: Dict[str, torch.Tensor],
                                                                 one
                                                                 )
 
-
-    timestep = metrics["timestep"]
+    timestep = final_metrics["timestep"]
     while timestep.dim() < metrics["average_timestep_distance"].dim():
         timestep = timestep.unsqueeze(-1)
 
@@ -418,12 +423,14 @@ def _retard_metrics(metrics: Dict[str, torch.Tensor],
     :return: The dict of new metrics.
     """
 
-    # Fairly tame metrics involving timesteps and probability masses.
 
     final_metrics = {}
+
+    # Fairly tame metrics involving timesteps and probability masses.
+
     final_metrics['cum_write_mass'] = metrics['cum_write_mass'] - write_gate
     final_metrics['cum_erase_mass'] = metrics['cum_erase_mass'] - erase_gate
-    final_metrics['timestep'] = metrics['timestep'] - batch_mask.to(write_gate.dtype)
+    final_metrics['timestep'] = metrics['timestep'] - (~batch_mask).to(write_gate.dtype)
 
     # This is a set of running interpolations. One
     # tells us, basically, how far into the past we could actually
@@ -438,7 +445,6 @@ def _retard_metrics(metrics: Dict[str, torch.Tensor],
                                                                 one
                                                                 )
 
-
     timestep = metrics["timestep"]
     while timestep.dim() < metrics["average_timestep_distance"].dim():
         timestep = timestep.unsqueeze(-1)
@@ -448,6 +454,7 @@ def _retard_metrics(metrics: Dict[str, torch.Tensor],
                                                                      erase_gate,
                                                                      1 - erase_gate
                                                                      )
+
 
     # Account for batch masking. Metrics do not update where the batch was masked
     for name in final_metrics.keys():
@@ -571,12 +578,13 @@ class MemoryState(PytreeState):
         while timestep.dim() < self.average_timestep_distance.dim():
             timestep = timestep.unsqueeze(-1)
         return self.average_timestep_distance / (timestep + 1e-9)
+
     @property
-    def device(self)->torch.device:
+    def device(self) -> torch.device:
         return self.cum_write_mass.device
 
     @property
-    def dtype(self)->torch.dtype:
+    def dtype(self) -> torch.dtype:
         return self.cum_write_mass.dtype
 
     def __init__(self,
@@ -736,7 +744,7 @@ class AbstractCreateState(nn.Module, ABC):
         When implemented, returns a memory object when seeing a batch shape
         :param batch_shape: The batch shape to consider
         :return: The memory state. Remember to include
-                 cumulative_write_factors in persistant.
+                 cumulative_write_factors in persistent.
         """
 
 
@@ -911,9 +919,9 @@ class AbstractWriteMemory(nn.Module, ABC):
                         query: torch.Tensor,
                         persistent: Dict[str, torch.Tensor],
                         ) -> Tuple[Dict[str, torch.Tensor],
-                                   torch.Tensor,
-                                   torch.Tensor,
-                                   ]:
+    torch.Tensor,
+    torch.Tensor,
+    ]:
         """
         The main user specified component.
 
@@ -962,8 +970,8 @@ class AbstractWriteMemory(nn.Module, ABC):
 
             # Compute interpolation rate adjustment to write probability
             interpolation_rates = self._compute_interpolation_factors(self._interpolation_logits)
-            interpolation_rates = self._max_interpolation_rate * interpolation_rates
-            write_probability = interpolation_rates*write_probability
+            interpolation_rates = self._erase_cap_factor * interpolation_rates
+            write_probability = interpolation_rates * write_probability
 
             # Compute gates
 
@@ -1222,7 +1230,8 @@ class GradientTimestepLoss(nn.Module):
     Going outside these thresholds will
     kick on a strong constraint loss.
     """
-    def compute_probability_masses(self, timestep_locations: torch.Tensor)->torch.Tensor:
+
+    def compute_probability_masses(self, timestep_locations: torch.Tensor) -> torch.Tensor:
         """
         Computes the probability masses associated with each bin based on
         a gaussian kernel at that location.
@@ -1232,14 +1241,15 @@ class GradientTimestepLoss(nn.Module):
         # Basically, we compute the contribution of each location to each bin in terms of
         # mixture kernels of gaussians.
 
-        bin_distance = self.bin_centers - timestep_locations.unsqueeze(-1) # (batch_size, num_elements, num_bins)
-        gaussian_magnitudes = torch.exp(-bin_distance**2/(2*self.bin_deviation**2)) # (batch_size, num_elements, num_bins)
+        bin_distance = self.bin_centers - timestep_locations.unsqueeze(-1)  # (batch_size, num_elements, num_bins)
+        gaussian_magnitudes = torch.exp(
+            -bin_distance ** 2 / (2 * self.bin_deviation ** 2))  # (batch_size, num_elements, num_bins)
         probability_mass = gaussian_magnitudes.sum(dim=-2)
         return probability_mass
 
     def compute_loss(self,
                      predicted_distribution: torch.Tensor,
-                     )->torch.Tensor:
+                     ) -> torch.Tensor:
         """
         Computes the loss based on the histogram distributions.
         :param predicted_distribution: Shape (batch_size, num_bins). Predicted distribution. Direct
@@ -1249,7 +1259,7 @@ class GradientTimestepLoss(nn.Module):
         # Compute the hinge. This will only be active if a bin
         # goes outside it's thresholds
 
-        difference = predicted_distribution - self.target_distribution # (batch_size, num_bins)
+        difference = predicted_distribution - self.target_distribution  # (batch_size, num_bins)
         hinge = torch.clamp_min(difference.abs() - self.target_thresholds, 0.0)  # (batch_size, num_bins)
 
         # Convert the hinge into an actual loss
@@ -1259,27 +1269,27 @@ class GradientTimestepLoss(nn.Module):
             loss = hinge ** 2
         else:
             raise ValueError(f"loss_type {self.config.loss_type} was never recognized")
-        loss = self.config.loss_weight*loss.sum()
-        loss = loss/self.config.num_bins
+        loss = self.config.loss_weight * loss.sum()
+        loss = loss / self.config.num_bins
         return loss
+
     def __init__(self, config: GradientTimeLossConfig):
         super().__init__()
 
         self.bin_edges = torch.linspace(0, 1.0, config.num_bins + 1)
-        self.bin_centers = (self.bin_edges[:-1] + self.bin_edges[1:]) / 2
-        self.bin_deviation = self.bin_centers[0] - self.bin_edges[0]
-        self.target_distribution = torch.tensor(config.target_distribution)
-        self.target_thresholds = torch.tensor(config.target_thresholds)
+        bin_centers = (self.bin_edges[:-1] + self.bin_edges[1:]) / 2
+        bin_deviation = bin_centers[0] - self.bin_edges[0]
+        target_distribution = torch.tensor(config.target_distribution)
+        target_thresholds = torch.tensor(config.target_thresholds)
 
-
-        self.register_buffer('bin_centers',  self.bin_centers)
-        self.register_buffer('bin_deviation', self.bin_deviation)
-        self.register_buffer('target_distribution', self.target_distribution)
-        self.register_buffer('target_thresholds', self.target_thresholds)
+        self.register_buffer('bin_centers', bin_centers)
+        self.register_buffer('bin_deviation', bin_deviation)
+        self.register_buffer('target_distribution', target_distribution)
+        self.register_buffer('target_thresholds', target_thresholds)
 
         self.config = config
-        
-    def forward(self, memory: MemoryState)-> torch.Tensor:
+
+    def forward(self, memory: MemoryState) -> torch.Tensor:
         """
         We compute the gradient timestep loss.
         :param memory: The memory state to consider
@@ -1290,7 +1300,7 @@ class GradientTimestepLoss(nn.Module):
         # flattened into something in terms of batch, elements
 
         timestep_distance = memory.normalized_timestep_distance
-        timestep_distance = timestep_distance.flatten(2, -1)
+        timestep_distance = timestep_distance.flatten(1, -1)
 
         # Generate the target and predicted distributions
 
@@ -1298,6 +1308,8 @@ class GradientTimestepLoss(nn.Module):
         predicted_distribution /= predicted_distribution.sum(dim=-1, keepdim=True) + 1e-12
 
         return self.compute_loss(predicted_distribution)
+
+
 class MemRegularizationLoss(nn.Module):
     """
     One fairly straightforward way the memory system could
@@ -1321,11 +1333,12 @@ class MemRegularizationLoss(nn.Module):
     We do normalize over the number of memory slots, but NOT
     the batches, as with most losses for this project.
     """
+
     def __init__(self, config: MemRegularizationLossConfig):
         super().__init__()
         self.config = config
 
-    def forward(self, memory: MemoryState)-> torch.Tensor:
+    def forward(self, memory: MemoryState) -> torch.Tensor:
         """
         Computes the regularization loss. We normalize by the
         number of elements, but not the number of batches.
