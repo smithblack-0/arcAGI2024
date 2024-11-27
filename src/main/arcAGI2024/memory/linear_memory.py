@@ -4,6 +4,7 @@ to directly track, gather, and return information on the attention
 block.
 """
 import torch
+from dataclasses import dataclass
 from torch import nn
 from typing import Callable, Tuple, Dict, List
 from .base import (AbstractMemoryConfig,
@@ -16,6 +17,7 @@ from .base import (AbstractMemoryConfig,
                    MemoryState)
 
 
+@dataclass
 class LinearMemoryConfig(AbstractMemoryConfig):
     """
     Configuration object for the linear
@@ -31,6 +33,11 @@ class LinearMemoryConfig(AbstractMemoryConfig):
     as this has a lesser impact on the amount of memory
     that must be retained
     """
+
+    @property
+    def interpolation_factor_shapes(self) -> torch.Size:
+        return [self.num_heads, self.d_address]
+
     num_heads: int
     d_address: int
     d_memory: int
@@ -40,6 +47,8 @@ class LinearMemoryConfig(AbstractMemoryConfig):
     max_write_half_life_init: float = 100.0
     erase_epsilon_factor: float = 0.0001
     linear_activation_kernel: Callable[[torch.Tensor], torch.Tensor] = torch.relu
+
+
 class LinearAttention(nn.Module):
     """
     Performs linear attention, without heads, using a query,
@@ -115,6 +124,7 @@ class LinearAttention(nn.Module):
         matrix, normalizer = self.make_kernel(key, value)
         return self.read_from_kernel(query, matrix, normalizer)
 
+
 class CreateState(AbstractCreateState):
     """
     Creates a functional linear attention
@@ -122,6 +132,7 @@ class CreateState(AbstractCreateState):
     setup all the cumulative tensors with the
     correct dtype, device, shape, etc
     """
+
     def __init__(self,
                  d_model: int,
                  device: torch.device,
@@ -134,9 +145,10 @@ class CreateState(AbstractCreateState):
         self.d_address = config.d_address
         self.d_memory = config.d_memory
 
-    def initialize_with_shape(self, shape: List[int])->torch.Tensor:
+    def initialize_with_shape(self, shape: List[int]) -> torch.Tensor:
         return torch.zeros(shape, dtype=self.dtype, device=self.device)
-    def forward(self, batch_shape: List[int])->MemoryState:
+
+    def forward(self, batch_shape: List[int]) -> MemoryState:
         """
         Creates the state. This includes initializing all
         the various important metric tensors to their
@@ -154,22 +166,23 @@ class CreateState(AbstractCreateState):
         # And the average timestep distance depends on write and erase, so same depth.
 
         metrics = {
-            "cum_write_probability" : self.initialize_with_shape(batch_shape + [self.num_heads]),
-            "cum_erase_probability" : self.initialize_with_shape(batch_shape + [self.num_heads, self.d_address]),
-            "effective_write_mass" : self.initialize_with_shape(batch_shape + [self.num_heads, self.d_address]),
-            "timestep" : self.initialize_with_shape(batch_shape),
-            "average_timestep_distance" : self.initialize_with_shape(batch_shape + [self.num_heads, self.d_address]),
+            "cum_write_probability": self.initialize_with_shape(batch_shape + [self.num_heads]),
+            "cum_erase_probability": self.initialize_with_shape(batch_shape + [self.num_heads, self.d_address]),
+            "effective_write_mass": self.initialize_with_shape(batch_shape + [self.num_heads, self.d_address]),
+            "timestep": self.initialize_with_shape(batch_shape),
+            "average_timestep_distance": self.initialize_with_shape(batch_shape + [self.num_heads, self.d_address]),
         }
 
         # Setup the normalizer and matrix. These are the actual memory features
         memories = {
-            "matrix" : self.initialize_with_shape(batch_shape + [self.num_heads, self.d_address, self.d_memory]),
-            "normalizer" : self.initialize_with_shape(batch_shape + [self.num_heads, self.d_address]),
+            "matrix": self.initialize_with_shape(batch_shape + [self.num_heads, self.d_address, self.d_memory]),
+            "normalizer": self.initialize_with_shape(batch_shape + [self.num_heads, self.d_address]),
         }
 
         # Return the memory state. We do not end up needing the persistent tensors at all
         # for this architecture.
         return MemoryState(metrics, memories, {})
+
 
 class ReadMemory(AbstractReadMemory):
     """
@@ -178,6 +191,7 @@ class ReadMemory(AbstractReadMemory):
     using the kernel out of the provided
     input query
     """
+
     def __init__(self,
                  d_model: int,
                  device: torch.device,
@@ -195,8 +209,9 @@ class ReadMemory(AbstractReadMemory):
         self.linear_attention = LinearAttention(config.linear_activation_kernel)
 
         # Designate the head projectors
-        self.make_headed_query_projection = nn.Linear(d_model, self.d_address*self.num_heads, bias=False)
-        self.merge_heads_projector = nn.Linear(self.num_heads*self.d_memory, d_model, bias=False)
+        self.make_headed_query_projection = nn.Linear(d_model, self.d_address * self.num_heads, bias=False)
+        self.merge_heads_projector = nn.Linear(self.num_heads * self.d_memory, d_model, bias=False)
+
     def read_memory(self,
                     query: torch.Tensor,
                     memories: Dict[str, torch.Tensor],
@@ -215,8 +230,8 @@ class ReadMemory(AbstractReadMemory):
         """
 
         # Create the headed question
-        query = self.make_headed_query_projection(query) # (..., num_heads*d_address)
-        query = query.unflatten(dim=-1, sizes=[self.num_heads, self.d_address]) # (..., num_heads, d_address)
+        query = self.make_headed_query_projection(query)  # (..., num_heads*d_address)
+        query = query.unflatten(dim=-1, sizes=[self.num_heads, self.d_address])  # (..., num_heads, d_address)
 
         # Perform the attention mechanism.
         #        Response will be (..., num_heads, d_memory)
@@ -226,6 +241,3 @@ class ReadMemory(AbstractReadMemory):
         response = response.flatten(-2, -1)
         response = self.merge_heads_projector(response)
         return response
-
-
-
