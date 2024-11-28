@@ -3,8 +3,8 @@ from typing import Tuple, List, Callable, Optional, Any, Dict
 import torch
 from torch import nn
 from dataclasses import dataclass, Field
-from .memory import make_memory_unit, AbstractMemoryConfig, MemoryState
-from .base import DeviceDtypeWatch, SavableConfig
+from ..memory import make_memory_unit, AbstractMemoryConfig, MemoryState
+from ..base import DeviceDtypeWatch, SavableConfig
 
 MemoryCollection = List[MemoryState]
 @dataclass
@@ -169,14 +169,14 @@ class RecurrentDecoderLayer(nn.Module):
 
         self.bottleneck_dropout = nn.Dropout(config.bottlenecked_dropout_rate)
 
-    def create_state(self, batch_shape: torch.Size) -> MemoryState:
+    def create_state(self, batch_shape: List[int]) -> MemoryState:
         """
         Creates a blank memory state associated with the
         given batch size.
         :param batch_shape: The batch shape to match
         :return: The setup memory state
         """
-        return self.deep_memories.create_state(batch_shape)
+        return self.memory_unit.create_state(batch_shape)
 
     def run_reverse(self,
                     tensor: torch.Tensor,
@@ -243,7 +243,6 @@ class RecurrentDecoderLayer(nn.Module):
             - The next memory state.
         """
         # Perform the deep memory access pattern
-
         update, next_memory = self.memory_unit(tensor, batch_mask, previous_memory)
         tensor = self.memory_layernorm(tensor + self.bottleneck_dropout(update))
 
@@ -270,14 +269,14 @@ class RecurrentDecoderLayer(nn.Module):
         tensor = self.bottleneck_projector(tensor)
         (tensor, next_memory) = self.run_forward(tensor, batch_mask, previous_memory)
         tensor = self.unbottleneck_projector(tensor)
-        return (tensor, next_memory), previous_memory
-
+        return tensor, next_memory
 
 class AddPlusLayernorm(nn.Module):
     """
     Fairly simple. Performs an add+layernormn with
     dropout when provided an injected layer
     """
+
 
     def __init__(self,
                  d_model: int,
@@ -289,8 +288,9 @@ class AddPlusLayernorm(nn.Module):
         super().__init__()
         self.dropout = nn.Dropout(main_dropout_rate)
         self.layer = decoder_layer
-        self.layernorm = nn.LayerNorm(d_model)
-
+        self.layernorm = nn.LayerNorm(d_model, dtype=dtype, device=device)
+    def create_state(self, batch_shape: List[int])->MemoryState:
+        return self.layer.create_state(batch_shape)
     def forward(self,
                 tensor: torch.Tensor,
                 batch_mask: torch.Tensor,
@@ -324,6 +324,9 @@ class RecurrentDecoder(nn.Module):
     However, during the backwards pass it returns the prior
     memory states, rather than the next ones, and sets them
     up to accumulate gradients.
+
+    It is thus during the reverse pass we actually
+    care about building and using a graph.
     """
 
     @property
@@ -356,7 +359,8 @@ class RecurrentDecoder(nn.Module):
         self.decoder_layers = nn.ModuleList(AddPlusLayernorm(d_model, config.main_dropout_rate, dtype, device, core)
                                             for core in layer_cores)
 
-    def create_state(self, batch_shape: torch.Size) -> List[MemoryState]:
+    @torch.jit.export
+    def create_state(self, batch_shape: List[int]) -> List[MemoryState]:
         """
         Sets up the recurrent state bound
         to a particular batch shape
@@ -364,11 +368,12 @@ class RecurrentDecoder(nn.Module):
         :param batch_shape: The batch shape to match
         :return: A list of memory states. One for each layer.
         """
-        states = []
+        states: MemoryCollection = []
         for decoder_layer in self.decoder_layers:
             states.append(decoder_layer.create_state(batch_shape))
         return states
 
+    @torch.jit.export
     def reverse(self,
                 embedding: torch.Tensor,
                 batch_mask: torch.Tensor,
@@ -389,20 +394,21 @@ class RecurrentDecoder(nn.Module):
         - The memory from the last timestep. Setup to accumulate gradients and continue the chain.
         """
         assert embedding.shape[-1] == self.d_model
-        previous_memories = []
-        graph_memories = []
+        previous_memories: MemoryCollection = []
+        graph_memories: MemoryCollection = []
         tensor = embedding
-        for layer, memory in zip(self.decoder_layers, next_memories):
+        for i, layer in enumerate(self.decoder_layers):
+            memory = next_memories[i]
             (tensor, next_memory), previous_memory = layer.reverse(tensor, batch_mask, memory)
             graph_memories.append(next_memory)
             previous_memories.append(previous_memory)
-        return (embedding, graph_memories), previous_memories
+        return (tensor, graph_memories), previous_memories
 
     def forward(self,
                 embedding: torch.Tensor,
                 batch_mask: torch.Tensor,
-                previous_memories: MemoryState
-                ) -> Tuple[torch.Tensor, MemoryState]:
+                previous_memories: MemoryCollection
+                ) -> Tuple[torch.Tensor, MemoryCollection]:
         """
         The forward mechanism. Performs a forward pass through the model.
         This will usually occur without gradients.
@@ -414,9 +420,10 @@ class RecurrentDecoder(nn.Module):
         - The memory states for the next timestep.
         """
         assert embedding.shape[-1] == self.d_model
-        next_memories = []
+        next_memories: MemoryCollection = []
         tensor = embedding
-        for layer, memory in zip(self.decoder_layers, previous_memories):
+        for i, layer in enumerate(self.decoder_layers):
+            memory = previous_memories[i]
             tensor, next_memory = layer(tensor, batch_mask, memory)
             next_memories.append(next_memory)
         return tensor, next_memories

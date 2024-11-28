@@ -4,13 +4,11 @@ import unittest
 from typing import Optional
 
 import torch
-import time
-from torch import nn
 
 from concurrent.futures import ThreadPoolExecutor
 from src.main.arcAGI2024 import load_vocabulary_off_huggingface_model
-from src.main.arcAGI2024.model import (CausalLMCore, CausalLMTrainer, CausalLMGenerator, StandardTrainerCore,
-                                       RecurrentDecoder, Vocabulary, CoreConfig, Logger)
+from src.main.arcAGI2024.modeling.model import (CausalLMCore, CausalLMTrainer, CausalLMGenerator, StandardTrainerCore,
+                                                CoreConfig, Logger)
 from src.main.arcAGI2024.losses import CrossEntropyLoss, UniformMemLoss
 from src.main.arcAGI2024.base import parallel_pytree_map
 from src.main.arcAGI2024.sampling import TopLogitSampling

@@ -1,5 +1,5 @@
 from .base import *
-from .decoder import *
+from src.main.arcAGI2024.modeling.decoder import *
 from .losses import *
 from .sampling import *
 from .vocabulary import *

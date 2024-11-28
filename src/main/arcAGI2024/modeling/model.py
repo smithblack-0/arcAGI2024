@@ -11,7 +11,7 @@ import shutil
 import json
 
 from concurrent import futures
-from typing import Callable, List, Type
+from typing import Type
 from typing import Any, List, Tuple, Dict, Union, Callable, Optional
 import torch
 from torch import nn
@@ -20,12 +20,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
 
 from .decoder import RecurrentDecoder
-from .vocabulary import Vocabulary, AdditionalSpecialTokens
-from .base import (get_rng_state, set_rng_state, parallel_pytree_map,
-                   DeviceDtypeWatch, GradientSubstitutionEndpoint, TensorTree)
-from .losses import MainLossInterface, MemAccessLossInterface
-from .sampling import SamplingInterface
-from .grad_utils import AbstractGradientControl
+from ..vocabulary import Vocabulary, AdditionalSpecialTokens
+from ..base import (get_rng_state, set_rng_state, parallel_pytree_map,
+                                      DeviceDtypeWatch, GradientSubstitutionEndpoint, TensorTree)
+from ..losses import MainLossInterface, MemAccessLossInterface
+from ..sampling import SamplingInterface
+from ..grad_utils import AbstractGradientControl
 
 
 @dataclass

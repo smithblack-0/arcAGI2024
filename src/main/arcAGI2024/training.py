@@ -3,28 +3,20 @@ Training interfaces are stored here
 """
 import functools
 from dataclasses import dataclass, field
-from typing import Optional, Callable, Tuple, List, Dict, Any, Union
-from abc import ABC, abstractmethod
+from typing import Optional, Callable, Tuple, List, Dict, Any
 
 import torch
 import time
 import os
 import pandas as pd
-import threading
-import concurrent.futures as futures
 
 from torch import nn
 from torch.utils import data
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import ThreadPoolExecutor
 
-from datasets import DatasetDict, Dataset
-from transformers import PreTrainedTokenizer
-
-from .base import TensorTree, parallel_pytree_map
-from .grad_utils import AbstractGradientControl, AutorescaleGradientControl
-from .losses import MainLossInterface, MemAccessLossInterface
-from .model import CausalLMTrainer, Logger, CausalLMCore
-from .data import LoaderConfig, setup_loader, ProcessLoaderBinder
+from .base import parallel_pytree_map
+from src.main.arcAGI2024.modeling.model import CausalLMTrainer, Logger, CausalLMCore
+from .data import LoaderConfig, ProcessLoaderBinder
 try:
     from IPython.display import clear_output
 
