@@ -7,6 +7,8 @@ import torch
 from dataclasses import dataclass
 from torch import nn
 from typing import Callable, Tuple, Dict, List
+
+from . import MemoryData
 from .base import (AbstractMemoryConfig,
                    GradientTimeLossConfig,
                    MemRegularizationLossConfig,
@@ -14,7 +16,8 @@ from .base import (AbstractMemoryConfig,
                    AbstractCreateState,
                    AbstractReadMemory,
                    AbstractMemoryUnit,
-                   MemoryState)
+                   MemoryState,
+                   register_concrete_implementation)
 
 
 @dataclass
@@ -73,14 +76,14 @@ class LinearAttention(nn.Module):
         """
         Performs linear attention, using an existing attention kernel.
         Returns the attention result. d_model arbitrary
-        :param query: Something of shape (...,queries,  d_address)
-        :param matrix: Something of shape (..., d_address, d_memory)
-        :param normalizer: Something of shape (..., d_address)
-        :return: Something of shape (..., queries, d_address)
+        :param query: Something of shape (...,heads,  d_address)
+        :param matrix: Something of shape (..., heads, d_address, d_memory)
+        :param normalizer: Something of shape (..., heads, d_address)
+        :return: Something of shape (..., heads, d_address)
         """
         query = self.activation(query)
-        numerator = torch.matmul(query, matrix)
-        denominator = torch.matmul(query, normalizer.unsqueeze(-1)) + 1e-5
+        numerator = torch.matmul(query.unsqueeze(-2), matrix).squeeze(-2)
+        denominator = (query*normalizer).sum(dim=-1, keepdim=True) + 1e-5
         return numerator / denominator
 
     def make_kernel(self,
@@ -166,8 +169,8 @@ class CreateState(AbstractCreateState):
         # And the average timestep distance depends on write and erase, so same depth.
 
         metrics = {
-            "cum_write_probability": self.initialize_with_shape(batch_shape + [self.num_heads]),
-            "cum_erase_probability": self.initialize_with_shape(batch_shape + [self.num_heads, self.d_address]),
+            "cum_write_mass": self.initialize_with_shape(batch_shape + [self.num_heads, self.d_address]),
+            "cum_erase_mass": self.initialize_with_shape(batch_shape + [self.num_heads, self.d_address]),
             "effective_write_mass": self.initialize_with_shape(batch_shape + [self.num_heads, self.d_address]),
             "timestep": self.initialize_with_shape(batch_shape),
             "average_timestep_distance": self.initialize_with_shape(batch_shape + [self.num_heads, self.d_address]),
@@ -186,10 +189,16 @@ class CreateState(AbstractCreateState):
 
 class ReadMemory(AbstractReadMemory):
     """
-    Performs the read memory action. This basically
-    just consists of performing linear attention
-    using the kernel out of the provided
-    input query
+    Performs the read memory action.
+
+    Basically, we store a linear attention memory
+    kernel inside the memory framework of the broader
+    model. When a question of reading comes up,
+    we perform attention against that kernel
+
+    That means creating the heads and read dimensions,
+    applying linear attention based on the kernel,
+    and returning the results
     """
 
     def __init__(self,
@@ -241,3 +250,133 @@ class ReadMemory(AbstractReadMemory):
         response = response.flatten(-2, -1)
         response = self.merge_heads_projector(response)
         return response
+
+
+class WriteMemory(AbstractWriteMemory):
+    """
+    Mechanism to write memory into the memory state.
+    This means creating an update state to integrate,
+    and the read and write probabilities to go along with them.
+
+    Linear attention is very deniable to being recast
+    as a recurrent system, and attention is in fact
+    a recurrent process when viewed correctly. So
+    we take advantage of that.
+
+    We compute the attention update, write probability,
+    and erase probability from the input tensor, and return
+    them. These can then be merged into the memory by
+    the smart logic.
+
+    The net effect of this? We end up with a more capable
+    version of linear attention which can decide not to
+    remember useless words or irrelevant facts, and maintains
+    a running average as a memory state.
+    """
+
+    def __init__(self,
+                 d_model: int,
+                 device: torch.device,
+                 dtype: torch.dtype,
+                 config: LinearMemoryConfig
+                 ):
+        super().__init__(dtype, device, config)
+        self.d_model = d_model
+        self.num_heads = config.num_heads
+        self.d_address = config.d_address
+        self.d_memory = config.d_memory
+
+        # Setup the linear attention system
+        self.linear_attention = LinearAttention(config.linear_activation_kernel)
+
+        # Setup the projectors.
+        #
+        # We have two to place heads on the keys and the values.
+        # And another two to create the write and erase gates.
+
+        self.key_projector = nn.Linear(d_model, self.d_address * self.num_heads, bias=False)
+        self.value_projector = nn.Linear(d_model, self.d_memory * self.num_heads, bias=False)
+
+        self.write_projector = nn.Linear(d_model, self.num_heads, bias=True)
+        self.erase_projector = nn.Linear(d_model, self.d_address * self.num_heads, bias=True)
+
+    def _compute_common(self,
+                        query: torch.Tensor,
+                        persistent: Dict[str, torch.Tensor],
+                        ) -> Tuple[
+        Dict[str, torch.Tensor],
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        """
+        The definition creation for the updated kernel, and the
+        write, erase probabilities.
+
+        :param query: The query tensor. Shape (..., d_model)
+        :param persistent: Unused in this architecture
+        :return:
+        - update:
+            - Contains a single normalizer to commit as an updat.e Shape (batch_size, num_heads, d_address)
+            - Contains a single matrix to commit as an update. Shape (batch_size, num_heads, d_address, d_memory)
+        - write_probability: A write probability that tells us how strongly to write to the memory slots.
+          - Must cleanly multiply the interpolation factor shape.
+        - erase_probability: A erase probability that tells us how strongly to forget what we
+                           have seen before.
+        """
+
+        # Convert the query into a key, value feature with heads
+
+        key = self.key_projector(query)
+        key = key.unflatten(dim=-1, sizes=[self.num_heads, self.d_address])
+
+        value = self.value_projector(query)
+        value = value.unflatten(dim=-1, sizes=[self.num_heads, self.d_memory])
+
+        # Key shape: (..., num_heads, d_address)
+        # Value shape: (..., num_heads, d_memory)
+
+        # Create the write and erase probabilities. These are sans
+        # any clever components like interpolation rates or
+        # erase restrictions.
+
+        write_logits = self.write_projector(query)
+        write_logits = write_logits.unflatten(dim=-1, sizes=[self.num_heads])
+        write_probabilities = torch.sigmoid(write_logits)  # (..., num_heads)
+
+        erase_logits = self.erase_projector(query)
+        erase_logits = erase_logits.unflatten(dim=-1, sizes=[self.num_heads, self.d_address])
+        erase_probabilities = torch.sigmoid(erase_logits)  # (..., num_heads, d_address)
+
+        # Create the kernel update
+        #
+        # We unsqueeze some extra dimensions to act as a
+        # mock item dimension, allowing us to come up with
+        # a kernel easily.
+
+        key = key.unsqueeze(-2)  # (..., num_heads, 1, d_address)
+        value = value.unsqueeze(-2)  # (..., num_heads, 1, d_memory)
+        matrix, normalizer = self.linear_attention.make_kernel(key, value)
+
+        # Return the process results
+        return {"matrix": matrix, "normalizer": normalizer}, write_probabilities, erase_probabilities
+
+
+class LinearMemoryUnit(AbstractMemoryUnit):
+    """
+    An implementation of the memory contract
+    focusing on linear attention memory.
+    """
+
+    def __init__(self,
+                 d_model: int,
+                 dtype: torch.dtype,
+                 device: torch.device,
+                 config: LinearMemoryConfig
+                 ):
+        create_state_unit = CreateState(d_model, device, dtype, config)
+        read_memory_unit = ReadMemory(d_model, device, dtype, config)
+        write_memory_unit = WriteMemory(d_model, device, dtype, config)
+        super().__init__(create_state_unit, read_memory_unit, write_memory_unit)
+
+
+register_concrete_implementation(LinearMemoryConfig, LinearMemoryUnit)

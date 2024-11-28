@@ -61,7 +61,7 @@ class GradientTimeLossConfig(SavableConfig):
     """
 
     num_bins: int
-    deviation_factor: float
+    z_score: float
     target_distribution: List[float]
     target_thresholds: List[float]
     loss_weight: float
@@ -70,7 +70,7 @@ class GradientTimeLossConfig(SavableConfig):
     def __post_init__(self):
         if self.num_bins < 1:
             raise ValueError("num_bins must be greater than or equal to 1.")
-        if self.deviation_factor <= 0:
+        if self.z_score <= 0:
             raise ValueError("deviation factor must be greater than zero")
         distribution_sum = sum(self.target_distribution)
         if abs(distribution_sum - 1) > 1e-4:
@@ -225,9 +225,9 @@ def _standardize_step_parameters(state_tensor: torch.Tensor,
                                  update_tensor: torch.Tensor,
                                  erase_gate: torch.Tensor,
                                  write_gate: torch.Tensor) -> Tuple[torch.Tensor,
-                                                                    torch.Tensor,
-                                                                    torch.Tensor,
-                                                                    torch.Tensor]:
+torch.Tensor,
+torch.Tensor,
+torch.Tensor]:
     """
     Checks if the step parameters are sane. Standardizes those
     parameters.
@@ -292,7 +292,6 @@ def _step_state_reverse(state_tensor,
     return (state_tensor - update_tensor * write_gate) / erase_gate
 
 
-@torch.jit.script
 def _advance_memory(memory_tensor: torch.Tensor,
                     update_tensor: torch.Tensor,
                     write_gate: torch.Tensor,
@@ -423,7 +422,6 @@ def _retard_metrics(metrics: Dict[str, torch.Tensor],
     :return: The dict of new metrics.
     """
 
-
     final_metrics = {}
 
     # Fairly tame metrics involving timesteps and probability masses.
@@ -455,13 +453,18 @@ def _retard_metrics(metrics: Dict[str, torch.Tensor],
                                                                      1 - erase_gate
                                                                      )
 
-
     # Account for batch masking. Metrics do not update where the batch was masked
     for name in final_metrics.keys():
         initial_metric = metrics[name]
         final_metric = final_metrics[name]
         final_metrics[name] = _perform_batch_masking(batch_mask, final_metric, initial_metric)
     return final_metrics
+
+
+# Due to how torchscript works we must define top level
+# aliases so the RCB callback can find them
+torch_device = torch.device
+torch_dtype = torch.dtype
 
 
 class MemoryState(PytreeState):
@@ -580,11 +583,11 @@ class MemoryState(PytreeState):
         return self.average_timestep_distance / (timestep + 1e-9)
 
     @property
-    def device(self) -> torch.device:
+    def device(self) -> torch_device:
         return self.cum_write_mass.device
 
     @property
-    def dtype(self) -> torch.dtype:
+    def dtype(self) -> torch_dtype:
         return self.cum_write_mass.dtype
 
     def __init__(self,
@@ -970,7 +973,10 @@ class AbstractWriteMemory(nn.Module, ABC):
 
             # Compute interpolation rate adjustment to write probability
             interpolation_rates = self._compute_interpolation_factors(self._interpolation_logits)
-            interpolation_rates = self._erase_cap_factor * interpolation_rates
+            for _ in query.shape[:-1]:
+                interpolation_rates = interpolation_rates.unsqueeze(0)
+            while write_probability.dim() < interpolation_rates.dim():
+                write_probability = write_probability.unsqueeze(-1)
             write_probability = interpolation_rates * write_probability
 
             # Compute gates
@@ -1182,7 +1188,7 @@ concrete_classes_registry: Dict[Type[AbstractMemoryConfig], Any] = {}
 
 
 def register_concrete_implementation(config: Type[AbstractMemoryConfig],
-                                     cls: ConcreteMemoryUnitProtocol
+                                     cls: Type[ConcreteMemoryUnitProtocol]
                                      ):
     """
     Registers a particular concrete implementation with the classes registry.

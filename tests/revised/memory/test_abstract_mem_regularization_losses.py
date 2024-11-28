@@ -20,7 +20,7 @@ class TestGradientTimestepLoss(unittest.TestCase):
         # Create a valid GradientTimeLossConfig
         self.config = GradientTimeLossConfig(
             num_bins=4,
-            deviation_factor=1.0,
+            z_score=1.0,
             target_distribution=[0.25, 0.25, 0.25, 0.25],
             target_thresholds=[0.1, 0.1, 0.1, 0.1],
             loss_weight=10.0,
@@ -64,7 +64,7 @@ class TestGradientTimestepLoss(unittest.TestCase):
         with self.assertRaises(ValueError):
             invalid_config = GradientTimeLossConfig(
                 num_bins=4,
-                deviation_factor=1.0,
+                z_score=1.0,
                 target_distribution=[0.25, 0.25, 0.25, 0.25],
                 target_thresholds=[0.1, 0.1, 0.1, 0.1],
                 loss_weight=10.0,

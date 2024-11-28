@@ -20,12 +20,12 @@ class FeedforwardConfig(SavableConfig):
     feedforward_dropout: dropout probability IN the hidden space.
                          Quite useful, but needs to be conservative,
                          as these layers are how the model makes decisions.
-    activation_function: An activation function to use with the module. A nn.Module.
+    activation_function: An activation function to use with the module. Default is relu.
     """
     d_hidden: int
     num_internal_layers: int
     feedforward_dropout: float
-    activation_function: nn.Module
+    activation_function: Callable[[torch.Tensor], torch.Tensor] = torch.relu
 
 @dataclass
 class RecurrentDecoderLayerConfig(SavableConfig):
@@ -88,7 +88,7 @@ class FeedForward(nn.Module):
         self.d_hidden = config.d_hidden
         self.d_model = d_model
 
-        self.activation = load_activation_from_torch(config.activation_module, config.activation_kwargs)
+        self.activation = config.activation_function
         self.ff_intake = nn.Linear(d_model, config.d_hidden, device=device, dtype=dtype)
         self.ff_output = nn.Linear(config.d_hidden, d_model, device=device, dtype=dtype)
         self.ff_internal = nn.ModuleList(nn.Linear(config.d_hidden, config.d_hidden, device=device, dtype=dtype)

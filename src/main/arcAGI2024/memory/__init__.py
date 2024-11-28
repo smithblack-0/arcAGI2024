@@ -1,2 +1,2 @@
 from .base import *
-from .attn_bank_memories import BankMemoryConfig
+from .linear_memory import LinearMemoryConfig
