@@ -4,6 +4,8 @@ import json
 import base64
 import pickle
 import io
+import tempfile
+import tarfile
 from typing import Union, List, Tuple, Dict, Any, Optional, Callable, Type
 from abc import ABC, abstractmethod
 from tokenizers import Tokenizer
@@ -279,6 +281,39 @@ class SavableConfig(ABC):
             cls._config_types[cls.__name__] = cls
         super().__init_subclass__(**kwargs)
 
+    ##
+    # Folder based save/load methods. Some features,
+    # like tokenizers, really would prefer to be saved
+    # directly into folders. We use temp
+    # folders for that.
+    ##
+    def _folder_save_predicate(self, item: Any)->bool:
+        """
+        Predicate that triggers to engage the save into folder logic.
+        By default returns false
+        :param item:
+        :return:
+        """
+        return False
+
+    def _save_into_temp_folder(self,
+                               item: Any,
+                               directory: os.PathLike):
+        """
+        This should dump the required save information into
+        the directory. Note you do not have to worry about
+        namespace collisions.
+        :param item: The item to save
+        :param directory: The directory under consideration
+        """
+
+    def _load_from_temp_folder(self)->Any:
+        """
+        Reconstructs the given item from the
+        :return:
+        """
+
+
     def _serialize_data(self, item: Any) -> Dict[str, Any]:
         """
         Serializes the data feature, and store it
@@ -294,7 +329,6 @@ class SavableConfig(ABC):
             serialized = tuple(self._serialize_data(case) for case in item)
             return {"type" : "tuple", "data" : serialized}
 
-        # Leaf processing. We actually process this immediately.
         if isinstance(item, SavableConfig):
             # Savable configs are recursively compiled, then returned.
             return item.serialize()
@@ -304,6 +338,7 @@ class SavableConfig(ABC):
                 torch.save(item, buffer)
                 buffer.seek(0)
                 layers_data = base64.b64encode(buffer.read()).decode('utf-8')
+
             return {"type": "layer", "data": layers_data}
 
         try:
@@ -312,7 +347,7 @@ class SavableConfig(ABC):
             return {"type": "simple", "data": item}
 
         except (TypeError, ValueError):
-            # Failure. Fallback to pickle\
+            # Failure. Fallback to pickle
             pickle_data = pickle.dumps(item)
             pickle_data = base64.b64encode(pickle_data).decode('utf-8')
             return {"type": "pickle", "data": pickle_data}
@@ -418,15 +453,18 @@ class SavableConfig(ABC):
 
     def save_to_file(self, file: str):
         """
-        Saves the serialized SavableConfig instance to a file.
+        Saves the serialized SavableConfig instance to a folder.
+        If needed, the folder will be created. Additional
+        files might be dumped into the folder as well.
         """
         # Ensure the directory exists
         dir_name = os.path.dirname(file)
         if dir_name and not os.path.exists(dir_name):
             os.makedirs(dir_name)
+
         # Serialize and save to file
         with open(file, 'w') as f:
-            serialized_state = self.serialize()
+            serialized_state = self.serialize(dir_name)
             json.dump(serialized_state, f)
 
     @classmethod

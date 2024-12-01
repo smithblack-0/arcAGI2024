@@ -1,8 +1,13 @@
-import torch
+from haystack.nodes import QuestionGenerator
 
-cross_entropy = torch.nn.CrossEntropyLoss()
+# Initialize the QuestionGenerator
+qg = QuestionGenerator(model_name_or_path="valhalla/t5-small-qg-prepend")
 
-inputs = torch.randn([3, 5])
-distribution_target = torch.softmax(torch.randn([3, 5]), dim=-1)
+# Provide input text
+context = """
+Wikipedia is a free online encyclopedia, created and edited by volunteers around the world and hosted by the Wikimedia Foundation.
+"""
 
-print(cross_entropy(inputs, targets))
+# Generate question-answer pairs
+output = qg.generate(context)
+print(output)
