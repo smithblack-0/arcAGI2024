@@ -27,7 +27,6 @@ from ..losses import MainLossInterface, MemAccessLossInterface
 from ..sampling import SamplingInterface
 from ..grad_utils import AbstractGradientControl
 
-
 @dataclass
 class CoreConfig:
     """
