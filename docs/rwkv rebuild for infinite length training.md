@@ -7,6 +7,10 @@
 - We discuss the format models must comply with in order to be "token reversable checkpointing"
   compatible, and the training infrastructure that should be used. This includes timestep 
   gradient accumulation and the forward/reverse pass.
+- We create a python training infrastructure to train such 
+  a model that can be distributed and used to elegantly train
+  these models
+- We discuss existing experimental results and issues.
 
 ## The concept of token reversible checkpointing of recurrent cells
 
