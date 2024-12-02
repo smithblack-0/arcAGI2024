@@ -557,4 +557,3 @@ class GradientSubstitutionEndpoint(torch.autograd.Function):
         # Substitute the gradient with the desired gradients.
         # Also, clearly indicate that desired grads is not
         # going to be differentiated further.
-        return desired_gradients, None

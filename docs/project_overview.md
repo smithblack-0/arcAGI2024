@@ -1,5 +1,4 @@
-# Attention Is Not All You Need: Developing a Recurrent Neural Network Exibiting Online Neuroplasticity through Shuffled Vocabulary Pretraining
-
+# Towards Developing a Recurrent Neural Network Exhibiting Online Neuroplasticity through Shuffled Vocabulary Pretraining
 
 ## Abstract
 
