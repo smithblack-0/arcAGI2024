@@ -1,38 +1,32 @@
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import torch
+import sympy as sp
 
-class SplitInverse(torch.autograd.Function):
-	@staticmethod
-	def forward(ctx, x_t, u_t, y):
-		ctx.save_for_backward(x_t, u_t, y)
-        high_inverse = (y-x_t*u_t)/()
+# Define symbolic variables
+a, b, c = sp.symbols('a b c')
 
+# Define the 3x3 matrix
+U = sp.Matrix([
+    [0, -a, -b],
+    [a, 0, -c],
+    [b, c, 0]
+])
 
-# Specify the model name; for example, 'RWKV/rwkv-4-169m-pile'
-model_name = 'RWKV/rwkv-4-169m-pile'
+# Normalize the matrix
+norm = sp.sqrt(b**2 + c**2)
+U_normalized = U / norm
 
-# Load the tokenizer
-tokenizer = AutoTokenizer.from_pretrained(model_name)
+# Compute U^T * U
+U_T_U = sp.simplify(U_normalized.T * U_normalized)
 
-# Load the pre-trained RWKV model
-model = AutoModelForCausalLM.from_pretrained(model_name)
-base_model = model.base_model
-block = base_model.blocks[0]
-attn = block.attention
-for name, tensor in attn.named_parameters():
-    print(name, tensor - 1)
+# Extract diagonal and off-diagonal entries
+diagonals = [U_T_U[i, i] for i in range(3)]
+off_diagonal_12 = U_T_U[0, 1]
 
+# Display results
+print("U^T * U:")
+sp.pprint(U_T_U)
 
-# Define your input prompt
-prompt = "In a shocking finding, scientists discovered a herd of dragons"
+print("\nDiagonal Entries:")
+sp.pprint(diagonals)
 
-# Encode the input prompt
-inputs = tokenizer(prompt, return_tensors='pt')
-
-# Generate text continuation
-outputs = model.generate(inputs['input_ids'], max_new_tokens=50)
-
-# Decode and print the generated text
-generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-print(generated_text)
-
+print("\nOff-Diagonal Entry (1,2):")
+sp.pprint(off_diagonal_12)
