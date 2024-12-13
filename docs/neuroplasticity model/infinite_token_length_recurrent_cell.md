@@ -23,7 +23,7 @@ We consider a simple, coupled update system for states $($s_1$)$ and $($s_2$)$:
 $[
 $begin{aligned}
 s_1' &= s_1 + F_1(s_2) $$
-s_2' &= s_2 + F_2(s_1') $$[6pt]
+s_2' &= s_2 + F_2(s_1') $$
 s_1'' &= s_1' + H_1(s_2') $cdot (1 - G_1(s_2')) $$
 s_2'' &= s_2' + H_2(s_1'') $cdot (1 - G_2(s_1''))
 $end{aligned}
