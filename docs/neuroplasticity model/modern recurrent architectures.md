@@ -389,11 +389,10 @@ In this section, we discuss:
 * Implementation of an EBRT training process, including pseudocode and 
   specialized PyTorch layers to simplify the integration of such mechanisms.
 
-### Formal Description and Analysis of the EBRT Training Process and 
-
-#### Formalization of EBRT Training
-
 ### Formalization of the EBRT Training Process
+
+
+#### Definitions
 
 The EBRT training process requires precise handling of forward and reverse 
 computations to enable memory-efficient training while maintaining gradient 
@@ -418,6 +417,8 @@ embedding \( x^{(\text{out})}_{t} \), along with the next random state
 \( \mathcal{R}_{t+1} \). The reverse computation reconstructs the preceding 
 hidden state \( s_t \) and the output embedding \( x^{(\text{out})}_{t} \), 
 ensuring proper gradient propagation for training.
+
+####
 
 
 
